@@ -18,7 +18,8 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:verify": "tsx scripts/verify-db.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",

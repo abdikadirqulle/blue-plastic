@@ -45,6 +45,11 @@ enforcement -- a psql session, a migration script or a future service will bypas
 | R9 | All lines of a journal belong to the journal's organisation | composite FK on `(orgId, accountId)` |
 | R10 | An account with posted lines cannot be deleted | `ON DELETE RESTRICT` + soft delete (`isActive`) only |
 
+A consequence worth stating plainly: because R4 and R10 hold all the way down, an
+**organisation with a posted ledger cannot be deleted either** — a cascade is
+refused by the immutability triggers. Erasing one is a deliberate out-of-band
+operation, never an application feature.
+
 R2 deserves a note. Enforcing balance with a normal `CHECK` is impossible (it spans
 rows) and enforcing it with an immediate trigger would make it impossible to insert
 lines one at a time. A **deferred constraint trigger** is exactly the right tool: it

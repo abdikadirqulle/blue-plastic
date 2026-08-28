@@ -1,6 +1,12 @@
 // Blue Plastic Center — accounting system
-// Phase 1: foundation and identity only. No accounting concepts live here yet;
-// they arrive in Phase 2 (see docs/03-database-design.md).
+//
+// Phase 1: organisation, identity, auditing, document numbering.
+// Phase 2: the ledger — chart of accounts, fiscal periods, journals and lines.
+//
+// The integrity rules that make this a real double-entry ledger (R1–R10 in
+// docs/02-accounting-design.md) are enforced by database triggers, which Prisma
+// cannot model. They live in prisma/sql/ and are applied by migrations;
+// `pnpm db:verify` asserts they are still present in the connected database.
 
 generator client {
   provider = "prisma-client-js"
@@ -67,6 +73,110 @@ enum DocumentType {
   INVENTORY_ADJUSTMENT
 }
 
+/// Statement classification. Determines which financial statement an account
+/// appears on and its normal balance.
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+/// Detail classification. Drives report grouping and app behaviour (a BANK
+/// account gets a register; an ACCOUNTS_RECEIVABLE account is a control account).
+enum AccountSubtype {
+  // ASSET
+  BANK
+  ACCOUNTS_RECEIVABLE
+  UNDEPOSITED_FUNDS
+  INVENTORY
+  OTHER_CURRENT_ASSET
+  FIXED_ASSET
+  ACCUMULATED_DEPRECIATION
+  OTHER_ASSET
+
+  // LIABILITY
+  ACCOUNTS_PAYABLE
+  CREDIT_CARD
+  SALES_TAX_PAYABLE
+  OTHER_CURRENT_LIABILITY
+  LONG_TERM_LIABILITY
+
+  // EQUITY
+  OWNERS_EQUITY
+  RETAINED_EARNINGS
+  OPENING_BALANCE_EQUITY
+  DRAWINGS
+
+  // REVENUE
+  INCOME
+  OTHER_INCOME
+  SALES_DISCOUNTS
+
+  // EXPENSE
+  COST_OF_GOODS_SOLD
+  OPERATING_EXPENSE
+  OTHER_EXPENSE
+  DEPRECIATION
+}
+
+/// Accounts the engine refers to by name. Seeded once per organisation, never
+/// deleted, never reassigned. Their code and display name remain editable — an
+/// accountant may prefer "Trade Debtors" to "Accounts Receivable".
+enum SystemAccountKey {
+  ACCOUNTS_RECEIVABLE
+  ACCOUNTS_PAYABLE
+  UNDEPOSITED_FUNDS
+  INVENTORY_ASSET
+  COGS
+  SALES_TAX_PAYABLE
+  RETAINED_EARNINGS
+  OPENING_BALANCE_EQUITY
+  EXCHANGE_GAIN_LOSS
+  ROUNDING_DIFFERENCE
+  INVENTORY_SHRINKAGE
+  UNCATEGORISED_INCOME
+  UNCATEGORISED_EXPENSE
+}
+
+enum PeriodStatus {
+  /// Postings allowed.
+  OPEN
+  /// Soft close. Postings rejected; a user with `period:reopen` can reopen it.
+  CLOSED
+  /// Hard close, after the year-end closing entry.
+  LOCKED
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  REVERSED
+}
+
+/// What kind of business transaction produced this journal. Values beyond the
+/// first four belong to later phases and are declared now so the enum is not
+/// migrated on every subsequent phase.
+enum JournalSourceType {
+  MANUAL
+  OPENING_BALANCE
+  CLOSING_ENTRY
+  REVERSAL
+  INVOICE
+  SALES_RECEIPT
+  CUSTOMER_PAYMENT
+  CREDIT_MEMO
+  REFUND_RECEIPT
+  BILL
+  BILL_PAYMENT
+  EXPENSE
+  VENDOR_CREDIT
+  TRANSFER
+  DEPOSIT
+  INVENTORY_ADJUSTMENT
+}
+
 // ---------------------------------------------------------------------------
 // Tenancy
 // ---------------------------------------------------------------------------
@@ -102,9 +212,13 @@ model Organization {
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
-  memberships Membership[]
-  auditLogs   AuditLog[]
-  sequences   DocumentSequence[]
+  memberships    Membership[]
+  auditLogs      AuditLog[]
+  sequences      DocumentSequence[]
+  ledgerAccounts LedgerAccount[]
+  fiscalYears    FiscalYear[]
+  periods        AccountingPeriod[]
+  journals       Journal[]
 
   @@map("organizations")
 }
@@ -257,4 +371,234 @@ model DocumentSequence {
 
   @@unique([orgId, docType])
   @@map("document_sequences")
+}
+
+// ---------------------------------------------------------------------------
+// The ledger  (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Chart of accounts.
+///
+/// Named `LedgerAccount` rather than `Account` because NextAuth's adapter already
+/// owns that table name, and renaming the adapter's table to free it up would
+/// break a convention for no gain.
+model LedgerAccount {
+  id    String @id @default(cuid())
+  orgId String
+
+  /// Account number. Unique per organisation; sorts the chart.
+  code        String
+  name        String
+  description String?
+
+  type    AccountType
+  subtype AccountSubtype
+
+  /// Report grouping only. A parent never carries postings of its own.
+  parentId String?
+
+  /// Set for the handful of accounts the engine refers to by name.
+  systemKey SystemAccountKey?
+
+  /// System accounts cannot be deleted or repurposed. Ordinary accounts can be
+  /// archived but never deleted once they carry a posted line.
+  isSystem Boolean @default(false)
+  isActive Boolean @default(true)
+
+  /// Set on BANK and CREDIT_CARD accounts held in a currency other than the
+  /// organisation's base. Unused until multi-currency lands (ADR-0006).
+  currencyCode String? @db.Char(3)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  parent       LedgerAccount?  @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children     LedgerAccount[] @relation("AccountHierarchy")
+  journalLines JournalLine[]
+
+  @@unique([orgId, code])
+  @@unique([orgId, systemKey])
+  /// Target for the composite foreign key on journal_lines that makes a
+  /// cross-organisation line structurally impossible (R9).
+  @@unique([id, orgId])
+  @@index([orgId, type, code])
+  @@index([orgId, parentId])
+  @@index([orgId, isActive])
+  @@map("ledger_accounts")
+}
+
+model FiscalYear {
+  id    String @id @default(cuid())
+  orgId String
+
+  /// The calendar year the fiscal year *begins* in. A year starting in April 2026
+  /// and ending in March 2027 is fiscal year 2026.
+  year      Int
+  startDate DateTime     @db.Date
+  endDate   DateTime     @db.Date
+  status    PeriodStatus @default(OPEN)
+
+  closedAt         DateTime? @db.Timestamptz(6)
+  closingJournalId String?   @unique
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  periods      AccountingPeriod[]
+
+  @@unique([orgId, year])
+  @@index([orgId, startDate])
+  @@map("fiscal_years")
+}
+
+/// Twelve monthly periods per fiscal year, plus period 0 — a zero-length period
+/// dated the day before the year begins, which is where opening balances land so
+/// they never fall inside a reportable trading month.
+model AccountingPeriod {
+  id           String @id @default(cuid())
+  orgId        String
+  fiscalYearId String
+
+  periodNumber Int          @db.SmallInt
+  startDate    DateTime     @db.Date
+  endDate      DateTime     @db.Date
+  status       PeriodStatus @default(OPEN)
+
+  closedAt   DateTime? @db.Timestamptz(6)
+  closedById String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  fiscalYear   FiscalYear   @relation(fields: [fiscalYearId], references: [id], onDelete: Cascade)
+  journals     Journal[]
+
+  @@unique([fiscalYearId, periodNumber])
+  /// Every posting resolves its period by date, so this is the hottest index on
+  /// the write path.
+  @@index([orgId, startDate, endDate])
+  @@map("accounting_periods")
+}
+
+/// A balanced set of entries. Immutable once posted (R4) — corrections are
+/// reversals, enforced by trigger rather than by convention.
+model Journal {
+  id    String @id @default(cuid())
+  orgId String
+
+  journalNumber String
+  /// Calendar date, not an instant: a 31 January entry belongs to January for
+  /// every reader in every timezone.
+  date          DateTime @db.Date
+  periodId      String
+
+  memo String?
+
+  sourceType JournalSourceType
+  /// The document that produced this journal, if any. Null for manual entries.
+  sourceId   String?
+
+  status         JournalStatus @default(POSTED)
+  isAdjusting    Boolean       @default(false)
+  isClosingEntry Boolean       @default(false)
+
+  /// Set on a reversing journal, pointing at what it reverses. Unique, because a
+  /// journal may be reversed exactly once — the back-relation `reversedBy` reads
+  /// it from the other side.
+  reversalOfId   String? @unique
+  reversalReason String?
+
+  /// Always the organisation's base currency and 1 until multi-currency lands.
+  /// Written from the start so no backfill is ever needed (ADR-0006).
+  currencyCode String  @db.Char(3)
+  exchangeRate Decimal @default(1) @db.Decimal(19, 9)
+
+  /// Prevents a retried request from posting the same journal twice.
+  idempotencyKey String?
+
+  postedAt    DateTime @default(now()) @db.Timestamptz(6)
+  createdById String?
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  period       AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
+  lines        JournalLine[]
+
+  reversalOf Journal? @relation("JournalReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedBy Journal? @relation("JournalReversal")
+
+
+  @@unique([orgId, journalNumber])
+  @@unique([orgId, idempotencyKey])
+  /// Target for the composite foreign key on journal_lines (R9).
+  @@unique([id, orgId])
+  @@index([orgId, date(sort: Desc)])
+  @@index([orgId, sourceType, sourceId])
+  @@index([orgId, status])
+  @@index([periodId])
+  @@map("journals")
+}
+
+/// One side of one entry. A line is a debit or a credit, never both (R1).
+model JournalLine {
+  id        String @id @default(cuid())
+  journalId String
+  orgId     String
+
+  lineNumber Int @db.SmallInt
+
+  accountId String
+
+  debit  Decimal @default(0) @db.Decimal(19, 4)
+  credit Decimal @default(0) @db.Decimal(19, 4)
+
+  description String?
+
+  /// Denormalised from the journal, set authoritatively by a trigger. Redundant
+  /// and worth it: every ledger and report query filters lines by date, and
+  /// without it each one pays a join to the header.
+  journalDate DateTime @db.Date
+
+  /// Subledger dimensions. A line hitting the AR or AP control account must carry
+  /// its counterparty (R7) — that is what makes the aging report and the control
+  /// account balance two queries over the same rows rather than two numbers that
+  /// have to be reconciled.
+  ///
+  /// The customer and vendor tables arrive in Phase 3; the foreign keys are added
+  /// with them. The columns exist now so the rule is enforced from the ledger's
+  /// first row.
+  customerId String?
+  vendorId   String?
+
+  /// Foreign-currency amounts, unused until multi-currency lands (ADR-0006).
+  foreignDebit  Decimal? @db.Decimal(19, 4)
+  foreignCredit Decimal? @db.Decimal(19, 4)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  journal Journal       @relation(fields: [journalId], references: [id], onDelete: Cascade)
+  account LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  /// R9 is enforced by *additional* composite foreign keys on
+  /// (journalId, orgId) and (accountId, orgId), created in raw SQL by
+  /// prisma/sql/ledger-integrity.sql.
+  ///
+  /// They are not modelled as Prisma relations on purpose: Prisma would then own
+  /// `orgId` as a relation scalar shared by two relations and refuse to let a
+  /// nested create set it. The guarantee belongs in the database either way, and
+  /// this keeps the client API usable. The `@@unique([id, orgId])` indexes on
+  /// Journal and LedgerAccount exist to be their targets.
+
+  @@unique([journalId, lineNumber])
+  /// The index the general ledger, trial balance and every report leans on.
+  @@index([orgId, accountId, journalDate, id])
+  @@index([journalId])
+  @@index([orgId, customerId])
+  @@index([orgId, vendorId])
+  @@map("journal_lines")
 }

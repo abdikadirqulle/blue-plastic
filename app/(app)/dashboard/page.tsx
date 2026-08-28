@@ -7,7 +7,9 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { MONTHS } from '@/lib/constants'
-import { today } from '@/lib/date'
+import { fiscalYearOf, fiscalYearRange, today } from '@/lib/date'
+import { formatMoney } from '@/lib/money'
+import { trialBalance } from '@/server/accounting/balances'
 import { requireOrgContext } from '@/server/auth/context'
 import { ROLE_LABELS } from '@/lib/roles'
 import { db } from '@/server/db'
@@ -17,7 +19,12 @@ export const metadata: Metadata = { title: 'Dashboard' }
 export default async function DashboardPage() {
   const ctx = await requireOrgContext()
 
-  const [memberCount, recentActivity] = await Promise.all([
+  const year = fiscalYearRange(
+    fiscalYearOf(today(ctx.organization.timeZone), ctx.organization.fiscalYearStartMonth),
+    ctx.organization.fiscalYearStartMonth,
+  )
+
+  const [memberCount, recentActivity, accountCount, journalCount, ledger] = await Promise.all([
     db.membership.count({ where: { orgId: ctx.orgId, status: 'ACTIVE' } }),
     db.auditLog.findMany({
       where: { orgId: ctx.orgId },
@@ -31,6 +38,9 @@ export default async function DashboardPage() {
       orderBy: { at: 'desc' },
       take: 5,
     }),
+    db.ledgerAccount.count({ where: { orgId: ctx.orgId, isActive: true } }),
+    db.journal.count({ where: { orgId: ctx.orgId } }),
+    trialBalance(ctx.orgId, { from: year.start, to: year.end }),
   ])
 
   return (
@@ -41,29 +51,40 @@ export default async function DashboardPage() {
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard label="Accounts" value={String(accountCount)} icon={BookOpenIcon} />
+        <StatCard label="Journal entries" value={String(journalCount)} icon={ScaleIcon} />
         <StatCard label="Your role" value={ROLE_LABELS[ctx.role]} icon={ShieldCheckIcon} />
         <StatCard label="Active members" value={String(memberCount)} icon={UsersIcon} />
-        <StatCard label="Base currency" value={ctx.organization.baseCurrency} icon={ScaleIcon} />
-        <StatCard label="Today" value={today(ctx.organization.timeZone)} icon={BookOpenIcon} />
       </div>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="text-base">The ledger opens in phase 2</CardTitle>
+            <CardTitle className="text-base">
+              {ledger.balanced ? 'The ledger is in balance' : 'The ledger is out of balance'}
+            </CardTitle>
             <CardDescription>
-              Phase 1 delivered the foundation: organisation, people, permissions, auditing and document
-              numbering. The chart of accounts, journals and financial statements are next.
+              Debits {formatMoney(ledger.totalDebit, ctx.organization.baseCurrency)} · credits{' '}
+              {formatMoney(ledger.totalCredit, ctx.organization.baseCurrency)} for the fiscal year to date.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-muted-foreground">
-              Nothing has been posted yet, and nothing can be — the posting engine does not exist. That is
-              deliberate: the ledger is built once, with the integrity rules in place from its first row.
+              {ledger.balanced
+                ? 'Every posted entry balances, and the database will refuse any that does not. Sales, purchases and banking documents arrive in later phases; until then, entries are made by hand.'
+                : 'This should be impossible. Check the trial balance before relying on any other figure.'}
             </p>
-            <Link href="/settings/organization" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-              Review organisation settings <ArrowRightIcon />
-            </Link>
+            <div className="flex flex-wrap gap-2">
+              <Link
+                href="/reports/trial-balance"
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+              >
+                Trial balance <ArrowRightIcon />
+              </Link>
+              <Link href="/accounts" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                Chart of accounts <ArrowRightIcon />
+              </Link>
+            </div>
           </CardContent>
         </Card>
 
