@@ -75,9 +75,12 @@ a senior one lacks.
 - No multi-currency behaviour. The schema is currency-aware (ADR-0006); the app is
   single-currency.
 
-## Verified by hand
+## Verification
 
-Against the live database, with the dev server running:
+`pnpm verify` — lint clean, typecheck clean, 46 tests passing. `pnpm build` clean;
+every data-dependent route renders per request.
+
+### Signed out, against the live database
 
 | Route | Result |
 | --- | --- |
@@ -85,4 +88,30 @@ Against the live database, with the dev server running:
 | `/sign-in` | 307 → `/setup` |
 | `/setup` | 200, renders the first-run form |
 | `/dashboard` | 307 → `/sign-in?callbackUrl=…` |
-| `/api/audit-logs` | 401 `{"error":{"code":"UNAUTHENTICATED",…}}` |
+| `/api/audit-logs` | 401 `{"error":{"code":"UNAUTHENTICATED",…}}` — JSON, not an HTML redirect |
+
+### Signed in
+
+A temporary organisation and owner were created, every authenticated surface was
+rendered with a real session, and the organisation was then deleted — the database
+was confirmed empty afterwards (all counts zero).
+
+| Check | Result |
+| --- | --- |
+| `POST /api/auth/callback/credentials` | 302 → `/dashboard`; session carries `orgId`, `role`, `membershipVersion` |
+| `/dashboard`, `/settings/organization`, `/settings/users`, `/settings/profile`, `/settings/activity` | 200, correct organisation and user rendered |
+| `GET /api/audit-logs` with session | 200, returns the `LOGIN` and `Organization CREATE` rows |
+| `organizationService.update` | persisted, and wrote exactly one audit row attributed to the actor |
+| `updateAccountingSettings` | currency and fiscal year changed while no journal exists |
+| Owner guards | demoting or removing the owner rejected |
+| Invite → promote → suspend → remove | `Membership.version` incremented 1 → 2 → 3, invalidating issued JWTs |
+
+### Bugs found and fixed during verification
+
+| Bug | Fix |
+| --- | --- |
+| Raw SQL in `nextDocumentNumber` assumed snake_case columns; Prisma only maps *tables* | Quote the camelCase column names; convention now documented in `03-database-design.md` |
+| Prisma's 5s default transaction timeout is too short for a remote database — first-run setup failed partway | `transactionOptions: { maxWait: 10s, timeout: 30s }` on the client, matched in the seed |
+| `/`, `/setup` and `/sign-in` were prerendered as static, freezing the setup redirect at build time | `export const dynamic = 'force-dynamic'` on all three |
+| `/api/*` redirected unauthenticated callers to an HTML sign-in page | `proxy.ts` passes `/api/*` through; handlers return a JSON 401 envelope |
+| A component imported role labels from `server/` | Labels moved to `lib/roles.ts`; the ESLint layering rule now has no exceptions |
