@@ -7,7 +7,6 @@ import { authConfig } from '@/auth.config'
 import { db } from '@/server/db'
 import { fakeVerify, verifyPassword } from '@/server/auth/password'
 import { recordEvent } from '@/server/audit'
-import { env } from '@/lib/env'
 
 const credentialsSchema = z.object({
   email: z.string().email(),
@@ -17,7 +16,9 @@ const credentialsSchema = z.object({
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   adapter: PrismaAdapter(db),
-  secret: env.AUTH_SECRET,
+  // The secret is read from AUTH_SECRET by Auth.js itself. Passing it here would
+  // resolve `env` while this module is evaluated, which happens during
+  // `next build` — see the note in lib/env.ts.
   providers: [
     Credentials({
       credentials: { email: {}, password: {} },

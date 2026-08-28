@@ -28,15 +28,29 @@ function createClient() {
 }
 
 /**
- * A single client per process. Next.js dev mode re-evaluates modules on every
- * change, which without this would open a new pool per edit until Postgres
- * refuses the connections.
+ * One client per process, created on first query rather than on import.
+ *
+ * Deferring construction matters twice over: `next build` evaluates every page
+ * module while collecting page data and must not need a database URL to do it,
+ * and a serverless cold start should not pay for a connection pool the request
+ * may never use.
+ *
+ * The dev-mode global is what stops Next.js's module re-evaluation from opening a
+ * new pool on every file save until Postgres refuses the connections.
  */
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient }
 
-export const db = globalForPrisma.prisma ?? createClient()
+const getClient = (): PrismaClient => (globalForPrisma.prisma ??= createClient())
 
-if (env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+export const db: PrismaClient = new Proxy({} as PrismaClient, {
+  get(_target, property) {
+    const client = getClient()
+    const value = Reflect.get(client, property, client)
+    // Model delegates (`db.user`) are objects; top-level methods (`db.$transaction`)
+    // are functions and lose their receiver unless bound.
+    return typeof value === 'function' ? value.bind(client) : value
+  },
+})
 
 /** The client type inside `db.$transaction(async (tx) => …)`. */
 export type Tx = Omit<

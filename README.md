@@ -40,6 +40,21 @@ organisation exists.
 Integration tests run every case inside a transaction that is deliberately rolled
 back, so they leave nothing behind in the database they run against.
 
+## Deploying (Vercel)
+
+Set three environment variables on the project — they are needed at **runtime**;
+the build deliberately requires none of them ([ADR-0009](./docs/decisions/0009-build-must-not-need-secrets.md)):
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | pooled connection string |
+| `DIRECT_URL` | direct (non-pooled) connection — migrations only |
+| `AUTH_SECRET` | `openssl rand -base64 32` |
+
+`pnpm build` runs `prisma generate` first, so a cached `node_modules` can never
+leave the deployment with an ungenerated Prisma client. Migrations are applied
+separately with `pnpm db:deploy` — the build never mutates the database.
+
 ## Layout
 
 No `src/`. `app/` (routes), `components/`, `lib/` (isomorphic), `server/` (all
