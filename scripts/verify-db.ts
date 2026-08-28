@@ -94,6 +94,24 @@ const EXPECTED_TRIGGERS: { name: string; table: string; rule: string; protects: 
     rule: '—',
     protects: 'a posted document\'s totals agree with its own lines',
   },
+  {
+    name: 'trg_purchase_application_target',
+    table: 'purchase_applications',
+    rule: '—',
+    protects: 'only an open bill can be settled, and never beyond its total',
+  },
+  {
+    name: 'trg_purchase_application_source',
+    table: 'purchase_applications',
+    rule: '—',
+    protects: 'a payment or vendor credit cannot be applied beyond its own value',
+  },
+  {
+    name: 'trg_purchase_totals',
+    table: 'purchase_documents',
+    rule: '—',
+    protects: 'a posted bill\'s totals agree with its own lines',
+  },
 ]
 
 const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protects: string }[] = [
@@ -139,6 +157,36 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
     rule: '—',
     protects: 'a payment is a positive amount',
   },
+  {
+    name: 'purchase_applications_one_source',
+    table: 'purchase_applications',
+    rule: '—',
+    protects: 'an application comes from a payment or a vendor credit, never both or neither',
+  },
+  {
+    name: 'purchase_applications_positive',
+    table: 'purchase_applications',
+    rule: '—',
+    protects: 'an application settles a positive amount',
+  },
+  {
+    name: 'purchase_documents_non_negative',
+    table: 'purchase_documents',
+    rule: '—',
+    protects: 'a bill total is never negative — that would be a vendor credit',
+  },
+  {
+    name: 'purchase_documents_payment_required',
+    table: 'purchase_documents',
+    rule: '—',
+    protects: 'an expense says which account it was paid from',
+  },
+  {
+    name: 'bill_payments_positive',
+    table: 'bill_payments',
+    rule: '—',
+    protects: 'a bill payment is a positive amount',
+  },
 ]
 
 const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] = [
@@ -171,6 +219,16 @@ const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] 
     name: 'sales_applications_invoice_org_fkey',
     rule: 'R9',
     protects: 'an application cannot settle another organisation\'s invoice',
+  },
+  {
+    name: 'purchase_lines_document_org_fkey',
+    rule: 'R9',
+    protects: 'a bill line cannot cross organisations',
+  },
+  {
+    name: 'purchase_applications_bill_org_fkey',
+    rule: 'R9',
+    protects: 'an application cannot settle another organisation\'s bill',
   },
 ]
 

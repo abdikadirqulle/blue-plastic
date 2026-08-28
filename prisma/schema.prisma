@@ -4,6 +4,7 @@
 // Phase 2: the ledger — chart of accounts, fiscal periods, journals and lines.
 // Phase 3: master data — customers, vendors, items, tax and payment terms.
 // Phase 4: sales — invoices, estimates, receipts, credit memos, payments.
+// Phase 5: purchases — bills, expenses, vendor credits, purchase orders.
 //
 // The integrity rules that make this a real double-entry ledger (R1–R10 in
 // docs/02-accounting-design.md) are enforced by database triggers, which Prisma
@@ -209,6 +210,29 @@ enum SalesDocumentStatus {
   CLOSED
 }
 
+/// The purchase side mirrors the sales side. A bill is an invoice pointing the
+/// other way; a vendor credit is a credit memo; an expense is a sales receipt.
+/// Keeping the shapes parallel keeps the two subledgers behaving identically,
+/// which is what an accountant expects of them.
+enum PurchaseDocumentType {
+  BILL
+  /// Bought and paid at once. Never becomes a payable.
+  EXPENSE
+  VENDOR_CREDIT
+  /// An order placed. Nothing has happened yet, so nothing is posted.
+  PURCHASE_ORDER
+}
+
+enum PurchaseDocumentStatus {
+  DRAFT
+  OPEN
+  PARTIAL
+  PAID
+  VOID
+  /// A purchase order that became a bill, or a credit fully applied.
+  CLOSED
+}
+
 enum PaymentMethod {
   CASH
   BANK_TRANSFER
@@ -299,8 +323,10 @@ model Organization {
   journals       Journal[]
   customers      Customer[]
   vendors        Vendor[]
-  salesDocuments SalesDocument[]
-  customerPayments CustomerPayment[]
+  salesDocuments     SalesDocument[]
+  customerPayments   CustomerPayment[]
+  purchaseDocuments  PurchaseDocument[]
+  billPayments       BillPayment[]
   items          Item[]
   itemCategories ItemCategory[]
   paymentTerms   PaymentTerm[]
@@ -514,9 +540,12 @@ model LedgerAccount {
   itemsCogs         Item[]    @relation("ItemCogs")
   taxRatesSales     TaxRate[] @relation("TaxRateSales")
   taxRatesPurchase  TaxRate[] @relation("TaxRatePurchase")
-  salesLines        SalesDocumentLine[] @relation("SalesLineIncome")
-  salesDeposits     SalesDocument[]     @relation("SalesDepositAccount")
-  paymentDeposits   CustomerPayment[]   @relation("PaymentDepositAccount")
+  salesLines        SalesDocumentLine[]    @relation("SalesLineIncome")
+  salesDeposits     SalesDocument[]        @relation("SalesDepositAccount")
+  paymentDeposits   CustomerPayment[]      @relation("PaymentDepositAccount")
+  purchaseLines     PurchaseDocumentLine[] @relation("PurchaseLineExpense")
+  purchasePayments  PurchaseDocument[]     @relation("PurchasePaymentAccount")
+  billPaymentSource BillPayment[]          @relation("BillPaymentAccount")
 
   @@unique([orgId, code])
   @@unique([orgId, systemKey])
@@ -629,8 +658,10 @@ model Journal {
   organization Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
   period       AccountingPeriod @relation(fields: [periodId], references: [id], onDelete: Restrict)
   lines        JournalLine[]
-  salesDocuments   SalesDocument[]
-  customerPayments CustomerPayment[]
+  salesDocuments    SalesDocument[]
+  customerPayments  CustomerPayment[]
+  purchaseDocuments PurchaseDocument[]
+  billPayments      BillPayment[]
 
   reversalOf Journal? @relation("JournalReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
   reversedBy Journal? @relation("JournalReversal")
@@ -736,9 +767,10 @@ model PaymentTerm {
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
   organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  customers    Customer[]
-  vendors      Vendor[]
-  documents    SalesDocument[]
+  customers         Customer[]
+  vendors           Vendor[]
+  documents         SalesDocument[]
+  purchaseDocuments PurchaseDocument[]
 
   @@unique([orgId, name])
   @@index([orgId, isActive])
@@ -837,6 +869,8 @@ model Vendor {
   paymentTerm           PaymentTerm?   @relation(fields: [paymentTermId], references: [id], onDelete: SetNull)
   defaultExpenseAccount LedgerAccount? @relation("VendorDefaultExpense", fields: [defaultExpenseAccountId], references: [id], onDelete: SetNull)
   journalLines          JournalLine[]
+  documents             PurchaseDocument[]
+  payments              BillPayment[]
 
   @@unique([orgId, displayName])
   /// Target for the tenancy-carrying composite foreign key on journal_lines (R9).
@@ -916,6 +950,7 @@ model Item {
   salesTaxCode     TaxCode?       @relation("ItemSalesTax", fields: [salesTaxCodeId], references: [id], onDelete: SetNull)
   purchaseTaxCode  TaxCode?       @relation("ItemPurchaseTax", fields: [purchaseTaxCodeId], references: [id], onDelete: SetNull)
   salesLines       SalesDocumentLine[]
+  purchaseLines    PurchaseDocumentLine[]
 
   @@unique([orgId, name])
   @@unique([orgId, sku])
@@ -1006,6 +1041,7 @@ model TaxCode {
   salesItems    Item[]        @relation("ItemSalesTax")
   purchaseItems Item[]        @relation("ItemPurchaseTax")
   salesLines    SalesDocumentLine[]
+  purchaseLines PurchaseDocumentLine[]
 
   @@unique([orgId, name])
   @@index([orgId, isActive])
@@ -1233,4 +1269,180 @@ model SalesApplication {
   @@unique([creditDocumentId, invoiceId])
   @@index([orgId, invoiceId])
   @@map("sales_applications")
+}
+
+// ---------------------------------------------------------------------------
+// Purchases  (Phase 5)
+// ---------------------------------------------------------------------------
+
+/// Bills, expenses, vendor credits and purchase orders.
+///
+/// Deliberately the mirror of `SalesDocument`, field for field where the meaning
+/// is the same. Two subledgers that behave differently is a source of bugs and of
+/// arguments; two that behave identically is one thing to learn.
+model PurchaseDocument {
+  id    String @id @default(cuid())
+  orgId String
+
+  type   PurchaseDocumentType
+  number String
+
+  vendorId String
+  date     DateTime  @db.Date
+  dueDate  DateTime? @db.Date
+  /// Copied from the vendor at creation, so changing a term later never restates
+  /// the due date of a bill already entered.
+  paymentTermId String?
+  expiryDate    DateTime? @db.Date
+
+  status PurchaseDocumentStatus @default(DRAFT)
+
+  /// The vendor's own document number — what to quote when querying it.
+  reference String?
+  memo      String?
+
+  subtotal Decimal @default(0) @db.Decimal(19, 4)
+  taxTotal Decimal @default(0) @db.Decimal(19, 4)
+  total    Decimal @default(0) @db.Decimal(19, 4)
+
+  currencyCode String  @db.Char(3)
+  exchangeRate Decimal @default(1) @db.Decimal(19, 9)
+
+  /// Where the money came from. Required for EXPENSE, unused otherwise.
+  paymentAccountId String?
+
+  journalId String?
+  version   Int    @default(1)
+
+  /// Set on the bill a purchase order became.
+  convertedFromId String? @unique
+
+  voidedAt   DateTime? @db.Timestamptz(6)
+  voidReason String?
+
+  createdById String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  organization   Organization           @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  vendor         Vendor                 @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  paymentTerm    PaymentTerm?           @relation(fields: [paymentTermId], references: [id], onDelete: SetNull)
+  paymentAccount LedgerAccount?         @relation("PurchasePaymentAccount", fields: [paymentAccountId], references: [id], onDelete: Restrict)
+  journal        Journal?               @relation(fields: [journalId], references: [id], onDelete: Restrict)
+  lines          PurchaseDocumentLine[]
+
+  convertedFrom PurchaseDocument? @relation("OrderConversion", fields: [convertedFromId], references: [id], onDelete: SetNull)
+  convertedTo   PurchaseDocument? @relation("OrderConversion")
+
+  applications   PurchaseApplication[] @relation("AppliedToBill")
+  creditsApplied PurchaseApplication[] @relation("AppliedFromVendorCredit")
+
+  @@unique([orgId, type, number])
+  @@unique([id, orgId])
+  @@index([orgId, type, status, date(sort: Desc)])
+  @@index([orgId, vendorId, date(sort: Desc)])
+  @@index([orgId, dueDate])
+  @@map("purchase_documents")
+}
+
+model PurchaseDocumentLine {
+  id         String @id @default(cuid())
+  documentId String
+  orgId      String
+
+  lineNumber Int @db.SmallInt
+
+  itemId      String?
+  description String?
+
+  quantity  Decimal @default(1) @db.Decimal(19, 4)
+  unitPrice Decimal @default(0) @db.Decimal(19, 4)
+
+  discountPercent Decimal? @db.Decimal(9, 4)
+
+  amount Decimal @default(0) @db.Decimal(19, 4)
+
+  taxCodeId String?
+  taxAmount Decimal @default(0) @db.Decimal(19, 4)
+
+  /// Where the cost lands: an expense account, or an asset account for something
+  /// capitalised. Resolved at posting time and frozen, so re-reading the bill
+  /// years later shows where the money actually went.
+  expenseAccountId String?
+
+  document        PurchaseDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  item            Item?            @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  taxCode         TaxCode?         @relation(fields: [taxCodeId], references: [id], onDelete: Restrict)
+  expenseAccount  LedgerAccount?   @relation("PurchaseLineExpense", fields: [expenseAccountId], references: [id], onDelete: Restrict)
+
+  @@unique([documentId, lineNumber])
+  @@index([orgId, itemId])
+  @@map("purchase_document_lines")
+}
+
+/// Money paid to a vendor. The mirror of `CustomerPayment`.
+model BillPayment {
+  id    String @id @default(cuid())
+  orgId String
+
+  number   String
+  vendorId String
+  date     DateTime @db.Date
+
+  amount Decimal @db.Decimal(19, 4)
+
+  method    PaymentMethod @default(BANK_TRANSFER)
+  reference String?
+  memo      String?
+
+  /// Bank or credit card the money left from.
+  paymentAccountId String
+
+  currencyCode String  @db.Char(3)
+  exchangeRate Decimal @default(1) @db.Decimal(19, 9)
+
+  journalId String?
+  status    PurchaseDocumentStatus @default(OPEN)
+
+  voidedAt   DateTime? @db.Timestamptz(6)
+  voidReason String?
+
+  createdById String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  organization   Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  vendor         Vendor                @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  paymentAccount LedgerAccount         @relation("BillPaymentAccount", fields: [paymentAccountId], references: [id], onDelete: Restrict)
+  journal        Journal?              @relation(fields: [journalId], references: [id], onDelete: Restrict)
+  applications   PurchaseApplication[]
+
+  @@unique([orgId, number])
+  @@unique([id, orgId])
+  @@index([orgId, vendorId, date(sort: Desc)])
+  @@index([orgId, status])
+  @@map("bill_payments")
+}
+
+/// What settled which bill. Exactly one source: a payment, or a vendor credit.
+model PurchaseApplication {
+  id    String @id @default(cuid())
+  orgId String
+
+  paymentId        String?
+  creditDocumentId String?
+
+  billId String
+  amount Decimal @db.Decimal(19, 4)
+
+  appliedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  payment        BillPayment?      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  creditDocument PurchaseDocument? @relation("AppliedFromVendorCredit", fields: [creditDocumentId], references: [id], onDelete: Cascade)
+  bill           PurchaseDocument  @relation("AppliedToBill", fields: [billId], references: [id], onDelete: Restrict)
+
+  @@unique([paymentId, billId])
+  @@unique([creditDocumentId, billId])
+  @@index([orgId, billId])
+  @@map("purchase_applications")
 }

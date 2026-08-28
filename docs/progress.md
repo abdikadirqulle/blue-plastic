@@ -6,7 +6,7 @@
 | 2 — Accounting Core | ✅ Complete | 2026-08-28 · [detail](./phases/phase-02-accounting-core.md) · migrations `ledger_core`, `ledger_tenant_fks` · 10 integrity objects live · 88 tests |
 | 3 — Master Data & Tax | ✅ Complete | 2026-08-29 · [detail](./phases/phase-03-master-data.md) · migrations `master_data` ×2 · 15 integrity objects · 137 tests |
 | 4 — Sales / AR | ✅ Complete | 2026-08-29 · [detail](./phases/phase-04-sales.md) · migration `sales` · 25 integrity objects · 173 tests |
-| 5 — Purchases / AP | ⚪ Not started | |
+| 5 — Purchases / AP | ✅ Complete | 2026-08-29 · [detail](./phases/phase-05-purchases.md) · migration `purchases` · 35 integrity objects · 196 tests |
 | 6 — Banking & Cash | ⚪ Not started | |
 | 7 — Inventory | ⚪ Not started | |
 | 8 — Reporting | ⚪ Not started | |

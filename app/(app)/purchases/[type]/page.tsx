@@ -1,0 +1,176 @@
+import type { Metadata } from 'next'
+import Link from 'next/link'
+import { notFound } from 'next/navigation'
+import { ReceiptIcon, PlusIcon } from 'lucide-react'
+
+import { EmptyState } from '@/components/data/empty-state'
+import { PageHeader } from '@/components/data/page-header'
+import { Pagination } from '@/components/data/pagination'
+import { SearchInput } from '@/components/data/search-input'
+import { Badge } from '@/components/ui/badge'
+import { buttonVariants } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { formatMoney } from '@/lib/money'
+import { purchaseBySlug } from '@/lib/purchase-types'
+import { STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
+import { cn } from '@/lib/utils'
+import { parseListQuery } from '@/lib/validation/common'
+import { requireOrgContext } from '@/server/auth/context'
+import * as purchaseService from '@/server/services/purchase.service'
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ type: string }>
+}): Promise<Metadata> {
+  return { title: purchaseBySlug((await params).type)?.plural ?? 'Purchases' }
+}
+
+const FILTERS = [
+  { value: '', label: 'All' },
+  { value: 'open', label: 'Unpaid' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'draft', label: 'Drafts' },
+]
+
+export default async function PurchaseListPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ type: string }>
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
+  const config = purchaseBySlug((await params).type)
+  if (!config) notFound()
+
+  const ctx = await requireOrgContext('bill:read')
+  const search = await searchParams
+  const query = parseListQuery(search)
+  const status = typeof search.status === 'string' ? search.status : undefined
+
+  const page = await purchaseService.list(ctx, config.type, query, { status })
+  const currency = ctx.organization.baseCurrency
+  const now = today(ctx.organization.timeZone)
+
+  const newButton = ctx.permissions.has('bill:create') ? (
+    <Link href={`/purchases/${config.slug}/new`} className={buttonVariants({ size: 'sm' })}>
+      <PlusIcon /> New {config.singular.toLowerCase()}
+    </Link>
+  ) : undefined
+
+  return (
+    <>
+      <PageHeader title={config.plural} description={config.effect} actions={newButton} />
+
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <SearchInput placeholder="Search number, reference or vendor" />
+        {config.type === 'BILL' ? (
+          <div className="flex gap-1">
+            {FILTERS.map((filter) => {
+              const active = (status ?? '') === filter.value
+              return (
+                <Link
+                  key={filter.label}
+                  href={filter.value ? `/purchases/${config.slug}?status=${filter.value}` : `/purchases/${config.slug}`}
+                  className={cn(
+                    'rounded-md px-2.5 py-1 text-sm transition-colors',
+                    active ? 'bg-secondary font-medium' : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {filter.label}
+                </Link>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+
+      {page.total === 0 ? (
+        <EmptyState
+          icon={ReceiptIcon}
+          title={query.q || status ? `No ${config.plural.toLowerCase()} match` : `No ${config.plural.toLowerCase()} yet`}
+          description={query.q || status ? 'Try a different search or filter.' : config.effect}
+          action={!query.q && !status ? newButton : undefined}
+        />
+      ) : (
+        <Card className="overflow-hidden p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-32">Number</TableHead>
+                <TableHead className="w-28">Date</TableHead>
+                <TableHead>Vendor</TableHead>
+                <TableHead>Their ref</TableHead>
+                {config.type === 'BILL' ? <TableHead className="w-28">Due</TableHead> : null}
+                <TableHead className="numeric w-32">Total</TableHead>
+                {config.type === 'BILL' ? <TableHead className="numeric w-32">Owing</TableHead> : null}
+                <TableHead className="w-24">Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {page.rows.map((row) => {
+                const overdue =
+                  row.dueDate &&
+                  toCalendarDate(row.dueDate) < now &&
+                  (row.status === 'OPEN' || row.status === 'PARTIAL')
+
+                return (
+                  <TableRow key={row.id}>
+                    <TableCell>
+                      <Link
+                        href={`/purchases/${config.slug}/${row.id}`}
+                        className="tabular font-medium underline-offset-4 hover:underline"
+                      >
+                        {row.number}
+                      </Link>
+                    </TableCell>
+                    <TableCell className="tabular whitespace-nowrap text-muted-foreground">
+                      {formatDate(toCalendarDate(row.date))}
+                    </TableCell>
+                    <TableCell>{row.vendor.displayName}</TableCell>
+                    <TableCell className="text-muted-foreground">{row.reference ?? '—'}</TableCell>
+                    {config.type === 'BILL' ? (
+                      <TableCell
+                        className={cn(
+                          'tabular whitespace-nowrap',
+                          overdue ? 'font-medium text-destructive' : 'text-muted-foreground',
+                        )}
+                      >
+                        {row.dueDate ? formatDate(toCalendarDate(row.dueDate)) : '—'}
+                      </TableCell>
+                    ) : null}
+                    <TableCell className="numeric tabular">{formatMoney(row.total, currency)}</TableCell>
+                    {config.type === 'BILL' ? (
+                      <TableCell className="numeric tabular font-medium">
+                        {Number(row.balance) === 0 ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          formatMoney(row.balance, currency)
+                        )}
+                      </TableCell>
+                    ) : null}
+                    <TableCell>
+                      <Badge variant={STATUS_VARIANTS[row.status] ?? 'secondary'}>
+                        {STATUS_LABELS[row.status] ?? row.status}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+          <Pagination
+            page={page.page}
+            pageCount={page.pageCount}
+            total={page.total}
+            pageSize={page.pageSize}
+            basePath={`/purchases/${config.slug}`}
+            params={{ q: query.q, status }}
+          />
+        </Card>
+      )}
+    </>
+  )
+}
