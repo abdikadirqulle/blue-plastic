@@ -70,6 +70,12 @@ const EXPECTED_TRIGGERS: { name: string; table: string; rule: string; protects: 
     rule: '—',
     protects: 'an account subtype always matches its statement type',
   },
+  {
+    name: 'trg_item_account_mapping',
+    table: 'items',
+    rule: '—',
+    protects: 'an item maps to accounts of the right kind, and tracked stock has all three',
+  },
 ]
 
 const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protects: string }[] = [
@@ -78,6 +84,12 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
     table: 'journal_lines',
     rule: 'R1',
     protects: 'a line is a debit or a credit, never both, never negative',
+  },
+  {
+    name: 'tax_rates_fraction',
+    table: 'tax_rates',
+    rule: '—',
+    protects: 'a tax rate is a fraction between 0 and 1, never a percentage',
   },
 ]
 
@@ -91,6 +103,16 @@ const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] 
     name: 'journal_lines_account_org_fkey',
     rule: 'R9',
     protects: 'a line cannot reference another organisation\'s account',
+  },
+  {
+    name: 'journal_lines_customer_org_fkey',
+    rule: 'R9',
+    protects: 'a line cannot reference another organisation\'s customer',
+  },
+  {
+    name: 'journal_lines_vendor_org_fkey',
+    rule: 'R9',
+    protects: 'a line cannot reference another organisation\'s vendor',
   },
 ]
 
@@ -110,6 +132,18 @@ async function main() {
       JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = current_schema()
   `
+
+  const indexes = await db.$queryRaw<{ indexname: string }[]>`
+    SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()
+  `
+
+  const EXPECTED_INDEXES = [
+    {
+      name: 'payment_terms_one_default',
+      rule: '—',
+      protects: 'exactly one default payment term per organisation',
+    },
+  ]
 
   const failures: string[] = []
   const found = new Map(triggers.map((t) => [t.tgname, t]))
@@ -149,19 +183,32 @@ async function main() {
     }
   }
 
+  const indexNames = new Set(indexes.map((i) => i.indexname))
+  for (const expected of EXPECTED_INDEXES) {
+    if (!indexNames.has(expected.name)) {
+      failures.push(`MISSING INDEX ${expected.name} — ${expected.protects}`)
+      console.log(`  ✗ ${expected.name.padEnd(40)} ${expected.rule.padEnd(4)} MISSING`)
+    } else {
+      console.log(`  ✓ ${expected.name.padEnd(40)} ${expected.rule.padEnd(4)} ${expected.protects}`)
+    }
+  }
+
   console.log()
 
   if (failures.length > 0) {
     console.error('The ledger is NOT fully protected:\n')
     for (const failure of failures) console.error(`  - ${failure}`)
-    console.error('\nRe-apply prisma/sql/ledger-integrity.sql before accepting any postings.')
+    console.error('\nRun `pnpm db:harden` to re-apply prisma/sql/, then check again.')
     process.exitCode = 1
     return
   }
 
-  console.log(
-    `All ${EXPECTED_TRIGGERS.length + EXPECTED_CONSTRAINTS.length + EXPECTED_FOREIGN_KEYS.length} integrity objects present.`,
-  )
+  const total =
+    EXPECTED_TRIGGERS.length +
+    EXPECTED_CONSTRAINTS.length +
+    EXPECTED_FOREIGN_KEYS.length +
+    EXPECTED_INDEXES.length
+  console.log(`All ${total} integrity objects present.`)
 }
 
 main()

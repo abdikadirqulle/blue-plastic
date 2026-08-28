@@ -113,13 +113,14 @@ pnpm typecheck      tsc --noEmit
 pnpm test           vitest run
 pnpm verify         lint + typecheck + test        <- run before every hand-off
 pnpm db:push        prisma db push (dev only)
-pnpm db:migrate     prisma migrate dev
+pnpm db:migrate     prisma migrate dev, then db:harden   <- always use this, not bare prisma
 pnpm db:deploy      prisma migrate deploy
 pnpm db:studio      prisma studio
 pnpm db:seed        seed organisation + owner
 pnpm db:generate    prisma generate
 pnpm db:reset       prisma migrate reset
-pnpm db:verify      assert all expected triggers/constraints exist   (P2+)
+pnpm db:harden      re-apply prisma/sql/ (triggers, composite FKs, partial indexes)
+pnpm db:verify      assert all expected triggers/constraints exist
 ```
 
 ## Commit / documentation discipline

@@ -6,6 +6,7 @@ import { today } from '@/lib/date'
 import type { AccountCreateInput, AccountUpdateInput } from '@/lib/validation/accounting'
 import { balancesAsOf } from '@/server/accounting/balances'
 import { seedChartOfAccounts, systemAccountId } from '@/server/accounting/chart-of-accounts'
+import { seedPaymentTerms } from '@/server/services/tax.service'
 import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
@@ -108,6 +109,9 @@ export async function installDefaultChart(ctx: OrgContext) {
 
   return db.$transaction(async (tx) => {
     const result = await seedChartOfAccounts(tx, ctx.orgId)
+    // The standard terms come with the standard chart: nobody should have to
+    // type "Net 30" before they can raise their first invoice.
+    await seedPaymentTerms(tx, ctx.orgId)
 
     await writeAudit(
       tx,

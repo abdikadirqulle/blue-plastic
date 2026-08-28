@@ -6,6 +6,8 @@ export default async function SettingsLayout({ children }: { children: React.Rea
 
   const tabs = [
     { href: '/settings/organization', label: 'Organisation', show: true },
+    { href: '/settings/payment-terms', label: 'Payment terms', show: true },
+    { href: '/settings/tax', label: 'Tax', show: ctx.permissions.has('tax:read') },
     { href: '/settings/users', label: 'Users', show: ctx.permissions.has('user:read') },
     { href: '/settings/profile', label: 'Your profile', show: true },
     { href: '/settings/activity', label: 'Activity log', show: ctx.permissions.has('audit:read') },

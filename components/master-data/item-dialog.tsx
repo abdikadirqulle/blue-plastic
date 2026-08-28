@@ -1,0 +1,341 @@
+'use client'
+
+import { useActionState, useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { PlusIcon } from 'lucide-react'
+import { toast } from 'sonner'
+
+import { idleState } from '@/components/forms/action-state'
+import { Field, fieldProps } from '@/components/forms/field'
+import { FormError } from '@/components/forms/form-error'
+import { SubmitButton } from '@/components/forms/submit-button'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Separator } from '@/components/ui/separator'
+import { createItemForm, updateItemForm } from '@/app/(app)/items/actions'
+import type { ItemType } from '@prisma/client'
+
+export type ItemValues = {
+  id?: string
+  sku?: string | null
+  name?: string | null
+  description?: string | null
+  type?: ItemType
+  unitOfMeasure?: string | null
+  salesDescription?: string | null
+  salesPrice?: string | null
+  incomeAccountId?: string | null
+  isTaxable?: boolean
+  salesTaxCodeId?: string | null
+  purchaseDescription?: string | null
+  purchaseCost?: string | null
+  expenseAccountId?: string | null
+  inventoryAccountId?: string | null
+  cogsAccountId?: string | null
+  reorderPoint?: string | null
+  categoryId?: string | null
+}
+
+export type AccountOption = { id: string; label: string; type: string; subtype: string }
+export type SimpleOption = { id: string; label: string }
+
+const selectClass =
+  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
+
+const TYPE_HELP: Record<ItemType, string> = {
+  SERVICE: 'Labour or a service. Needs an income account only.',
+  NON_INVENTORY: 'Goods bought and resold without tracking stock levels.',
+  INVENTORY:
+    'Goods with tracked quantity and cost. Selling one will move inventory and post cost of goods sold in the same journal as the sale.',
+}
+
+export function NewItemButton(props: {
+  accounts: AccountOption[]
+  taxCodes: SimpleOption[]
+  categories: SimpleOption[]
+  currency: string
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button size="sm" onClick={() => setOpen(true)}>
+        <PlusIcon /> New item
+      </Button>
+      {open ? <ItemDialog {...props} mode="create" onClose={() => setOpen(false)} /> : null}
+    </>
+  )
+}
+
+export function ItemDialog({
+  mode,
+  item,
+  accounts,
+  taxCodes,
+  categories,
+  currency,
+  onClose,
+}: {
+  mode: 'create' | 'edit'
+  item?: ItemValues
+  accounts: AccountOption[]
+  taxCodes: SimpleOption[]
+  categories: SimpleOption[]
+  currency: string
+  onClose: () => void
+}) {
+  const router = useRouter()
+  const [state, formAction] = useActionState(
+    mode === 'create' ? createItemForm : updateItemForm,
+    idleState,
+  )
+  const [type, setType] = useState<ItemType>(item?.type ?? 'NON_INVENTORY')
+  const handled = useRef(false)
+
+  useEffect(() => {
+    if (state.status === 'success' && !handled.current) {
+      handled.current = true
+      toast.success(state.message ?? 'Saved.')
+      router.refresh()
+      onClose()
+    }
+    if (state.status !== 'success') handled.current = false
+  }, [state, router, onClose])
+
+  const income = accounts.filter((a) => a.type === 'REVENUE')
+  const expense = accounts.filter((a) => a.type === 'EXPENSE')
+  const inventory = accounts.filter((a) => a.subtype === 'INVENTORY')
+  const e = state.fieldErrors
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto p-4 sm:place-items-center">
+      <button type="button" aria-label="Cancel" className="fixed inset-0 bg-black/40" onClick={onClose} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="item-dialog-title"
+        className="relative my-4 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg"
+      >
+        <h2 id="item-dialog-title" className="text-base font-semibold">
+          {mode === 'create' ? 'New item' : `Edit ${item?.name}`}
+        </h2>
+
+        <form action={formAction} className="mt-4 space-y-5">
+          <FormError message={state.message} />
+          {item?.id ? <input type="hidden" name="id" value={item.id} /> : null}
+          {mode === 'edit' ? <input type="hidden" name="type" value={type} /> : null}
+
+          <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
+            <Field name="name" label="Name" required error={e?.name}>
+              <Input {...fieldProps('name', e?.name)} defaultValue={item?.name ?? ''} autoFocus required />
+            </Field>
+            <Field name="sku" label="SKU" error={e?.sku}>
+              <Input {...fieldProps('sku', e?.sku)} defaultValue={item?.sku ?? ''} />
+            </Field>
+          </div>
+
+          <Field name="type" label="Type" hint={TYPE_HELP[type]} required error={e?.type}>
+            {mode === 'create' ? (
+              <select
+                {...fieldProps('type', e?.type, true)}
+                value={type}
+                onChange={(event) => setType(event.target.value as ItemType)}
+                className={selectClass}
+              >
+                <option value="SERVICE">Service</option>
+                <option value="NON_INVENTORY">Non-inventory product</option>
+                <option value="INVENTORY">Inventory product</option>
+              </select>
+            ) : (
+              <Input
+                id="type"
+                value={
+                  type === 'SERVICE' ? 'Service' : type === 'INVENTORY' ? 'Inventory product' : 'Non-inventory product'
+                }
+                disabled
+                readOnly
+                aria-describedby="type-hint"
+              />
+            )}
+          </Field>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field name="categoryId" label="Category" error={e?.categoryId}>
+              <select
+                {...fieldProps('categoryId', e?.categoryId)}
+                defaultValue={item?.categoryId ?? ''}
+                className={selectClass}
+              >
+                <option value="">— none —</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field name="unitOfMeasure" label="Unit" error={e?.unitOfMeasure}>
+              <Input
+                {...fieldProps('unitOfMeasure', e?.unitOfMeasure)}
+                defaultValue={item?.unitOfMeasure ?? ''}
+                placeholder="kg, piece, roll"
+              />
+            </Field>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-4">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Selling</p>
+
+            <div className="grid gap-4 sm:grid-cols-[10rem_1fr]">
+              <Field name="salesPrice" label={`Price (${currency})`} error={e?.salesPrice}>
+                <Input
+                  {...fieldProps('salesPrice', e?.salesPrice)}
+                  inputMode="decimal"
+                  className="tabular"
+                  defaultValue={item?.salesPrice ?? ''}
+                />
+              </Field>
+              <Field
+                name="incomeAccountId"
+                label="Income account"
+                hint="Where revenue from this item is posted."
+                required
+                error={e?.incomeAccountId}
+              >
+                <select
+                  {...fieldProps('incomeAccountId', e?.incomeAccountId, true)}
+                  defaultValue={item?.incomeAccountId ?? ''}
+                  className={selectClass}
+                >
+                  <option value="">— choose —</option>
+                  {income.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+
+            <Field name="salesTaxCodeId" label="Default sales tax" error={e?.salesTaxCodeId}>
+              <select
+                {...fieldProps('salesTaxCodeId', e?.salesTaxCodeId)}
+                defaultValue={item?.salesTaxCodeId ?? ''}
+                className={selectClass}
+              >
+                <option value="">— none —</option>
+                {taxCodes.map((code) => (
+                  <option key={code.id} value={code.id}>
+                    {code.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+
+          <Separator />
+
+          <div className="space-y-4">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Buying</p>
+
+            <div className="grid gap-4 sm:grid-cols-[10rem_1fr]">
+              <Field name="purchaseCost" label={`Cost (${currency})`} error={e?.purchaseCost}>
+                <Input
+                  {...fieldProps('purchaseCost', e?.purchaseCost)}
+                  inputMode="decimal"
+                  className="tabular"
+                  defaultValue={item?.purchaseCost ?? ''}
+                />
+              </Field>
+
+              {type === 'INVENTORY' ? (
+                <Field
+                  name="cogsAccountId"
+                  label="Cost of goods sold account"
+                  hint="Posted in the same journal as the sale, so gross margin is right on the day."
+                  required
+                  error={e?.cogsAccountId}
+                >
+                  <select
+                    {...fieldProps('cogsAccountId', e?.cogsAccountId, true)}
+                    defaultValue={item?.cogsAccountId ?? ''}
+                    className={selectClass}
+                  >
+                    <option value="">— choose —</option>
+                    {expense.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              ) : (
+                <Field name="expenseAccountId" label="Expense account" error={e?.expenseAccountId}>
+                  <select
+                    {...fieldProps('expenseAccountId', e?.expenseAccountId)}
+                    defaultValue={item?.expenseAccountId ?? ''}
+                    className={selectClass}
+                  >
+                    <option value="">— none —</option>
+                    {expense.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+            </div>
+
+            {type === 'INVENTORY' ? (
+              <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
+                <Field
+                  name="inventoryAccountId"
+                  label="Inventory account"
+                  hint="Where the value of stock on hand is held."
+                  required
+                  error={e?.inventoryAccountId}
+                >
+                  <select
+                    {...fieldProps('inventoryAccountId', e?.inventoryAccountId, true)}
+                    defaultValue={item?.inventoryAccountId ?? ''}
+                    className={selectClass}
+                  >
+                    <option value="">— choose —</option>
+                    {inventory.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field name="reorderPoint" label="Reorder at" error={e?.reorderPoint}>
+                  <Input
+                    {...fieldProps('reorderPoint', e?.reorderPoint)}
+                    inputMode="decimal"
+                    className="tabular"
+                    defaultValue={item?.reorderPoint ?? ''}
+                  />
+                </Field>
+              </div>
+            ) : null}
+          </div>
+
+          <Field name="description" label="Description" error={e?.description}>
+            <Input {...fieldProps('description', e?.description)} defaultValue={item?.description ?? ''} />
+          </Field>
+
+          <div className="flex justify-end gap-2 pt-1">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <SubmitButton pendingLabel="Saving…">
+              {mode === 'create' ? 'Create item' : 'Save changes'}
+            </SubmitButton>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}

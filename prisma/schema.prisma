@@ -2,6 +2,7 @@
 //
 // Phase 1: organisation, identity, auditing, document numbering.
 // Phase 2: the ledger — chart of accounts, fiscal periods, journals and lines.
+// Phase 3: master data — customers, vendors, items, tax and payment terms.
 //
 // The integrity rules that make this a real double-entry ledger (R1–R10 in
 // docs/02-accounting-design.md) are enforced by database triggers, which Prisma
@@ -140,6 +141,40 @@ enum SystemAccountKey {
   UNCATEGORISED_EXPENSE
 }
 
+/// How an item behaves. The distinction drives which accounts it must map to and
+/// whether selling it moves stock.
+enum ItemType {
+  /// Labour and services. Income account only.
+  SERVICE
+  /// Goods bought and resold without tracking stock levels.
+  NON_INVENTORY
+  /// Goods with tracked quantity and cost. Selling one moves inventory and COGS.
+  INVENTORY
+}
+
+/// How a payment term computes a due date.
+enum PaymentTermType {
+  /// Due immediately.
+  DUE_ON_RECEIPT
+  /// Due a fixed number of days after the document date.
+  NET_DAYS
+  /// Due on a fixed day of the following month.
+  DAY_OF_MONTH
+}
+
+/// Whether a tax rate applies to what is sold, what is bought, or both.
+enum TaxApplication {
+  SALES
+  PURCHASES
+  BOTH
+}
+
+enum TaxFilingFrequency {
+  MONTHLY
+  QUARTERLY
+  ANNUALLY
+}
+
 enum PeriodStatus {
   /// Postings allowed.
   OPEN
@@ -219,6 +254,14 @@ model Organization {
   fiscalYears    FiscalYear[]
   periods        AccountingPeriod[]
   journals       Journal[]
+  customers      Customer[]
+  vendors        Vendor[]
+  items          Item[]
+  itemCategories ItemCategory[]
+  paymentTerms   PaymentTerm[]
+  taxAgencies    TaxAgency[]
+  taxRates       TaxRate[]
+  taxCodes       TaxCode[]
 
   @@map("organizations")
 }
@@ -417,6 +460,16 @@ model LedgerAccount {
   children     LedgerAccount[] @relation("AccountHierarchy")
   journalLines JournalLine[]
 
+  // Master data that points at this account (Phase 3). All Restrict: an account
+  // an item or a tax rate posts through cannot quietly disappear.
+  vendorDefaults    Vendor[]  @relation("VendorDefaultExpense")
+  itemsIncome       Item[]    @relation("ItemIncome")
+  itemsExpense      Item[]    @relation("ItemExpense")
+  itemsInventory    Item[]    @relation("ItemInventory")
+  itemsCogs         Item[]    @relation("ItemCogs")
+  taxRatesSales     TaxRate[] @relation("TaxRateSales")
+  taxRatesPurchase  TaxRate[] @relation("TaxRatePurchase")
+
   @@unique([orgId, code])
   @@unique([orgId, systemKey])
   /// Target for the composite foreign key on journal_lines that makes a
@@ -569,9 +622,8 @@ model JournalLine {
   /// account balance two queries over the same rows rather than two numbers that
   /// have to be reconciled.
   ///
-  /// The customer and vendor tables arrive in Phase 3; the foreign keys are added
-  /// with them. The columns exist now so the rule is enforced from the ledger's
-  /// first row.
+  /// The columns existed from Phase 2 so the rule could be enforced from the
+  /// ledger's first row; Phase 3 added the tables and the foreign keys.
   customerId String?
   vendorId   String?
 
@@ -581,8 +633,10 @@ model JournalLine {
 
   createdAt DateTime @default(now()) @db.Timestamptz(6)
 
-  journal Journal       @relation(fields: [journalId], references: [id], onDelete: Cascade)
-  account LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  journal  Journal       @relation(fields: [journalId], references: [id], onDelete: Cascade)
+  account  LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  customer Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  vendor   Vendor?       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
 
   /// R9 is enforced by *additional* composite foreign keys on
   /// (journalId, orgId) and (accountId, orgId), created in raw SQL by
@@ -601,4 +655,324 @@ model JournalLine {
   @@index([orgId, customerId])
   @@index([orgId, vendorId])
   @@map("journal_lines")
+}
+
+// ---------------------------------------------------------------------------
+// Master data  (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// When a document falls due. Attached to customers and vendors as a default and
+/// copied onto each document, so changing a term later never restates the due
+/// date of an invoice already sent.
+model PaymentTerm {
+  id    String @id @default(cuid())
+  orgId String
+
+  name String
+  type PaymentTermType @default(NET_DAYS)
+
+  /// NET_DAYS: days after the document date. DAY_OF_MONTH: the day it is due.
+  dueDays Int @default(30) @db.SmallInt
+
+  /// Early-settlement discount: `discountPercent` off if paid within
+  /// `discountDays`. Recorded here in Phase 3; applied in Phase 4.
+  discountDays    Int?     @db.SmallInt
+  discountPercent Decimal? @db.Decimal(9, 4)
+
+  isDefault Boolean @default(false)
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  customers    Customer[]
+  vendors      Vendor[]
+
+  @@unique([orgId, name])
+  @@index([orgId, isActive])
+  @@map("payment_terms")
+}
+
+model Customer {
+  id    String @id @default(cuid())
+  orgId String
+
+  /// What the business calls them. Unique per organisation, because two
+  /// "Ahmed" entries on an aging report help nobody.
+  displayName String
+  companyName String?
+  firstName   String?
+  lastName    String?
+
+  email  String?
+  phone  String?
+  mobile String?
+
+  taxRegistrationNumber String?
+
+  billingLine1      String?
+  billingLine2      String?
+  billingCity       String?
+  billingRegion     String?
+  billingPostalCode String?
+  billingCountry    String? @db.Char(2)
+
+  shippingLine1      String?
+  shippingLine2      String?
+  shippingCity       String?
+  shippingRegion     String?
+  shippingPostalCode String?
+  shippingCountry    String? @db.Char(2)
+
+  paymentTermId String?
+  /// Informational in Phase 3; Phase 4 warns when an invoice would exceed it.
+  creditLimit   Decimal? @db.Decimal(19, 4)
+
+  notes    String?
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  paymentTerm  PaymentTerm?  @relation(fields: [paymentTermId], references: [id], onDelete: SetNull)
+  journalLines JournalLine[]
+
+  @@unique([orgId, displayName])
+  /// Target for the tenancy-carrying composite foreign key on journal_lines (R9).
+  @@unique([id, orgId])
+  @@index([orgId, isActive, displayName])
+  @@map("customers")
+}
+
+model Vendor {
+  id    String @id @default(cuid())
+  orgId String
+
+  displayName String
+  companyName String?
+  firstName   String?
+  lastName    String?
+
+  email  String?
+  phone  String?
+  mobile String?
+
+  taxRegistrationNumber String?
+
+  billingLine1      String?
+  billingLine2      String?
+  billingCity       String?
+  billingRegion     String?
+  billingPostalCode String?
+  billingCountry    String? @db.Char(2)
+
+  paymentTermId String?
+
+  /// Pre-selected on a bill, so routine spending is categorised the same way
+  /// every time instead of landing in Uncategorised Expense.
+  defaultExpenseAccountId String?
+
+  notes    String?
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization          Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  paymentTerm           PaymentTerm?   @relation(fields: [paymentTermId], references: [id], onDelete: SetNull)
+  defaultExpenseAccount LedgerAccount? @relation("VendorDefaultExpense", fields: [defaultExpenseAccountId], references: [id], onDelete: SetNull)
+  journalLines          JournalLine[]
+
+  @@unique([orgId, displayName])
+  /// Target for the tenancy-carrying composite foreign key on journal_lines (R9).
+  @@unique([id, orgId])
+  @@index([orgId, isActive, displayName])
+  @@map("vendors")
+}
+
+model ItemCategory {
+  id    String @id @default(cuid())
+  orgId String
+
+  name     String
+  parentId String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  parent       ItemCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children     ItemCategory[] @relation("CategoryHierarchy")
+  items        Item[]
+
+  @@unique([orgId, name])
+  @@map("item_categories")
+}
+
+/// A product or service.
+///
+/// Items carry their account mappings so posting is driven by master data rather
+/// than by whoever is typing the invoice. Which mappings are required depends on
+/// the type, and the rule is enforced in the service and by a database trigger:
+///
+///   SERVICE / NON_INVENTORY  income account; expense account optional
+///   INVENTORY                income + inventory asset + COGS, all required
+model Item {
+  id    String @id @default(cuid())
+  orgId String
+
+  sku         String?
+  name        String
+  description String?
+  type        ItemType @default(NON_INVENTORY)
+  categoryId  String?
+
+  unitOfMeasure String?
+
+  salesDescription String?
+  salesPrice       Decimal? @db.Decimal(19, 4)
+  incomeAccountId  String?
+  isTaxable        Boolean  @default(true)
+  salesTaxCodeId   String?
+
+  purchaseDescription String?
+  purchaseCost        Decimal? @db.Decimal(19, 4)
+  expenseAccountId    String?
+  purchaseTaxCodeId   String?
+
+  /// INVENTORY only. Stock movement and weighted-average cost arrive in Phase 7.
+  inventoryAccountId String?
+  cogsAccountId      String?
+  reorderPoint       Decimal? @db.Decimal(19, 4)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization     Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  category         ItemCategory?  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  incomeAccount    LedgerAccount? @relation("ItemIncome", fields: [incomeAccountId], references: [id], onDelete: Restrict)
+  expenseAccount   LedgerAccount? @relation("ItemExpense", fields: [expenseAccountId], references: [id], onDelete: Restrict)
+  inventoryAccount LedgerAccount? @relation("ItemInventory", fields: [inventoryAccountId], references: [id], onDelete: Restrict)
+  cogsAccount      LedgerAccount? @relation("ItemCogs", fields: [cogsAccountId], references: [id], onDelete: Restrict)
+  salesTaxCode     TaxCode?       @relation("ItemSalesTax", fields: [salesTaxCodeId], references: [id], onDelete: SetNull)
+  purchaseTaxCode  TaxCode?       @relation("ItemPurchaseTax", fields: [purchaseTaxCodeId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, name])
+  @@unique([orgId, sku])
+  @@index([orgId, isActive, name])
+  @@index([orgId, type])
+  @@map("items")
+}
+
+// ---------------------------------------------------------------------------
+// Tax  (Phase 3 defines it; Phase 4 posts it)
+// ---------------------------------------------------------------------------
+
+/// Who the tax is owed to, and how often it is filed.
+model TaxAgency {
+  id    String @id @default(cuid())
+  orgId String
+
+  name             String
+  registrationNumber String?
+  filingFrequency  TaxFilingFrequency @default(MONTHLY)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  rates        TaxRate[]
+
+  @@unique([orgId, name])
+  @@map("tax_agencies")
+}
+
+/// A single percentage owed to one agency.
+///
+/// The rate is stored as a fraction (0.15, not 15) at nine decimal places, so a
+/// third-of-a-percent levy does not have to be rounded before it is applied.
+model TaxRate {
+  id    String @id @default(cuid())
+  orgId String
+
+  name     String
+  rate     Decimal        @db.Decimal(19, 9)
+  agencyId String
+  appliesTo TaxApplication @default(BOTH)
+
+  /// Where the tax lands. Sales tax collected is a liability; purchase tax is an
+  /// asset where it is recoverable, and simply part of the cost where it is not.
+  salesAccountId    String?
+  purchaseAccountId String?
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization    Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  agency          TaxAgency      @relation(fields: [agencyId], references: [id], onDelete: Restrict)
+  salesAccount    LedgerAccount? @relation("TaxRateSales", fields: [salesAccountId], references: [id], onDelete: Restrict)
+  purchaseAccount LedgerAccount? @relation("TaxRatePurchase", fields: [purchaseAccountId], references: [id], onDelete: Restrict)
+  components      TaxCodeRate[]
+
+  @@unique([orgId, name])
+  @@index([orgId, isActive])
+  @@map("tax_rates")
+}
+
+/// What a user picks on a document line. One code combines one or more rates,
+/// which is what makes compound and multi-jurisdiction tax expressible.
+model TaxCode {
+  id    String @id @default(cuid())
+  orgId String
+
+  name        String
+  description String?
+
+  /// True when the price a customer sees already contains the tax, and the tax
+  /// must be extracted from it rather than added to it.
+  isInclusive Boolean @default(false)
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization  Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  components    TaxCodeRate[]
+  salesItems    Item[]        @relation("ItemSalesTax")
+  purchaseItems Item[]        @relation("ItemPurchaseTax")
+
+  @@unique([orgId, name])
+  @@index([orgId, isActive])
+  @@map("tax_codes")
+}
+
+/// One rate's part in one code.
+model TaxCodeRate {
+  id        String @id @default(cuid())
+  orgId     String
+  taxCodeId String
+  taxRateId String
+
+  /// Order of application. A compound rate is charged on the running total
+  /// including the rates before it, so the sequence changes the answer.
+  sequence   Int     @default(1) @db.SmallInt
+  isCompound Boolean @default(false)
+
+  taxCode TaxCode @relation(fields: [taxCodeId], references: [id], onDelete: Cascade)
+  taxRate TaxRate @relation(fields: [taxRateId], references: [id], onDelete: Restrict)
+
+  @@unique([taxCodeId, taxRateId])
+  @@index([taxCodeId, sequence])
+  @@map("tax_code_rates")
 }

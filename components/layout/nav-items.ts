@@ -47,6 +47,7 @@ export const NAV: NavGroup[] = [
     label: 'Sales',
     items: [
       { label: 'Customers', href: '/customers', icon: UsersIcon, permission: 'customer:read', phase: 3 },
+      { label: 'Products & services', href: '/items', icon: PackageIcon, permission: 'item:read', phase: 3 },
       { label: 'Invoices', href: '/invoices', icon: ReceiptIcon, permission: 'invoice:read', phase: 4 },
     ],
   },
@@ -61,7 +62,6 @@ export const NAV: NavGroup[] = [
     label: 'Operations',
     items: [
       { label: 'Banking', href: '/banking', icon: BanknoteIcon, permission: 'bank:read', phase: 6 },
-      { label: 'Inventory', href: '/inventory', icon: PackageIcon, permission: 'inventory:read', phase: 7 },
       { label: 'Reports', href: '/reports', icon: TrendingUpIcon, permission: 'report:read', phase: 2 },
     ],
   },
@@ -72,4 +72,4 @@ export const NAV: NavGroup[] = [
 ]
 
 /** Phases delivered so far. Bumped as each phase completes. */
-export const DELIVERED_PHASE = 2
+export const DELIVERED_PHASE = 3
