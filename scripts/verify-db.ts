@@ -76,6 +76,24 @@ const EXPECTED_TRIGGERS: { name: string; table: string; rule: string; protects: 
     rule: '—',
     protects: 'an item maps to accounts of the right kind, and tracked stock has all three',
   },
+  {
+    name: 'trg_application_target',
+    table: 'sales_applications',
+    rule: '—',
+    protects: 'only an open invoice can be settled, and never beyond its total',
+  },
+  {
+    name: 'trg_application_source',
+    table: 'sales_applications',
+    rule: '—',
+    protects: 'a payment or credit cannot be applied beyond its own value',
+  },
+  {
+    name: 'trg_document_totals',
+    table: 'sales_documents',
+    rule: '—',
+    protects: 'a posted document\'s totals agree with its own lines',
+  },
 ]
 
 const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protects: string }[] = [
@@ -90,6 +108,36 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
     table: 'tax_rates',
     rule: '—',
     protects: 'a tax rate is a fraction between 0 and 1, never a percentage',
+  },
+  {
+    name: 'sales_applications_one_source',
+    table: 'sales_applications',
+    rule: '—',
+    protects: 'an application comes from a payment or a credit memo, never both or neither',
+  },
+  {
+    name: 'sales_applications_positive',
+    table: 'sales_applications',
+    rule: '—',
+    protects: 'an application settles a positive amount',
+  },
+  {
+    name: 'sales_documents_non_negative',
+    table: 'sales_documents',
+    rule: '—',
+    protects: 'a document total is never negative — that would be a credit memo',
+  },
+  {
+    name: 'sales_documents_deposit_required',
+    table: 'sales_documents',
+    rule: '—',
+    protects: 'a receipt says which account the cash went to',
+  },
+  {
+    name: 'customer_payments_positive',
+    table: 'customer_payments',
+    rule: '—',
+    protects: 'a payment is a positive amount',
   },
 ]
 
@@ -113,6 +161,16 @@ const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] 
     name: 'journal_lines_vendor_org_fkey',
     rule: 'R9',
     protects: 'a line cannot reference another organisation\'s vendor',
+  },
+  {
+    name: 'sales_lines_document_org_fkey',
+    rule: 'R9',
+    protects: 'a document line cannot cross organisations',
+  },
+  {
+    name: 'sales_applications_invoice_org_fkey',
+    rule: 'R9',
+    protects: 'an application cannot settle another organisation\'s invoice',
   },
 ]
 

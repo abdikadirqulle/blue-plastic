@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "verify": "pnpm lint && pnpm typecheck && pnpm test",
     "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev && pnpm db:harden",
+    "db:migrate": "echo \"Use: pnpm db:new-migration <name> && pnpm db:deploy  (migrate dev needs a shadow database this host will not provide)\" && exit 1",
     "db:deploy": "prisma migrate deploy && pnpm db:harden",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
@@ -20,7 +20,8 @@
     "db:reset": "prisma migrate reset",
     "postinstall": "prisma generate",
     "db:verify": "tsx scripts/verify-db.ts",
-    "db:harden": "tsx scripts/harden-db.ts"
+    "db:harden": "tsx scripts/harden-db.ts",
+    "db:new-migration": "tsx scripts/create-migration.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.3",

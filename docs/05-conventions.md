@@ -113,7 +113,8 @@ pnpm typecheck      tsc --noEmit
 pnpm test           vitest run
 pnpm verify         lint + typecheck + test        <- run before every hand-off
 pnpm db:push        prisma db push (dev only)
-pnpm db:migrate     prisma migrate dev, then db:harden   <- always use this, not bare prisma
+pnpm db:new-migration <name>   diff the live DB, strip Prisma's drops of our own objects
+pnpm db:deploy      apply migrations, then db:harden      <- the migration workflow
 pnpm db:deploy      prisma migrate deploy
 pnpm db:studio      prisma studio
 pnpm db:seed        seed organisation + owner

@@ -147,3 +147,34 @@
     font-feature-settings: "tnum";
   }
 }
+
+/*
+ * Printing a document. The app shell disappears and the page becomes the paper —
+ * which is also how a customer-facing PDF is produced, via the browser's own
+ * "save as PDF", with no headless browser in the deployment.
+ */
+@media print {
+  @page {
+    margin: 18mm;
+  }
+
+  aside,
+  header,
+  nav,
+  [data-slot='toaster'] {
+    display: none !important;
+  }
+
+  main {
+    padding: 0 !important;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  a[href]::after {
+    content: '';
+  }
+}

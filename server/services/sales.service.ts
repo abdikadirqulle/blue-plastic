@@ -1,0 +1,708 @@
+import 'server-only'
+import type { DocumentType, Prisma, SalesDocumentType } from '@prisma/client'
+
+import { toCalendarDate, toDate, today, type CalendarDate } from '@/lib/date'
+import { Decimal, toMoneyString, ZERO } from '@/lib/money'
+import { dueDateFor } from '@/lib/payment-terms'
+import { type ListQuery, paged, paginate } from '@/lib/validation/common'
+import type { SalesDocumentInput } from '@/lib/validation/sales'
+import { systemAccountId } from '@/server/accounting/chart-of-accounts'
+import { postJournal, reverseJournal } from '@/server/accounting/posting'
+import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
+import {
+  buildCreditMemoJournal,
+  buildInvoiceJournal,
+  buildRefundReceiptJournal,
+  buildSalesReceiptJournal,
+  POSTS_A_JOURNAL,
+  type SalesJournalInput,
+} from '@/server/accounting/builders/sales'
+import type { TaxCodeShape } from '@/server/accounting/tax'
+import { requestMeta, writeAudit } from '@/server/audit'
+import type { OrgContext } from '@/server/auth/context'
+import { db, type Tx } from '@/server/db'
+import { conflict, notFound, precondition, validation } from '@/server/errors'
+import { nextDocumentNumber } from '@/server/sequences'
+import { loadCodeForCalculation } from '@/server/services/tax.service'
+
+const SEQUENCE_FOR: Record<SalesDocumentType, DocumentType> = {
+  INVOICE: 'INVOICE',
+  ESTIMATE: 'ESTIMATE',
+  SALES_RECEIPT: 'SALES_RECEIPT',
+  CREDIT_MEMO: 'CREDIT_MEMO',
+  REFUND_RECEIPT: 'REFUND_RECEIPT',
+}
+
+const DOCUMENT_SELECT = {
+  id: true, type: true, number: true, date: true, dueDate: true, expiryDate: true,
+  status: true, reference: true, memo: true, customerMessage: true,
+  subtotal: true, discountAmount: true, taxTotal: true, total: true,
+  currencyCode: true, depositAccountId: true, journalId: true, version: true,
+  voidedAt: true, voidReason: true, convertedFromId: true, paymentTermId: true,
+  customer: { select: { id: true, displayName: true, email: true, billingLine1: true, billingCity: true } },
+  paymentTerm: { select: { id: true, name: true, type: true, dueDays: true } },
+  depositAccount: { select: { id: true, code: true, name: true } },
+  convertedTo: { select: { id: true, number: true, type: true } },
+} satisfies Prisma.SalesDocumentSelect
+
+/* --- Reading -------------------------------------------------------------- */
+
+export async function list(
+  ctx: OrgContext,
+  type: SalesDocumentType,
+  query: ListQuery,
+  options: { status?: string; customerId?: string } = {},
+) {
+  const where: Prisma.SalesDocumentWhereInput = {
+    orgId: ctx.orgId,
+    type,
+    ...(options.customerId ? { customerId: options.customerId } : {}),
+    ...(options.status === 'open' ? { status: { in: ['OPEN', 'PARTIAL'] } } : {}),
+    ...(options.status === 'overdue'
+      ? { status: { in: ['OPEN', 'PARTIAL'] }, dueDate: { lt: toDate(today(ctx.organization.timeZone)) } }
+      : {}),
+    ...(options.status === 'draft' ? { status: 'DRAFT' } : {}),
+    ...(query.q
+      ? {
+          OR: [
+            { number: { contains: query.q, mode: 'insensitive' } },
+            { reference: { contains: query.q, mode: 'insensitive' } },
+            { customer: { displayName: { contains: query.q, mode: 'insensitive' } } },
+          ],
+        }
+      : {}),
+  }
+
+  const [rows, total] = await Promise.all([
+    db.salesDocument.findMany({
+      where,
+      select: DOCUMENT_SELECT,
+      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      ...paginate(query),
+    }),
+    db.salesDocument.count({ where }),
+  ])
+
+  const balances = await outstandingBalances(db, rows.map((row) => row.id))
+
+  return paged(
+    rows.map((row) => ({
+      ...serialise(row),
+      balance: toMoneyString(balances.get(row.id) ?? new Decimal(row.total.toString()), 2),
+    })),
+    total,
+    query,
+  )
+}
+
+export async function get(ctx: OrgContext, id: string) {
+  const document = await db.salesDocument.findFirst({
+    where: { id, orgId: ctx.orgId },
+    select: {
+      ...DOCUMENT_SELECT,
+      lines: {
+        orderBy: { lineNumber: 'asc' },
+        select: {
+          id: true, lineNumber: true, description: true, quantity: true, unitPrice: true,
+          discountPercent: true, amount: true, taxAmount: true, serviceDate: true,
+          item: { select: { id: true, name: true, sku: true } },
+          taxCode: { select: { id: true, name: true } },
+          incomeAccount: { select: { id: true, code: true, name: true } },
+        },
+      },
+      applications: {
+        select: {
+          id: true, amount: true, appliedAt: true,
+          payment: { select: { id: true, number: true, date: true } },
+          creditDocument: { select: { id: true, number: true, date: true } },
+        },
+      },
+      journal: { select: { id: true, journalNumber: true, status: true } },
+    },
+  })
+
+  if (!document) throw notFound('Document')
+
+  const applied = document.applications.reduce(
+    (sum, application) => sum.plus(application.amount.toString()),
+    ZERO,
+  )
+  const total = new Decimal(document.total.toString())
+
+  return {
+    ...serialise(document),
+    lines: document.lines.map((line) => ({
+      ...line,
+      quantity: line.quantity.toString(),
+      unitPrice: line.unitPrice.toString(),
+      discountPercent: line.discountPercent?.toString() ?? null,
+      amount: line.amount.toString(),
+      taxAmount: line.taxAmount.toString(),
+    })),
+    applications: document.applications.map((application) => ({
+      ...application,
+      amount: application.amount.toString(),
+    })),
+    journal: document.journal,
+    amountApplied: toMoneyString(applied, 2),
+    balance: toMoneyString(total.minus(applied), 2),
+  }
+}
+
+/**
+ * What is still owed on each of these invoices.
+ *
+ * Always derived — `total - sum(applications)` — never stored. That is what lets
+ * partial payments, one payment across many invoices, credits used as payment and
+ * unapplied cash all work without being special cases, and it is why the aging
+ * report cannot disagree with the receivables control account.
+ */
+export async function outstandingBalances(
+  client: Tx | typeof db,
+  documentIds: string[],
+): Promise<Map<string, Decimal>> {
+  if (documentIds.length === 0) return new Map()
+
+  const rows = await client.$queryRaw<{ id: string; total: string; applied: string }[]>`
+    SELECT d.id,
+           d.total AS total,
+           COALESCE((SELECT SUM(a.amount) FROM sales_applications a WHERE a."invoiceId" = d.id), 0) AS applied
+      FROM sales_documents d
+     WHERE d.id = ANY(${documentIds})
+  `
+
+  return new Map(rows.map((row) => [row.id, new Decimal(row.total).minus(row.applied)]))
+}
+
+/* --- Writing -------------------------------------------------------------- */
+
+/**
+ * Create a document. Drafts are not posted; anything else is posted immediately.
+ *
+ * Posting and creating happen in one transaction so a document without its
+ * journal, or a journal without its document, is unreachable.
+ */
+export async function create(ctx: OrgContext, type: SalesDocumentType, input: SalesDocumentInput) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const customer = await requireCustomer(tx, ctx, input.customerId)
+    const lines = await resolveLines(tx, ctx, input.lines)
+    const taxCodes = await loadTaxCodes(tx, ctx, lines)
+    const priced = priceDocument(lines, taxCodes, ctx.organization.baseCurrency)
+
+    if (priced.total.isZero() && type !== 'ESTIMATE') {
+      throw validation('A document with no value has nothing to record.')
+    }
+
+    const term = input.paymentTermId
+      ? await tx.paymentTerm.findFirst({
+          where: { id: input.paymentTermId, orgId: ctx.orgId },
+          select: { id: true, type: true, dueDays: true },
+        })
+      : customer.paymentTerm
+
+    const number = await nextDocumentNumber(tx, ctx.orgId, SEQUENCE_FOR[type])
+    const isDraft = input.saveAsDraft === true
+
+    const document = await tx.salesDocument.create({
+      data: {
+        orgId: ctx.orgId,
+        type,
+        number,
+        customerId: customer.id,
+        date: toDate(input.date),
+        dueDate:
+          type === 'INVOICE' ? toDate(dueDateFor(input.date, term ?? null)) : null,
+        expiryDate: type === 'ESTIMATE' && input.expiryDate ? toDate(input.expiryDate) : null,
+        paymentTermId: term?.id ?? null,
+        status: isDraft ? 'DRAFT' : type === 'ESTIMATE' ? 'OPEN' : 'OPEN',
+        reference: input.reference ?? null,
+        memo: input.memo ?? null,
+        customerMessage: input.customerMessage ?? null,
+        subtotal: priced.subtotal.toFixed(4),
+        discountAmount: priced.discountAmount.toFixed(4),
+        taxTotal: priced.taxTotal.toFixed(4),
+        total: priced.total.toFixed(4),
+        currencyCode: ctx.organization.baseCurrency,
+        depositAccountId: input.depositAccountId ?? null,
+        createdById: ctx.userId,
+        lines: {
+          create: priced.lines.map((line) => ({
+            orgId: ctx.orgId,
+            lineNumber: line.lineNumber,
+            itemId: line.source.itemId ?? null,
+            description: line.source.description ?? null,
+            quantity: line.quantity.toFixed(4),
+            unitPrice: line.unitPrice.toFixed(4),
+            discountPercent: line.source.discountPercent
+              ? new Decimal(line.source.discountPercent).toFixed(4)
+              : null,
+            amount: line.amount.toFixed(4),
+            taxCodeId: line.taxCodeId,
+            taxAmount: line.taxAmount.toFixed(4),
+            incomeAccountId: line.incomeAccountId,
+            serviceDate: line.source.serviceDate ? toDate(line.source.serviceDate) : null,
+          })),
+        },
+      },
+      select: { id: true, number: true, type: true, total: true, status: true },
+    })
+
+    if (!isDraft && POSTS_A_JOURNAL[type]) {
+      await postDocument(tx, ctx, document.id)
+    }
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'SalesDocument',
+        entityId: document.id,
+        action: 'CREATE',
+        after: { type, number: document.number, total: document.total.toString(), status: document.status },
+      },
+      meta,
+    )
+
+    return { id: document.id, number: document.number }
+  })
+}
+
+/**
+ * Edit a posted document.
+ *
+ * The document is mutable; its journal is not. So an edit reverses the existing
+ * journal and posts a new one, leaving both on the record — see ADR-0002. The
+ * net ledger effect equals the new document, and every intermediate state stays
+ * inspectable.
+ */
+export async function update(ctx: OrgContext, id: string, input: SalesDocumentInput) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const existing = await tx.salesDocument.findFirst({
+      where: { id, orgId: ctx.orgId },
+      select: { id: true, type: true, number: true, status: true, journalId: true, version: true, total: true },
+    })
+    if (!existing) throw notFound('Document')
+
+    if (existing.status === 'VOID') {
+      throw precondition('A voided document cannot be edited. Create a new one.')
+    }
+
+    const applied = await appliedTotal(tx, id)
+    if (!applied.isZero()) {
+      throw precondition(
+        `${existing.number} has ${toMoneyString(applied, 2)} applied to it. ` +
+          `Remove the payments or credits before changing what it says.`,
+      )
+    }
+
+    const customer = await requireCustomer(tx, ctx, input.customerId)
+    const lines = await resolveLines(tx, ctx, input.lines)
+    const taxCodes = await loadTaxCodes(tx, ctx, lines)
+    const priced = priceDocument(lines, taxCodes, ctx.organization.baseCurrency)
+
+    const term = input.paymentTermId
+      ? await tx.paymentTerm.findFirst({
+          where: { id: input.paymentTermId, orgId: ctx.orgId },
+          select: { id: true, type: true, dueDays: true },
+        })
+      : customer.paymentTerm
+
+    // The old journal comes out before the new one goes in.
+    if (existing.journalId) {
+      await reverseJournal(tx, ctx, existing.journalId, {
+        reason: `${existing.number} edited`,
+      })
+    }
+
+    await tx.salesDocumentLine.deleteMany({ where: { documentId: id } })
+
+    await tx.salesDocument.update({
+      where: { id },
+      data: {
+        customerId: customer.id,
+        date: toDate(input.date),
+        dueDate: existing.type === 'INVOICE' ? toDate(dueDateFor(input.date, term ?? null)) : null,
+        expiryDate: existing.type === 'ESTIMATE' && input.expiryDate ? toDate(input.expiryDate) : null,
+        paymentTermId: term?.id ?? null,
+        reference: input.reference ?? null,
+        memo: input.memo ?? null,
+        customerMessage: input.customerMessage ?? null,
+        subtotal: priced.subtotal.toFixed(4),
+        discountAmount: priced.discountAmount.toFixed(4),
+        taxTotal: priced.taxTotal.toFixed(4),
+        total: priced.total.toFixed(4),
+        depositAccountId: input.depositAccountId ?? null,
+        journalId: null,
+        version: { increment: 1 },
+        status: input.saveAsDraft ? 'DRAFT' : 'OPEN',
+        lines: {
+          create: priced.lines.map((line) => ({
+            orgId: ctx.orgId,
+            lineNumber: line.lineNumber,
+            itemId: line.source.itemId ?? null,
+            description: line.source.description ?? null,
+            quantity: line.quantity.toFixed(4),
+            unitPrice: line.unitPrice.toFixed(4),
+            discountPercent: line.source.discountPercent
+              ? new Decimal(line.source.discountPercent).toFixed(4)
+              : null,
+            amount: line.amount.toFixed(4),
+            taxCodeId: line.taxCodeId,
+            taxAmount: line.taxAmount.toFixed(4),
+            incomeAccountId: line.incomeAccountId,
+            serviceDate: line.source.serviceDate ? toDate(line.source.serviceDate) : null,
+          })),
+        },
+      },
+    })
+
+    if (!input.saveAsDraft && POSTS_A_JOURNAL[existing.type]) {
+      await postDocument(tx, ctx, id)
+    }
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'SalesDocument',
+        entityId: id,
+        action: 'UPDATE',
+        before: { total: existing.total.toString(), version: existing.version },
+        after: { total: priced.total.toString(), version: existing.version + 1 },
+      },
+      meta,
+    )
+
+    return { id, number: existing.number }
+  })
+}
+
+/** Post a draft, or re-post after an edit. */
+export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
+  const document = await tx.salesDocument.findFirst({
+    where: { id, orgId: ctx.orgId },
+    select: {
+      id: true, type: true, number: true, date: true, memo: true, customerId: true,
+      depositAccountId: true, journalId: true,
+      lines: {
+        orderBy: { lineNumber: 'asc' },
+        select: {
+          amount: true, taxAmount: true, taxCodeId: true, incomeAccountId: true,
+          description: true, quantity: true, unitPrice: true, discountPercent: true, itemId: true,
+        },
+      },
+    },
+  })
+  if (!document) throw notFound('Document')
+  if (!POSTS_A_JOURNAL[document.type]) return null
+  if (document.journalId) throw conflict(`${document.number} is already posted.`)
+
+  const taxCodes = await loadTaxCodes(
+    tx,
+    ctx,
+    document.lines.map((line): { taxCodeId: string | null } => ({ taxCodeId: line.taxCodeId })),
+  )
+
+  const priced = priceDocument(
+    document.lines.map((line) => ({
+      itemId: line.itemId,
+      description: line.description,
+      quantity: line.quantity.toString(),
+      unitPrice: line.unitPrice.toString(),
+      discountPercent: line.discountPercent?.toString() ?? null,
+      taxCodeId: line.taxCodeId,
+      incomeAccountId: line.incomeAccountId,
+    })),
+    taxCodes,
+    ctx.organization.baseCurrency,
+  )
+
+  const input: SalesJournalInput = {
+    date: toCalendarDate(document.date),
+    number: document.number,
+    documentId: document.id,
+    customerId: document.customerId,
+    priced,
+    receivableAccountId: await systemAccountId(tx, ctx.orgId, 'ACCOUNTS_RECEIVABLE'),
+    depositAccountId: document.depositAccountId,
+    fallbackIncomeAccountId: await systemAccountId(tx, ctx.orgId, 'UNCATEGORISED_INCOME'),
+    memo: document.memo,
+  }
+
+  const draft =
+    document.type === 'INVOICE'
+      ? buildInvoiceJournal(input)
+      : document.type === 'SALES_RECEIPT'
+        ? buildSalesReceiptJournal(input)
+        : document.type === 'CREDIT_MEMO'
+          ? buildCreditMemoJournal(input)
+          : buildRefundReceiptJournal(input)
+
+  const journal = await postJournal(tx, ctx, draft)
+
+  await tx.salesDocument.update({
+    where: { id },
+    data: { journalId: journal.id, status: 'OPEN' },
+  })
+
+  await refreshStatus(tx, id)
+  return journal
+}
+
+/**
+ * Void a document: reverse its journal, keep the paper.
+ *
+ * Nothing is ever deleted. A missing invoice number is a question nobody can
+ * answer later; a voided one answers it.
+ */
+export async function voidDocument(ctx: OrgContext, id: string, reason: string) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const document = await tx.salesDocument.findFirst({
+      where: { id, orgId: ctx.orgId },
+      select: { id: true, number: true, status: true, journalId: true },
+    })
+    if (!document) throw notFound('Document')
+    if (document.status === 'VOID') throw conflict(`${document.number} is already void.`)
+
+    const applied = await appliedTotal(tx, id)
+    if (!applied.isZero()) {
+      throw precondition(
+        `${document.number} has ${toMoneyString(applied, 2)} applied to it. Remove that first.`,
+      )
+    }
+
+    if (document.journalId) {
+      await reverseJournal(tx, ctx, document.journalId, { reason: `${document.number} voided — ${reason}` })
+    }
+
+    await tx.salesDocument.update({
+      where: { id },
+      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      { entity: 'SalesDocument', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
+      meta,
+    )
+
+    return { id, number: document.number }
+  })
+}
+
+/**
+ * Turn an accepted estimate into an invoice.
+ *
+ * The estimate is kept and closed rather than transformed, so the quotation that
+ * was sent stays readable exactly as it was sent.
+ */
+export async function convertEstimate(ctx: OrgContext, estimateId: string, date: CalendarDate) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const estimate = await tx.salesDocument.findFirst({
+      where: { id: estimateId, orgId: ctx.orgId, type: 'ESTIMATE' },
+      select: {
+        id: true, number: true, status: true, customerId: true, reference: true,
+        memo: true, customerMessage: true, paymentTermId: true, convertedTo: { select: { number: true } },
+        lines: {
+          orderBy: { lineNumber: 'asc' },
+          select: {
+            itemId: true, description: true, quantity: true, unitPrice: true,
+            discountPercent: true, taxCodeId: true, incomeAccountId: true,
+          },
+        },
+      },
+    })
+    if (!estimate) throw notFound('Estimate')
+    if (estimate.convertedTo) {
+      throw conflict(`${estimate.number} has already become invoice ${estimate.convertedTo.number}.`)
+    }
+    if (estimate.status === 'VOID' || estimate.status === 'DECLINED') {
+      throw precondition(`${estimate.number} is ${estimate.status.toLowerCase()} and cannot be invoiced.`)
+    }
+
+    const invoice = await create(ctx, 'INVOICE', {
+      customerId: estimate.customerId,
+      date,
+      reference: estimate.reference,
+      memo: estimate.memo,
+      customerMessage: estimate.customerMessage,
+      paymentTermId: estimate.paymentTermId,
+      lines: estimate.lines.map((line) => ({
+        itemId: line.itemId,
+        description: line.description,
+        quantity: line.quantity.toString(),
+        unitPrice: line.unitPrice.toString(),
+        discountPercent: line.discountPercent?.toString() ?? null,
+        taxCodeId: line.taxCodeId,
+      })),
+    } as SalesDocumentInput)
+
+    await tx.salesDocument.update({
+      where: { id: invoice.id },
+      data: { convertedFromId: estimateId },
+    })
+    await tx.salesDocument.update({
+      where: { id: estimateId },
+      data: { status: 'CLOSED' },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'SalesDocument',
+        entityId: estimateId,
+        action: 'UPDATE',
+        after: { convertedTo: invoice.number },
+      },
+      meta,
+    )
+
+    return invoice
+  })
+}
+
+/** Recompute OPEN / PARTIAL / PAID from what has actually been applied. */
+export async function refreshStatus(tx: Tx, documentId: string) {
+  const document = await tx.salesDocument.findUnique({
+    where: { id: documentId },
+    select: { id: true, type: true, total: true, status: true },
+  })
+  if (!document) return
+  if (document.status === 'VOID' || document.status === 'DRAFT') return
+  if (document.type !== 'INVOICE') return
+
+  const applied = await appliedTotal(tx, documentId)
+  const total = new Decimal(document.total.toString())
+
+  const status = applied.greaterThanOrEqualTo(total)
+    ? 'PAID'
+    : applied.greaterThan(0)
+      ? 'PARTIAL'
+      : 'OPEN'
+
+  if (status !== document.status) {
+    await tx.salesDocument.update({ where: { id: documentId }, data: { status } })
+  }
+}
+
+/* --- Helpers -------------------------------------------------------------- */
+
+async function appliedTotal(tx: Tx, documentId: string): Promise<Decimal> {
+  const result = await tx.salesApplication.aggregate({
+    where: { invoiceId: documentId },
+    _sum: { amount: true },
+  })
+  return new Decimal(result._sum.amount?.toString() ?? '0')
+}
+
+async function requireCustomer(tx: Tx, ctx: OrgContext, customerId: string) {
+  const customer = await tx.customer.findFirst({
+    where: { id: customerId, orgId: ctx.orgId },
+    select: {
+      id: true,
+      isActive: true,
+      displayName: true,
+      paymentTerm: { select: { id: true, type: true, dueDays: true } },
+    },
+  })
+  if (!customer) throw notFound('Customer')
+  if (!customer.isActive) {
+    throw precondition(`${customer.displayName} is archived. Restore them before invoicing.`)
+  }
+  return customer
+}
+
+/**
+ * Resolve each line against its item: price, description and income account come
+ * from master data unless the line overrides them.
+ *
+ * Inventory items are refused for now. Selling tracked stock has to move the
+ * stock and post its cost in the same journal as the revenue, and the costing
+ * engine arrives in Phase 7. Allowing the sale without the cost would overstate
+ * gross margin on every one of them — a wrong number is worse than a missing
+ * feature.
+ */
+async function resolveLines(
+  tx: Tx,
+  ctx: OrgContext,
+  lines: SalesDocumentInput['lines'],
+): Promise<DraftSalesLine[]> {
+  const itemIds = lines.map((line) => line.itemId).filter(Boolean) as string[]
+
+  const items = itemIds.length
+    ? await tx.item.findMany({
+        where: { id: { in: itemIds }, orgId: ctx.orgId },
+        select: {
+          id: true, name: true, type: true, isActive: true, salesPrice: true,
+          salesDescription: true, description: true, incomeAccountId: true, salesTaxCodeId: true,
+        },
+      })
+    : []
+
+  const byId = new Map(items.map((item) => [item.id, item]))
+  const tracked = items.filter((item) => item.type === 'INVENTORY')
+
+  if (tracked.length > 0) {
+    throw precondition(
+      `${tracked.map((i) => i.name).join(', ')} ${tracked.length === 1 ? 'is a tracked' : 'are tracked'} ` +
+        `inventory ${tracked.length === 1 ? 'item' : 'items'}. Selling tracked stock has to move the stock ` +
+        `and post its cost in the same entry as the sale, and stock costing arrives in phase 7. ` +
+        `Until then, use a non-inventory item so the gross margin stays honest.`,
+    )
+  }
+
+  return lines.map((line): DraftSalesLine => {
+    const item = line.itemId ? byId.get(line.itemId) : null
+    if (line.itemId && !item) throw notFound('Item')
+    if (item && !item.isActive) {
+      throw precondition(`"${item.name}" is archived and cannot be sold.`)
+    }
+
+    return {
+      itemId: line.itemId ?? null,
+      description:
+        line.description ?? item?.salesDescription ?? item?.description ?? item?.name ?? null,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice !== '' ? line.unitPrice : (item?.salesPrice?.toString() ?? '0'),
+      discountPercent: line.discountPercent ?? null,
+      taxCodeId: line.taxCodeId ?? item?.salesTaxCodeId ?? null,
+      incomeAccountId: item?.incomeAccountId ?? null,
+      serviceDate: line.serviceDate ?? null,
+    }
+  })
+}
+
+async function loadTaxCodes(
+  tx: Tx,
+  ctx: OrgContext,
+  lines: { taxCodeId?: string | null }[],
+): Promise<Map<string, TaxCodeShape>> {
+  const ids = [...new Set(lines.map((line) => line.taxCodeId).filter(Boolean) as string[])]
+  const codes = new Map<string, TaxCodeShape>()
+
+  for (const id of ids) {
+    const code = await loadCodeForCalculation(tx, ctx.orgId, id)
+    if (!code) throw notFound('Tax code')
+    codes.set(id, code)
+  }
+
+  return codes
+}
+
+function serialise<T extends Record<string, unknown>>(row: T) {
+  const out: Record<string, unknown> = { ...row }
+  for (const key of ['subtotal', 'discountAmount', 'taxTotal', 'total']) {
+    if (out[key] && typeof out[key] === 'object') out[key] = String(out[key])
+  }
+  return out as T & { subtotal: string; discountAmount: string; taxTotal: string; total: string }
+}
