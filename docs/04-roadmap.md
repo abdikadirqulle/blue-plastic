@@ -1,0 +1,217 @@
+# 04 — Development Roadmap
+
+Nine phases. Each is shippable on its own and leaves the system in a correct state;
+none is a "big bang" that only works once the next one lands.
+
+The ordering is driven by one constraint: **the ledger must be correct before
+anything writes to it.** Sales, purchases and banking are all just document types
+that produce journals, so they cannot be built before the engine that accepts those
+journals exists. Everything after Phase 2 is, structurally, the same work repeated
+with different debits and credits.
+
+## Dependency graph
+
+```
+  P1 Foundation & Identity
+        │
+        ▼
+  P2 Accounting Core  ──────────────────────────────┐
+        │                                           │
+        ▼                                           │
+  P3 Master Data & Tax                              │
+        │                                           │
+        ├──────────────┬──────────────┐             │
+        ▼              ▼              │             │
+  P4 Sales / AR   P5 Purchases / AP   │             │
+        │              │              │             │
+        └──────┬───────┘              ▼             ▼
+               ▼                 P7 Inventory   P8 Reporting
+        P6 Banking & Cash             │             │
+               │                      │             │
+               └──────────┬───────────┴─────────────┘
+                          ▼
+                 P9 Period Close & Year-End
+                          │
+                          ▼
+                 P10 Hardening & Polish
+```
+
+P7 (Inventory) depends on P3 for items and on P4/P5 for the documents that move
+stock, but its *engine* only needs P2. It is scheduled after P5 so that both the
+buy side and the sell side exist to move stock in and out.
+
+P8 (Reporting) needs only P2 for the statement trio (TB, P&L, BS); the sales and
+purchase reports arrive with their phases. It is scheduled late so that reports are
+written once against a full ledger rather than three times against a growing one.
+
+---
+
+## Phase 1 — Foundation & Identity
+
+**Goal:** a secure, fast, multi-tenant-ready application shell that anything can be
+built inside, with the primitives every later phase depends on.
+
+| # | Task |
+| --- | --- |
+| 1.1 | Next.js 16 + TypeScript strict + Tailwind v4 + shadcn/ui, path aliases, ESLint layering rules |
+| 1.2 | Prisma + PostgreSQL wiring, connection singleton, `.env.example`, db scripts |
+| 1.3 | Foundation schema: `Organization`, `User`, `Membership`, NextAuth tables, `AuditLog`, `DocumentSequence` |
+| 1.4 | NextAuth v5: credentials provider, JWT with `orgId`/`role`/`membershipVersion`, edge-safe middleware split |
+| 1.5 | RBAC: `Role`/`Permission` model, permission matrix, `requireOrgContext(permission)` |
+| 1.6 | `OrgContext` plumbing and tenant-scoping guarantees |
+| 1.7 | Money (`Decimal`) and calendar-date primitives + formatting |
+| 1.8 | Error model (`AppError`), `ActionResult`, server-action wrapper, route-handler envelope |
+| 1.9 | Audit log service (write-through, inside caller's transaction) |
+| 1.10 | Document numbering service with row-lock allocation |
+| 1.11 | App shell: sidebar, topbar, user menu, theme, responsive layout, loading/error/empty states |
+| 1.12 | Auth screens: sign in, first-run setup (create organisation + owner), sign out |
+| 1.13 | Settings: organisation profile, fiscal year & currency; users & roles management |
+| 1.14 | TanStack Query provider + typed API-fetch helper |
+| 1.15 | Vitest setup; unit tests for money, dates, permissions, sequences; integration test for tenant isolation |
+| 1.16 | Seed script: organisation + owner user |
+
+**Exit criteria:** a user can sign in, land on an app shell, see their organisation
+settings, invite and role-manage users; `pnpm verify` (lint + typecheck + test)
+passes; cross-tenant access is proven impossible by test.
+
+**Explicitly not in Phase 1:** any accounting concept. No accounts, no journals, no
+money movement. Mixing shell work with ledger work is how ledger work gets rushed.
+
+---
+
+## Phase 2 — Accounting Core
+
+**Goal:** the double-entry engine, and nothing that isn't.
+
+| # | Task |
+| --- | --- |
+| 2.1 | `LedgerAccount` schema, types/subtypes, hierarchy, `systemKey` |
+| 2.2 | `FiscalYear` / `AccountingPeriod` schema + generation for a year |
+| 2.3 | `Journal` / `JournalLine` schema |
+| 2.4 | All integrity triggers R1–R10 as raw SQL migrations + `db:verify` |
+| 2.5 | Posting engine `postJournal` / `reverseJournal` |
+| 2.6 | Chart-of-accounts seeder (default CoA for a goods-trading business) + system accounts |
+| 2.7 | Chart of accounts UI: tree, create/edit/deactivate, merge guard |
+| 2.8 | Manual journal entry UI with live debit/credit balancing |
+| 2.9 | Opening balances workflow via Opening Balance Equity |
+| 2.10 | Trial balance + general ledger + account register (drill-down) |
+| 2.11 | Period open/close UI and guard |
+| 2.12 | Test suite: every integrity rule, reversal semantics, period guard, balanced-posting property tests |
+
+**Exit criteria:** a manual journal can be posted, reversed and inspected; an
+unbalanced journal is impossible from the API *and* from psql; the trial balance
+nets to zero.
+
+---
+
+## Phase 3 — Master Data & Tax
+
+| # | Task |
+| --- | --- |
+| 3.1 | Customers (billing/shipping address, terms, opening balance, credit limit) |
+| 3.2 | Vendors (terms, tax id, opening balance, default expense account) |
+| 3.3 | Items: service, non-inventory, inventory — with account mappings |
+| 3.4 | Tax agencies, tax codes, tax rates, compound and inclusive/exclusive handling |
+| 3.5 | Payment terms and due-date calculation |
+| 3.6 | Shared list UX: search, filter, pagination, bulk activate/deactivate, CSV import |
+| 3.7 | Opening balance posting for customers/vendors through AR/AP + OBE |
+
+**Exit criteria:** master data exists with correct account mappings and a customer
+opening balance lands in AR and on the aging report.
+
+---
+
+## Phase 4 — Sales / Accounts Receivable
+
+| # | Task |
+| --- | --- |
+| 4.1 | Invoice document + lines, totals, tax, terms, due date |
+| 4.2 | Invoice posting builder + edit-as-reverse-and-repost |
+| 4.3 | Estimates and estimate → invoice conversion |
+| 4.4 | Sales receipts (cash sales) |
+| 4.5 | Customer payments with application to invoices, partial and over-payment |
+| 4.6 | Credit memos and their application |
+| 4.7 | Refund receipts |
+| 4.8 | AR aging, customer statement, customer transaction list |
+| 4.9 | Document numbering, PDF/print view, email-ready layout |
+| 4.10 | Void/delete semantics |
+
+---
+
+## Phase 5 — Purchases / Accounts Payable
+
+| # | Task |
+| --- | --- |
+| 5.1 | Bills + lines (expense, item, fixed asset) |
+| 5.2 | Bill posting builder |
+| 5.3 | Expenses (immediate cash/card purchases) |
+| 5.4 | Vendor credits and application |
+| 5.5 | Bill payments with application, partial payment, batch pay |
+| 5.6 | Purchase orders and PO → bill conversion |
+| 5.7 | AP aging, vendor transaction list, unpaid bills |
+
+---
+
+## Phase 6 — Banking & Cash
+
+| # | Task |
+| --- | --- |
+| 6.1 | Bank & credit-card account registers with running balance |
+| 6.2 | Transfers between accounts |
+| 6.3 | Deposits, including clearing Undeposited Funds |
+| 6.4 | Bank statement import (CSV/OFX) into a staging table |
+| 6.5 | Matching engine: suggest matches to existing documents |
+| 6.6 | Reconciliation workflow: statement balance, cleared items, difference must be zero, lock on finish |
+| 6.7 | Reconciliation report and undo-reconciliation with audit |
+
+---
+
+## Phase 7 — Inventory
+
+| # | Task |
+| --- | --- |
+| 7.1 | `InventoryTransaction` ledger + weighted-average cost engine |
+| 7.2 | COGS posting integrated into invoice / sales receipt / credit memo |
+| 7.3 | Receipt of stock through bills and purchase orders |
+| 7.4 | Inventory adjustments (quantity and value) |
+| 7.5 | Negative-stock policy and cost true-up |
+| 7.6 | Stock on hand, inventory valuation summary/detail, reorder report |
+| 7.7 | Reconciliation test: inventory ledger value == Inventory Asset GL balance |
+
+---
+
+## Phase 8 — Financial Reporting
+
+| # | Task |
+| --- | --- |
+| 8.1 | Report framework: date ranges, comparison periods, accrual/cash basis, drill-down |
+| 8.2 | Profit & Loss (with % of income, comparative, monthly columns) |
+| 8.3 | Balance Sheet (with self-check assertion) |
+| 8.4 | Statement of Cash Flows (indirect) |
+| 8.5 | Trial balance, general ledger detail, journal report |
+| 8.6 | Sales by customer/item, purchases by vendor/item, expenses by category |
+| 8.7 | Tax liability and tax summary reports |
+| 8.8 | `account_period_balances` rollup + agreement test against raw lines |
+| 8.9 | CSV/PDF export, saved report settings |
+| 8.10 | Dashboard: cash position, income vs expense, AR/AP aging summary, recent activity |
+
+---
+
+## Phase 9 — Period Close & Year-End
+
+| # | Task |
+| --- | --- |
+| 9.1 | Adjusting journal entries flagged and reportable separately |
+| 9.2 | Month-end close checklist (unreconciled items, unapplied payments, out-of-balance checks) |
+| 9.3 | Year-end closing entry to Retained Earnings |
+| 9.4 | Period lock/unlock with audit and permission gate |
+| 9.5 | Prior-period comparatives after close |
+
+---
+
+## Phase 10 — Hardening & Polish
+
+Performance passes on the heavy report queries, attachments on documents, activity
+feed UI, full-text search, keyboard-driven navigation, rate limiting, backup/restore
+runbook, multi-currency activation, and an end-to-end test suite covering a full
+accounting cycle from opening balances to year-end close.

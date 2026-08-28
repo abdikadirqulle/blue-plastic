@@ -1,0 +1,260 @@
+// Blue Plastic Center — accounting system
+// Phase 1: foundation and identity only. No accounting concepts live here yet;
+// they arrive in Phase 2 (see docs/03-database-design.md).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7 moved connection URLs out of the schema: migrations read them from
+// `prisma.config.ts`, and the client receives a driver adapter (see server/db.ts).
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  ADMIN
+  ACCOUNTANT
+  BOOKKEEPER
+  SALES
+  VIEWER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  ARCHIVE
+  RESTORE
+  LOGIN
+  LOGIN_FAILED
+  LOGOUT
+  POST
+  REVERSE
+  CLOSE_PERIOD
+  REOPEN_PERIOD
+}
+
+/// Document families that draw from a numbering sequence. Values beyond JOURNAL
+/// are unused until their phase lands, but are declared now so the enum is not
+/// migrated on every subsequent phase.
+enum DocumentType {
+  JOURNAL
+  INVOICE
+  ESTIMATE
+  SALES_RECEIPT
+  CREDIT_MEMO
+  CUSTOMER_PAYMENT
+  REFUND_RECEIPT
+  BILL
+  BILL_PAYMENT
+  EXPENSE
+  VENDOR_CREDIT
+  PURCHASE_ORDER
+  TRANSFER
+  DEPOSIT
+  INVENTORY_ADJUSTMENT
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id       String @id @default(cuid())
+  name     String
+  legalName String?
+
+  /// ISO 4217. The ledger's reporting currency. Immutable once any journal exists
+  /// (guarded in the service layer, and by Phase 2's posting engine).
+  baseCurrency String @default("USD") @db.Char(3)
+
+  /// 1 = January. A fiscal year starting in month M runs M..M+11.
+  fiscalYearStartMonth Int @default(1) @db.SmallInt
+
+  taxRegistrationNumber String?
+
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  region       String?
+  postalCode   String?
+  country      String? @db.Char(2)
+
+  phone   String?
+  email   String?
+  website String?
+
+  /// IANA zone used to resolve "today" for date defaults and period boundaries.
+  timeZone String @default("UTC")
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  memberships Membership[]
+  auditLogs   AuditLog[]
+  sequences   DocumentSequence[]
+
+  @@map("organizations")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  /// Argon2id/bcrypt hash. Null for users who only ever sign in via an OAuth
+  /// provider (none configured yet — see ADR-0007).
+  passwordHash  String?
+  image         String?
+  emailVerified DateTime? @db.Timestamptz(6)
+
+  lastLoginAt DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  memberships Membership[]
+  accounts    Account[]
+  sessions    Session[]
+  auditLogs   AuditLog[]
+
+  @@map("users")
+}
+
+model Membership {
+  id     String @id @default(cuid())
+  orgId  String
+  userId String
+
+  role   Role             @default(VIEWER)
+  status MembershipStatus @default(INVITED)
+
+  /// Incremented on every role or status change. The JWT carries the value it was
+  /// issued with; a mismatch invalidates the session on the next request, which
+  /// gives JWT sessions revocation semantics (ADR-0007).
+  version Int @default(1)
+
+  invitedById String?
+  invitedAt   DateTime? @db.Timestamptz(6)
+  acceptedAt  DateTime? @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@index([orgId, status])
+  @@map("memberships")
+}
+
+// --- NextAuth adapter tables ------------------------------------------------
+// Present from the start so adding an OAuth provider later is configuration
+// rather than a migration against a live database.
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime @db.Timestamptz(6)
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Cross-cutting infrastructure
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id      String @id @default(cuid())
+  orgId   String
+  actorId String?
+
+  entity   String
+  entityId String
+  action   AuditAction
+
+  before Json?
+  after  Json?
+
+  ipAddress String?
+  userAgent String?
+
+  at DateTime @default(now()) @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([orgId, at(sort: Desc)])
+  @@index([orgId, entity, entityId])
+  @@index([orgId, actorId, at(sort: Desc)])
+  @@map("audit_logs")
+}
+
+model DocumentSequence {
+  id    String @id @default(cuid())
+  orgId String
+
+  docType    DocumentType
+  prefix     String       @default("")
+  nextNumber Int          @default(1)
+  padding    Int          @default(5) @db.SmallInt
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, docType])
+  @@map("document_sequences")
+}

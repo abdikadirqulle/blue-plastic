@@ -1,0 +1,33 @@
+import { z } from 'zod'
+
+import { countryCode, currencyCode, email, optionalText, requiredText } from './common'
+
+export const organizationUpdateSchema = z.object({
+  name: requiredText('Organisation name', 200),
+  legalName: optionalText(200),
+  taxRegistrationNumber: optionalText(60),
+  addressLine1: optionalText(200),
+  addressLine2: optionalText(200),
+  city: optionalText(120),
+  region: optionalText(120),
+  postalCode: optionalText(30),
+  country: countryCode,
+  phone: optionalText(40),
+  email: z.union([email, z.literal('')]).transform((v) => (v === '' ? null : v)).nullable().optional(),
+  website: optionalText(200),
+  timeZone: requiredText('Time zone', 60),
+})
+
+export type OrganizationUpdateInput = z.infer<typeof organizationUpdateSchema>
+
+/**
+ * Currency and fiscal year are separated from the profile form on purpose: they
+ * are ledger-defining settings, and Phase 2 will refuse to change them once a
+ * journal exists.
+ */
+export const organizationAccountingSchema = z.object({
+  baseCurrency: currencyCode,
+  fiscalYearStartMonth: z.coerce.number().int().min(1).max(12),
+})
+
+export type OrganizationAccountingInput = z.infer<typeof organizationAccountingSchema>
