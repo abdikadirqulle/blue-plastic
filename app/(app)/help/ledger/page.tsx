@@ -39,6 +39,11 @@ const GLOSSARY: { term: string; meaning: string }[] = [
       'A journal nobody in the business made: depreciation, an accrual, a prepayment, a correction. Marked as such so it can be found and reviewed on its own.',
   },
   {
+    term: 'Category line and item line',
+    meaning:
+      'Two ways a purchase line can be entered. A category line names the account a cost lands in — rent, fuel, a fee — and an amount; nothing is counted. An item line names a product, a quantity and a unit cost, and takes its account from the item. A bill can carry both. Sales documents have item lines only: an invoice line posts to the income account its item names.',
+  },
+  {
     term: 'Inventory, non-inventory, service',
     meaning:
       'Only an inventory item has a quantity. Selling one reduces stock and posts its cost against the sale. A non-inventory item is bought and expensed at the time of purchase, so selling it moves no stock and posts no cost — which is why it never appears on the Inventory screen. The type cannot be changed after an item exists, because it would reclassify everything already sold through it.',

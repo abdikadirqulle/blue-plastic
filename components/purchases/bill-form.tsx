@@ -31,8 +31,20 @@ export type PurchaseItemOption = {
 export type Option = { id: string; label: string }
 export type TaxOption = Option & { rate: number; isInclusive: boolean }
 
+/**
+ * One line, of one of two kinds.
+ *
+ * A `category` line names the account a cost lands in and an amount; its
+ * quantity is always 1 and `unitPrice` carries the amount, which is how the
+ * server has always accepted it. An `item` line names a product, a quantity and
+ * a unit cost. Both shapes travel in the same array because the document stores
+ * them in one list — the split is how they are *entered*, not how they are kept.
+ */
+type LineKind = 'category' | 'item'
+
 type Line = {
   key: number
+  kind: LineKind
   itemId: string
   expenseAccountId: string
   description: string
@@ -41,8 +53,9 @@ type Line = {
   taxCodeId: string
 }
 
-const empty = (key: number, account = ''): Line => ({
+const empty = (key: number, account = '', kind: LineKind = 'category'): Line => ({
   key,
+  kind,
   itemId: '',
   expenseAccountId: account,
   description: '',
@@ -114,6 +127,9 @@ export function BillForm({
     document?.lines.length
       ? document.lines.map((line, index) => ({
           key: index + 1,
+          // A stored line is an item line if it names an item; otherwise it is a
+          // category line, whatever it was typed into originally.
+          kind: line.itemId ? ('item' as const) : ('category' as const),
           itemId: line.itemId ?? '',
           expenseAccountId: line.expenseAccountId ?? '',
           description: line.description ?? '',
@@ -137,6 +153,16 @@ export function BillForm({
     if (state.status !== 'success') handled.current = false
   }, [state, router, config.slug, document?.id])
 
+  const categoryLines = lines.filter((line) => line.kind === 'category')
+  const itemLines = lines.filter((line) => line.kind === 'item')
+
+  const defaultAccount = () => vendors.find((v) => v.id === vendorId)?.defaultExpenseAccountId ?? ''
+
+  const addCategoryLine = () =>
+    setLines((current) => [...current, empty(nextKey.current++, defaultAccount(), 'category')])
+
+  const addItemLine = () => setLines((current) => [...current, empty(nextKey.current++, '', 'item')])
+
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
   const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
 
@@ -152,7 +178,7 @@ export function BillForm({
     let tax = ZERO
 
     for (const line of lines) {
-      const quantity = parseMoneyInput(line.quantity) ?? ZERO
+      const quantity = line.kind === 'category' ? new Decimal(1) : (parseMoneyInput(line.quantity) ?? ZERO)
       const price = parseMoneyInput(line.unitPrice) ?? ZERO
       if (quantity.isZero() && price.isZero()) continue
 
@@ -196,17 +222,21 @@ export function BillForm({
 
   const chooseItem = (key: number, itemId: string) => {
     const item = itemId ? itemById.get(itemId) : null
+    // No account is set here. An item line's cost account comes from the item —
+    // and for a tracked item from its inventory account — resolved on the server,
+    // which is the only place that knows whether the item is stocked.
     update(key, {
       itemId,
       description: item?.description ?? '',
       unitPrice: item?.price ?? '',
       taxCodeId: item?.taxCodeId ?? '',
-      expenseAccountId: item?.expenseAccountId ?? '',
     })
   }
 
-  const filled = lines.filter(
-    (line) => line.itemId || line.description || parseMoneyInput(line.unitPrice)?.greaterThan(0),
+  const filled = lines.filter((line) =>
+    line.kind === 'category'
+      ? line.expenseAccountId || line.description || parseMoneyInput(line.unitPrice)?.greaterThan(0)
+      : line.itemId || line.description || parseMoneyInput(line.unitPrice)?.greaterThan(0),
   )
 
   const payload = JSON.stringify({
@@ -219,10 +249,12 @@ export function BillForm({
     paymentAccountId: config.needsPaymentAccount ? paymentAccountId : '',
     saveAsDraft,
     lines: filled.map((line) => ({
-      itemId: line.itemId,
-      expenseAccountId: line.expenseAccountId,
+      // A category line has no item and always a quantity of one; an item line
+      // takes its account from the item, not from this form.
+      itemId: line.kind === 'item' ? line.itemId : '',
+      expenseAccountId: line.kind === 'category' ? line.expenseAccountId : '',
       description: line.description,
-      quantity: line.quantity || '1',
+      quantity: line.kind === 'category' ? '1' : line.quantity || '1',
       unitPrice: line.unitPrice,
       taxCodeId: line.taxCodeId,
     })),
@@ -318,29 +350,152 @@ export function BillForm({
         </CardContent>
       </Card>
 
+      {/*
+        Two sections, and the distinction between them is the whole point.
+
+        A *category* line is an accounting entry: rent, fuel, a professional fee.
+        It names the account the cost lands in and an amount, and nothing is
+        counted. An *item* line is a thing that was bought: it names a product,
+        a quantity and a unit cost, and if that product is tracked the purchase
+        moves stock and its cost sits in inventory until it is sold.
+
+        One row asking for both — which is what this form used to do — makes the
+        two look interchangeable. They are not: put stock on a category line and
+        it never reaches the stock ledger; put rent on an item line and you have
+        invented a product called rent.
+      */}
       <Card className="overflow-hidden p-0">
+        <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+          <h2 className="text-sm font-semibold">Category details</h2>
+          <span className="text-xs text-muted-foreground">
+            Costs posted straight to an account. No quantity, nothing counted.
+          </span>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b bg-muted/30">
-                <th className="w-48 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Item</th>
-                <th className="w-56 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+              <tr className="border-b">
+                <th className="w-64 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
                   Category
+                </th>
+                <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Description</th>
+                {showTax ? (
+                  <th className="w-36 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Tax</th>
+                ) : null}
+                <th className="w-32 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Amount</th>
+                <th className="w-10" />
+              </tr>
+            </thead>
+            <tbody>
+              {categoryLines.length === 0 ? (
+                <tr>
+                  <td colSpan={showTax ? 5 : 4} className="px-3 py-4 text-sm text-muted-foreground">
+                    Nothing categorised yet.
+                  </td>
+                </tr>
+              ) : null}
+              {categoryLines.map((line) => (
+                <tr key={line.key} className="border-b last:border-0">
+                  <td className="px-2 py-1.5">
+                    <EntityPicker
+                      options={expenseAccounts}
+                      value={line.expenseAccountId || null}
+                      onChange={(next) => update(line.key, { expenseAccountId: next ?? '' })}
+                      placeholder="Search accounts"
+                      clearable
+                    />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <Input
+                      aria-label="Description"
+                      value={line.description}
+                      onChange={(event) => update(line.key, { description: event.target.value })}
+                    />
+                  </td>
+                  {showTax ? (
+                    <td className="px-2 py-1.5">
+                      <NativeSelect
+                        aria-label="Tax code"
+                        value={line.taxCodeId}
+                        onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
+                      >
+                        <option value="">No tax</option>
+                        {taxCodes.map((code) => (
+                          <option key={code.id} value={code.id}>
+                            {code.label}
+                          </option>
+                        ))}
+                      </NativeSelect>
+                    </td>
+                  ) : null}
+                  <td className="px-2 py-1.5">
+                    <Input
+                      aria-label="Amount"
+                      inputMode="decimal"
+                      className="tabular text-right"
+                      value={line.unitPrice}
+                      onChange={(event) => update(line.key, { unitPrice: event.target.value })}
+                    />
+                  </td>
+                  <td className="px-1 py-1.5">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Remove line"
+                      onClick={() => setLines((current) => current.filter((l) => l.key !== line.key))}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="border-t p-3">
+          <Button type="button" variant="outline" size="sm" onClick={addCategoryLine}>
+            <PlusIcon /> Add a category
+          </Button>
+        </div>
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+          <h2 className="text-sm font-semibold">Item details</h2>
+          <span className="text-xs text-muted-foreground">
+            Products bought. A tracked item moves stock and holds its cost until it is sold.
+          </span>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b">
+                <th className="w-56 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+                  Product or service
                 </th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Description</th>
                 <th className="w-20 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Qty</th>
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Cost</th>
                 {showTax ? (
-                  <th className="w-36 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
-                    Tax
-                  </th>
+                  <th className="w-36 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Tax</th>
                 ) : null}
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Amount</th>
                 <th className="w-10" />
               </tr>
             </thead>
             <tbody>
-              {lines.map((line) => {
+              {itemLines.length === 0 ? (
+                <tr>
+                  <td colSpan={showTax ? 7 : 6} className="px-3 py-4 text-sm text-muted-foreground">
+                    No products on this document.
+                  </td>
+                </tr>
+              ) : null}
+              {itemLines.map((line) => {
                 const amount = (parseMoneyInput(line.quantity) ?? ZERO)
                   .times(parseMoneyInput(line.unitPrice) ?? ZERO)
                   .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
@@ -353,16 +508,7 @@ export function BillForm({
                         options={items}
                         value={line.itemId || null}
                         onChange={(next) => chooseItem(line.key, next ?? '')}
-                        placeholder="Item"
-                        clearable
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <EntityPicker
-                        options={expenseAccounts}
-                        value={line.expenseAccountId || null}
-                        onChange={(next) => update(line.key, { expenseAccountId: next ?? '' })}
-                        placeholder="Uncategorised"
+                        placeholder="Search or add an item"
                         clearable
                       />
                     </td>
@@ -414,7 +560,6 @@ export function BillForm({
                         variant="ghost"
                         size="icon-sm"
                         aria-label="Remove line"
-                        disabled={lines.length <= 1}
                         onClick={() => setLines((current) => current.filter((l) => l.key !== line.key))}
                       >
                         <Trash2Icon />
@@ -428,21 +573,8 @@ export function BillForm({
         </div>
 
         <div className="flex flex-wrap items-start justify-between gap-4 border-t p-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              setLines((current) => [
-                ...current,
-                empty(
-                  nextKey.current++,
-                  vendors.find((v) => v.id === vendorId)?.defaultExpenseAccountId ?? '',
-                ),
-              ])
-            }
-          >
-            <PlusIcon /> Add line
+          <Button type="button" variant="outline" size="sm" onClick={addItemLine}>
+            <PlusIcon /> Add a product
           </Button>
 
           <dl className="min-w-52 space-y-1 text-sm">

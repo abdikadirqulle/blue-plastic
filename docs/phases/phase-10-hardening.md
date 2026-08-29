@@ -323,6 +323,46 @@ always submits `""` for a field left blank, and `""` is not two characters. Ever
 contact whose country was not filled in was rejected. It now treats the empty
 string as nothing, like every other optional field in the schema.
 
+## 10.14 — Category lines and item lines are not the same thing
+
+A bill's line table used to ask for a product **and** a category on every row.
+Two selectors side by side make the two look interchangeable. They are not:
+
+- A **category** line is an accounting entry — rent, fuel, a professional fee. It
+  names the account the cost lands in and an amount. Nothing is counted.
+- An **item** line is a thing that was bought. It names a product, a quantity and
+  a unit cost, and if the product is tracked the purchase moves stock and the
+  cost sits in inventory until it is sold.
+
+Put stock on a category line and it never reaches the stock ledger. Put rent on
+an item line and you have invented a product called rent.
+
+So the purchase form now has two sections, as QuickBooks does: **Category
+details** and **Item details**. A bill genuinely needs both — that is how stock
+arrives *and* how the electricity bill is recorded — so both are offered, and
+each row asks only what its kind requires.
+
+Sales documents get the opposite treatment: **one** section, product and service
+only. An invoice line's income account comes from the item on it, so a category
+selector there would be a second way of saying the same thing, and the two would
+eventually disagree.
+
+**No server change was needed**, which is the sign the model was already right.
+`purchaseLineSchema` has always accepted either shape — a line with an
+`expenseAccountId` and no item, or a line with an `itemId` — and `resolveLines`
+already derived a tracked item's inventory account itself. The split was a
+statement about *entry*, not about storage, and the two shapes still travel in
+one list because that is how the document holds them.
+
+An item line now sends no account at all. It used to send one copied from the
+item, which was harmless but wrong in principle: for a tracked item the cost goes
+to inventory rather than to an expense account, and only the server knows whether
+an item is stocked.
+
+The purchase detail screen distinguishes them too — an item line shows its
+product and its quantity, a category line shows its account and leaves quantity
+and unit cost blank, because 1 × the amount is arithmetic nobody entered.
+
 ## Verification
 
 `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` — all clean. The test

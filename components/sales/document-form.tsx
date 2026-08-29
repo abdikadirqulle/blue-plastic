@@ -306,12 +306,27 @@ export function DocumentForm({
         </CardContent>
       </Card>
 
+      {/*
+        A sales document has one kind of line: what was sold. There is no
+        category selector here on purpose — an invoice line's income account
+        comes from the product or service on it, so choosing an account as well
+        would be two ways of saying the same thing, and they would eventually
+        disagree. The purchase side is the mirror image: see bill-form.tsx.
+      */}
       <Card className="overflow-hidden p-0">
+        <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+          <h2 className="text-sm font-semibold">Product and service details</h2>
+          <span className="text-xs text-muted-foreground">
+            Each line posts to the income account its item names.
+          </span>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b bg-muted/30">
-                <th className="w-56 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Item</th>
+              <tr className="border-b">
+                <th className="w-56 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+                  Product or service
+                </th>
                 <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Description</th>
                 <th className="w-24 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Qty</th>
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Price</th>

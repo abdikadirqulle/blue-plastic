@@ -229,6 +229,7 @@ remaining cost was: the accounting has been right since Phase 2.
 | 10.11 | Default accounts — which account each system role posts to, editable |
 | 10.12 | Every form disables its button while saving; success is green, not red |
 | 10.13 | Edit routes, row action menus, print, and CSV export on every list |
+| 10.14 | Separate category lines from item lines: purchases get both sections, sales get items only |
 
 Carried forward, unbuilt: attachments on documents, full-text search, rate
 limiting, backup/restore runbook, multi-currency activation, and an end-to-end

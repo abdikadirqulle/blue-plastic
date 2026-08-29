@@ -44,6 +44,7 @@ const FLOWS: { title: string; steps: { text: string; href?: string }[] }[] = [
     title: 'A purchase, end to end',
     steps: [
       { text: 'A bill is something owed. An expense is something already paid.', href: '/purchases/bills/new' },
+      { text: 'Enter costs as categories (rent, fuel) and goods as items. A bill can carry both; only item lines move stock.', href: '/purchases/bills/new' },
       { text: 'Pay bills from the bill payments screen, one payment across as many bills as you like.', href: '/bill-payments/new' },
       { text: 'A vendor credit reduces what you owe, and is applied the same way a payment is.', href: '/purchases/vendor-credits/new' },
     ],

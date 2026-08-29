@@ -210,6 +210,7 @@ journal.
 | Document | Journal |
 | --- | --- |
 | **Bill** | Dr Expense / Inventory / Fixed Asset (per line) - Dr Tax Receivable (if recoverable) - Cr AP (vendor) |
+| | *Category* lines name their account directly. *Item* lines take it from the item — inventory for a tracked one, its expense account otherwise. A bill may carry both. |
 | **Bill payment** | Dr AP (vendor) - Cr Bank |
 | **Expense** (paid immediately) | Dr Expense - Cr Bank / Credit Card |
 | **Vendor credit** | Dr AP (vendor) - Cr Expense / Inventory |

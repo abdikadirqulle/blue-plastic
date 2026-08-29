@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon, PencilIcon } from 'lucide-react'
+import { ArrowLeftIcon, PackageIcon, PencilIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { ReceiveOrderButton, VoidPurchaseButton } from '@/components/purchases/purchase-actions'
@@ -122,7 +122,7 @@ export default async function PurchaseDocumentPage({
           <TableHeader>
             <TableRow>
               <TableHead>Description</TableHead>
-              <TableHead>Category</TableHead>
+              <TableHead>Category or product</TableHead>
               <TableHead className="numeric w-20">Qty</TableHead>
               <TableHead className="numeric w-28">Cost</TableHead>
               <TableHead>Tax</TableHead>
@@ -134,12 +134,31 @@ export default async function PurchaseDocumentPage({
               <TableRow key={line.id}>
                 <TableCell>{line.description ?? line.item?.name ?? '—'}</TableCell>
                 <TableCell className="text-xs text-muted-foreground">
-                  {line.expenseAccount
-                    ? `${line.expenseAccount.code} ${line.expenseAccount.name}`
-                    : 'Uncategorised'}
+                  {/*
+                    A line is one thing or the other. An item line shows the
+                    product, because that is what was chosen and where its account
+                    came from; a category line shows the account.
+                  */}
+                  {line.item ? (
+                    <span className="inline-flex items-center gap-1.5">
+                      <PackageIcon className="size-3" /> {line.item.name}
+                    </span>
+                  ) : line.expenseAccount ? (
+                    `${line.expenseAccount.code} ${line.expenseAccount.name}`
+                  ) : (
+                    'Uncategorised'
+                  )}
                 </TableCell>
-                <TableCell className="numeric tabular">{Number(line.quantity)}</TableCell>
-                <TableCell className="numeric tabular">{formatMoney(line.unitPrice, currency)}</TableCell>
+                <TableCell className="numeric tabular">
+                  {line.item ? Number(line.quantity) : <span className="text-muted-foreground">—</span>}
+                </TableCell>
+                <TableCell className="numeric tabular">
+                  {line.item ? (
+                    formatMoney(line.unitPrice, currency)
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
                 <TableCell className="text-muted-foreground">{line.taxCode?.name ?? '—'}</TableCell>
                 <TableCell className="numeric tabular">{formatMoney(line.amount, currency)}</TableCell>
               </TableRow>
