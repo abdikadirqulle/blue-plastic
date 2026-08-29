@@ -38,15 +38,15 @@ NextAuth handler as its default export plus a `config.matcher`.
 
 ## Naming
 
-| Thing | Convention | Example |
-| --- | --- | --- |
-| Files | kebab-case | `journal-line-form.tsx` |
-| React components | PascalCase | `JournalLineForm` |
-| Server actions | verb-first | `createInvoice`, `postJournal` |
-| Zod schemas | `<entity><Action>Schema` | `invoiceCreateSchema` |
-| Prisma models | PascalCase singular | `JournalLine` |
-| Tables | snake_case plural | `journal_lines` |
-| Permissions | `resource:action` | `invoice:create` |
+| Thing            | Convention               | Example                        |
+| ---------------- | ------------------------ | ------------------------------ |
+| Files            | kebab-case               | `journal-line-form.tsx`        |
+| React components | PascalCase               | `JournalLineForm`              |
+| Server actions   | verb-first               | `createInvoice`, `postJournal` |
+| Zod schemas      | `<entity><Action>Schema` | `invoiceCreateSchema`          |
+| Prisma models    | PascalCase singular      | `JournalLine`                  |
+| Tables           | snake_case plural        | `journal_lines`                |
+| Permissions      | `resource:action`        | `invoice:create`               |
 
 ## Server Actions
 
@@ -55,7 +55,7 @@ validates input with Zod, catches `AppError`, and returns a discriminated result
 
 ```ts
 export const createCustomer = action
-  .permission('customer:create')
+  .permission("customer:create")
   .input(customerCreateSchema)
   .handler(async (ctx, input) => customerService.create(ctx, input))
 ```
@@ -93,11 +93,11 @@ JavaScript `number` at any point in its life.
 
 ## Tests
 
-| Kind | Tool | Scope |
-| --- | --- | --- |
-| Unit | Vitest | money, dates, permissions, posting builders, tax computation |
-| Integration | Vitest + real Postgres | services, triggers, tenant isolation, posting engine |
-| Accounting property tests | Vitest | every generated journal balances; reversal nets to zero |
+| Kind                      | Tool                   | Scope                                                        |
+| ------------------------- | ---------------------- | ------------------------------------------------------------ |
+| Unit                      | Vitest                 | money, dates, permissions, posting builders, tax computation |
+| Integration               | Vitest + real Postgres | services, triggers, tenant isolation, posting engine         |
+| Accounting property tests | Vitest                 | every generated journal balances; reversal nets to zero      |
 
 Integration tests run against a dedicated schema and roll back per test. Trigger
 behaviour is tested by attempting the violation with raw SQL, not just through the

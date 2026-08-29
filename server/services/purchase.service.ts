@@ -9,6 +9,7 @@ import type { PurchaseDocumentInput } from '@/lib/validation/purchases'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
+import { recordMovement } from '@/server/accounting/inventory'
 import {
   buildBillJournal,
   buildExpenseJournal,
@@ -354,8 +355,9 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
       lines: {
         orderBy: { lineNumber: 'asc' },
         select: {
-          amount: true, taxAmount: true, taxCodeId: true, expenseAccountId: true,
+          id: true, amount: true, taxAmount: true, taxCodeId: true, expenseAccountId: true,
           description: true, quantity: true, unitPrice: true, discountPercent: true, itemId: true,
+          item: { select: { id: true, name: true, type: true, inventoryAccountId: true } },
         },
       },
     },
@@ -378,7 +380,10 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
       unitPrice: line.unitPrice.toString(),
       discountPercent: line.discountPercent?.toString() ?? null,
       taxCodeId: line.taxCodeId,
-      incomeAccountId: line.expenseAccountId,
+      // Tracked stock is priced but not expensed: its cost is added to the
+      // inventory asset below instead.
+      incomeAccountId: line.item?.type === 'INVENTORY' ? null : line.expenseAccountId,
+      isStock: line.item?.type === 'INVENTORY',
     })),
     taxCodes,
     ctx.organization.baseCurrency,
@@ -396,6 +401,49 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
     memo: document.memo,
   }
 
+  // Receiving tracked stock values it and adds it to the inventory asset, in the
+  // same journal as the payable. Buying stock is not spending: the business has
+  // swapped cash for goods, and the expense arrives when they are sold.
+  const receivesStock = document.type === 'BILL' || document.type === 'EXPENSE'
+  const returnsStock = document.type === 'VENDOR_CREDIT'
+
+  if (receivesStock || returnsStock) {
+    const stock = new Map<string, Decimal>()
+
+    for (const line of document.lines) {
+      if (line.item?.type !== 'INVENTORY') continue
+      if (!line.item.inventoryAccountId) {
+        throw precondition(`"${line.item.name}" has no inventory account.`)
+      }
+
+      const quantity = new Decimal(line.quantity.toString())
+      const priceForLine = priced.lines.find((p) => p.source.itemId === line.item!.id)
+      const netAmount = priceForLine?.amount ?? new Decimal(line.amount.toString())
+      const unitCost = quantity.isZero() ? new Decimal(0) : netAmount.dividedBy(quantity)
+
+      const movement = await recordMovement(tx, ctx, {
+        itemId: line.item.id,
+        date: toCalendarDate(document.date),
+        type: receivesStock ? 'PURCHASE' : 'PURCHASE_RETURN',
+        sourceType: document.type as never,
+        sourceId: document.id,
+        sourceLineId: line.id,
+        quantity: receivesStock ? quantity : quantity.negated(),
+        unitCost: receivesStock ? unitCost : undefined,
+      })
+
+      stock.set(
+        line.item.inventoryAccountId,
+        (stock.get(line.item.inventoryAccountId) ?? new Decimal(0)).plus(movement.value.abs()),
+      )
+    }
+
+    input.stock = [...stock.entries()].map(([inventoryAccountId, amount]) => ({
+      inventoryAccountId,
+      amount,
+    }))
+  }
+
   const draft =
     document.type === 'BILL'
       ? buildBillJournal(input)
@@ -404,6 +452,11 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
         : buildVendorCreditJournal(input)
 
   const journal = await postJournal(tx, ctx, draft)
+
+  await tx.inventoryTransaction.updateMany({
+    where: { orgId: ctx.orgId, sourceId: document.id, journalId: null },
+    data: { journalId: journal.id },
+  })
 
   await tx.purchaseDocument.update({
     where: { id },
@@ -572,8 +625,8 @@ async function requireVendor(tx: Tx, ctx: OrgContext, vendorId: string) {
  * on the profit and loss, which is the point: money that went somewhere unnamed
  * should be conspicuous rather than hidden.
  *
- * Tracked inventory items are refused, for the same reason as on the sales side:
- * receiving stock has to value it, and costing arrives in Phase 7.
+ * A tracked item is different: its cost belongs to the inventory asset, not to an
+ * expense account, so its line carries the item's inventory account instead.
  */
 async function resolveLines(
   tx: Tx,
@@ -589,21 +642,12 @@ async function resolveLines(
         select: {
           id: true, name: true, type: true, isActive: true, purchaseCost: true,
           purchaseDescription: true, description: true, expenseAccountId: true,
-          purchaseTaxCodeId: true,
+          purchaseTaxCodeId: true, inventoryAccountId: true,
         },
       })
     : []
 
   const byId = new Map(items.map((item) => [item.id, item]))
-  const tracked = items.filter((item) => item.type === 'INVENTORY')
-
-  if (tracked.length > 0) {
-    throw precondition(
-      `${tracked.map((i) => i.name).join(', ')} ${tracked.length === 1 ? 'is a tracked' : 'are tracked'} ` +
-        `inventory ${tracked.length === 1 ? 'item' : 'items'}. Receiving tracked stock has to value it, ` +
-        `and stock costing arrives in phase 7. Until then, use a non-inventory item or an expense account.`,
-    )
-  }
 
   return lines.map((line): DraftSalesLine => {
     const item = line.itemId ? byId.get(line.itemId) : null
@@ -621,8 +665,13 @@ async function resolveLines(
       discountPercent: line.discountPercent ?? null,
       taxCodeId: line.taxCodeId ?? item?.purchaseTaxCodeId ?? null,
       // `incomeAccountId` is the pricing engine's neutral name for "where this
-      // line posts". On a purchase that is the expense or asset account.
-      incomeAccountId: line.expenseAccountId ?? item?.expenseAccountId ?? vendorDefaultAccountId ?? null,
+      // line posts". On a purchase that is the expense or asset account — and for
+      // tracked stock it is handled separately, so it is left unset here.
+      incomeAccountId:
+        item?.type === 'INVENTORY'
+          ? null
+          : (line.expenseAccountId ?? item?.expenseAccountId ?? vendorDefaultAccountId ?? null),
+      isStock: item?.type === 'INVENTORY',
     }
   })
 }

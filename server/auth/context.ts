@@ -23,6 +23,7 @@ export type OrgContext = {
     baseCurrency: string
     fiscalYearStartMonth: number
     timeZone: string
+    allowNegativeStock: boolean
   }
   user: {
     id: string
@@ -57,6 +58,7 @@ export const getOrgContext = cache(async (): Promise<OrgContext | null> => {
           baseCurrency: true,
           fiscalYearStartMonth: true,
           timeZone: true,
+          allowNegativeStock: true,
         },
       },
       user: { select: { id: true, name: true, email: true, image: true } },

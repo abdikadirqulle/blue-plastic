@@ -9,6 +9,7 @@ import type { SalesDocumentInput } from '@/lib/validation/sales'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
+import { recordMovement } from '@/server/accounting/inventory'
 import {
   buildCreditMemoJournal,
   buildInvoiceJournal,
@@ -391,8 +392,11 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
       lines: {
         orderBy: { lineNumber: 'asc' },
         select: {
-          amount: true, taxAmount: true, taxCodeId: true, incomeAccountId: true,
+          id: true, amount: true, taxAmount: true, taxCodeId: true, incomeAccountId: true,
           description: true, quantity: true, unitPrice: true, discountPercent: true, itemId: true,
+          item: {
+            select: { id: true, name: true, type: true, inventoryAccountId: true, cogsAccountId: true },
+          },
         },
       },
     },
@@ -433,6 +437,47 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
     memo: document.memo,
   }
 
+  // Tracked stock moves as part of posting, and its cost joins the same journal.
+  // A sale and its cost are one event; two entries would let a report run between
+  // them and show a margin that was never real.
+  const movesStockOut = document.type === 'INVOICE' || document.type === 'SALES_RECEIPT'
+  const movesStockIn = document.type === 'CREDIT_MEMO'
+
+  if (movesStockOut || movesStockIn) {
+    const cogs = new Map<string, { cogsAccountId: string; inventoryAccountId: string; amount: Decimal }>()
+
+    for (const line of document.lines) {
+      if (line.item?.type !== 'INVENTORY') continue
+      if (!line.item.cogsAccountId || !line.item.inventoryAccountId) {
+        throw precondition(`"${line.item.name}" has no inventory or cost of goods sold account.`)
+      }
+
+      const quantity = new Decimal(line.quantity.toString())
+      const movement = await recordMovement(tx, ctx, {
+        itemId: line.item.id,
+        date: toCalendarDate(document.date),
+        type: movesStockOut ? 'SALE' : 'SALE_RETURN',
+        sourceType: document.type as never,
+        sourceId: document.id,
+        sourceLineId: line.id,
+        quantity: movesStockOut ? quantity.negated() : quantity,
+      })
+
+      const key = `${line.item.cogsAccountId}|${line.item.inventoryAccountId}`
+      const existing = cogs.get(key)
+      const amount = movement.value.abs()
+      if (existing) existing.amount = existing.amount.plus(amount)
+      else
+        cogs.set(key, {
+          cogsAccountId: line.item.cogsAccountId,
+          inventoryAccountId: line.item.inventoryAccountId,
+          amount,
+        })
+    }
+
+    input.cogs = [...cogs.values()]
+  }
+
   const draft =
     document.type === 'INVOICE'
       ? buildInvoiceJournal(input)
@@ -443,6 +488,12 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
           : buildRefundReceiptJournal(input)
 
   const journal = await postJournal(tx, ctx, draft)
+
+  // Tie the movements to the journal they were posted with.
+  await tx.inventoryTransaction.updateMany({
+    where: { orgId: ctx.orgId, sourceId: document.id, journalId: null },
+    data: { journalId: journal.id },
+  })
 
   await tx.salesDocument.update({
     where: { id },
@@ -625,12 +676,6 @@ async function requireCustomer(tx: Tx, ctx: OrgContext, customerId: string) {
 /**
  * Resolve each line against its item: price, description and income account come
  * from master data unless the line overrides them.
- *
- * Inventory items are refused for now. Selling tracked stock has to move the
- * stock and post its cost in the same journal as the revenue, and the costing
- * engine arrives in Phase 7. Allowing the sale without the cost would overstate
- * gross margin on every one of them — a wrong number is worse than a missing
- * feature.
  */
 async function resolveLines(
   tx: Tx,
@@ -645,21 +690,12 @@ async function resolveLines(
         select: {
           id: true, name: true, type: true, isActive: true, salesPrice: true,
           salesDescription: true, description: true, incomeAccountId: true, salesTaxCodeId: true,
+          inventoryAccountId: true, cogsAccountId: true,
         },
       })
     : []
 
   const byId = new Map(items.map((item) => [item.id, item]))
-  const tracked = items.filter((item) => item.type === 'INVENTORY')
-
-  if (tracked.length > 0) {
-    throw precondition(
-      `${tracked.map((i) => i.name).join(', ')} ${tracked.length === 1 ? 'is a tracked' : 'are tracked'} ` +
-        `inventory ${tracked.length === 1 ? 'item' : 'items'}. Selling tracked stock has to move the stock ` +
-        `and post its cost in the same entry as the sale, and stock costing arrives in phase 7. ` +
-        `Until then, use a non-inventory item so the gross margin stays honest.`,
-    )
-  }
 
   return lines.map((line): DraftSalesLine => {
     const item = line.itemId ? byId.get(line.itemId) : null

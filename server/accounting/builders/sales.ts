@@ -29,6 +29,14 @@ export type SalesJournalInput = {
   /** Where a line lands when its item names no income account. */
   fallbackIncomeAccountId: string
   memo?: string | null
+  /**
+   * Cost of what was sold, when the document moved tracked stock.
+   *
+   * Posted in the *same journal* as the revenue, because a sale and its cost are
+   * one event. Splitting them into two entries lets a report be run between them
+   * and show a gross margin that was never real.
+   */
+  cogs?: { cogsAccountId: string; inventoryAccountId: string; amount: Decimal }[]
 }
 
 /**
@@ -53,6 +61,7 @@ export function buildInvoiceJournal(input: SalesJournalInput): DraftJournal {
       },
       ...incomeLines(input, 'credit'),
       ...taxLines(input, 'credit'),
+      ...cogsLines(input, 'out'),
     ],
   }
 }
@@ -82,6 +91,7 @@ export function buildSalesReceiptJournal(input: SalesJournalInput): DraftJournal
       },
       ...incomeLines(input, 'credit'),
       ...taxLines(input, 'credit'),
+      ...cogsLines(input, 'out'),
     ],
   }
 }
@@ -109,6 +119,8 @@ export function buildCreditMemoJournal(input: SalesJournalInput): DraftJournal {
         customerId: input.customerId,
         description: `Credit memo ${input.number}`,
       },
+      // Stock coming back reverses the cost as well as the revenue.
+      ...cogsLines(input, 'in'),
     ],
   }
 }
@@ -181,6 +193,31 @@ export function buildCustomerPaymentJournal(input: {
       },
     ],
   }
+}
+
+/**
+ * Cost of goods sold, alongside the revenue that earned it.
+ *
+ *   selling:   Dr Cost of goods sold · Cr Inventory asset
+ *   returning: Dr Inventory asset     · Cr Cost of goods sold
+ */
+function cogsLines(input: SalesJournalInput, direction: 'out' | 'in'): DraftLine[] {
+  if (!input.cogs?.length) return []
+
+  const lines: DraftLine[] = []
+
+  for (const entry of input.cogs) {
+    if (entry.amount.isZero()) continue
+    if (direction === 'out') {
+      lines.push({ accountId: entry.cogsAccountId, debit: entry.amount, description: 'Cost of goods sold' })
+      lines.push({ accountId: entry.inventoryAccountId, credit: entry.amount, description: 'Stock issued' })
+    } else {
+      lines.push({ accountId: entry.inventoryAccountId, debit: entry.amount, description: 'Stock returned' })
+      lines.push({ accountId: entry.cogsAccountId, credit: entry.amount, description: 'Cost of goods sold reversed' })
+    }
+  }
+
+  return lines
 }
 
 /** One line per income account, so the profit and loss reads by category. */

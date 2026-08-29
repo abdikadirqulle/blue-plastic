@@ -25,6 +25,12 @@ export type PurchaseJournalInput = {
   /** Where a line lands when nothing else says. */
   fallbackExpenseAccountId: string
   memo?: string | null
+  /**
+   * Stock received. Its cost goes to the inventory asset rather than to expense —
+   * the business has swapped cash for goods, it has not spent anything yet. The
+   * expense arrives when the goods are sold, as cost of goods sold.
+   */
+  stock?: { inventoryAccountId: string; amount: Decimal }[]
 }
 
 /**
@@ -42,6 +48,7 @@ export function buildBillJournal(input: PurchaseJournalInput): DraftJournal {
     sourceId: input.documentId,
     lines: [
       ...expenseLines(input, 'debit'),
+      ...stockLines(input, 'debit'),
       ...taxLines(input, 'debit'),
       {
         accountId: input.payableAccountId,
@@ -72,6 +79,7 @@ export function buildExpenseJournal(input: PurchaseJournalInput): DraftJournal {
     sourceId: input.documentId,
     lines: [
       ...expenseLines(input, 'debit'),
+      ...stockLines(input, 'debit'),
       ...taxLines(input, 'debit'),
       {
         accountId: input.paymentAccountId,
@@ -103,6 +111,7 @@ export function buildVendorCreditJournal(input: PurchaseJournalInput): DraftJour
         description: `Vendor credit ${input.number}`,
       },
       ...expenseLines(input, 'credit'),
+      ...stockLines(input, 'credit'),
       ...taxLines(input, 'credit'),
     ],
   }
@@ -148,12 +157,42 @@ export function buildBillPaymentJournal(input: {
   }
 }
 
+/**
+ * Stock received, held as an asset until it is sold.
+ *
+ * The cost of tracked goods is deliberately kept out of `expenseLines`: putting
+ * it in expense would charge the whole purchase to profit on the day it arrived,
+ * and then charge it again as cost of goods sold when it left.
+ */
+function stockLines(input: PurchaseJournalInput, side: 'debit' | 'credit'): DraftLine[] {
+  if (!input.stock?.length) return []
+
+  const byAccount = new Map<string, Decimal>()
+  for (const entry of input.stock) {
+    if (entry.amount.isZero()) continue
+    byAccount.set(
+      entry.inventoryAccountId,
+      (byAccount.get(entry.inventoryAccountId) ?? new Decimal(0)).plus(entry.amount),
+    )
+  }
+
+  return [...byAccount.entries()].map(([accountId, amount]) => {
+    const draft: DraftLine = { accountId, description: 'Stock received' }
+    if (side === 'debit') draft.debit = amount
+    else draft.credit = amount
+    return draft
+  })
+}
+
 /** One line per expense account, so the profit and loss reads by category. */
 function expenseLines(input: PurchaseJournalInput, side: 'debit' | 'credit'): DraftLine[] {
   const byAccount = new Map<string, { amount: Decimal; description: string }>()
 
   for (const line of input.priced.lines) {
     if (line.amount.isZero()) continue
+    // Tracked stock is handled by `stockLines`. Letting it fall through to the
+    // fallback expense account here would debit the same purchase twice.
+    if (line.isStock) continue
     const accountId = line.incomeAccountId ?? input.fallbackExpenseAccountId
     const existing = byAccount.get(accountId)
     if (existing) {

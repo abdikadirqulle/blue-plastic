@@ -6,6 +6,7 @@
 // Phase 4: sales — invoices, estimates, receipts, credit memos, payments.
 // Phase 5: purchases — bills, expenses, vendor credits, purchase orders.
 // Phase 6: banking — transfers, deposits, statement import, reconciliation.
+// Phase 7: inventory — stock movements, weighted-average cost, COGS.
 //
 // The integrity rules that make this a real double-entry ledger (R1–R10 in
 // docs/02-accounting-design.md) are enforced by database triggers, which Prisma
@@ -234,6 +235,23 @@ enum PurchaseDocumentStatus {
   CLOSED
 }
 
+/// Why stock moved. Every movement has one, and it decides which journal the
+/// movement belongs to.
+enum InventoryMovementType {
+  /// Received on a bill.
+  PURCHASE
+  /// Issued on an invoice or sales receipt.
+  SALE
+  /// Came back on a credit memo.
+  SALE_RETURN
+  /// Sent back to the vendor on a vendor credit.
+  PURCHASE_RETURN
+  /// A count, a write-off, or a revaluation.
+  ADJUSTMENT
+  /// Stock the business already had when the books started.
+  OPENING
+}
+
 enum BankDocumentStatus {
   POSTED
   VOID
@@ -333,6 +351,14 @@ model Organization {
   /// IANA zone used to resolve "today" for date defaults and period boundaries.
   timeZone String @default("UTC")
 
+  /// Whether stock may be sold before it has been received.
+  ///
+  /// Off by default. Selling what you do not have means costing it at a price
+  /// nobody has paid, and the error only surfaces later as a margin that moves
+  /// on its own. A business that genuinely sells ahead of delivery can turn it
+  /// on and accept that costs are estimated until the goods arrive.
+  allowNegativeStock Boolean @default(false)
+
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
@@ -351,6 +377,8 @@ model Organization {
   billPayments       BillPayment[]
   bankTransfers      BankTransfer[]
   deposits           Deposit[]
+  inventoryMovements InventoryTransaction[]
+  inventoryAdjustments InventoryAdjustment[]
   importedTransactions ImportedTransaction[]
   reconciliations    BankReconciliation[]
   items          Item[]
@@ -572,6 +600,7 @@ model LedgerAccount {
   purchaseLines     PurchaseDocumentLine[] @relation("PurchaseLineExpense")
   purchasePayments  PurchaseDocument[]     @relation("PurchasePaymentAccount")
   billPaymentSource BillPayment[]          @relation("BillPaymentAccount")
+  adjustments       InventoryAdjustment[]  @relation("AdjustmentAccount")
   transfersFrom     BankTransfer[]         @relation("TransferFrom")
   transfersTo       BankTransfer[]         @relation("TransferTo")
   deposits          Deposit[]              @relation("DepositBankAccount")
@@ -696,6 +725,8 @@ model Journal {
   billPayments      BillPayment[]
   bankTransfers     BankTransfer[]
   deposits          Deposit[]
+  inventoryMovements InventoryTransaction[]
+  inventoryAdjustments InventoryAdjustment[]
 
   reversalOf Journal? @relation("JournalReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
   reversedBy Journal? @relation("JournalReversal")
@@ -992,6 +1023,8 @@ model Item {
   purchaseTaxCode  TaxCode?       @relation("ItemPurchaseTax", fields: [purchaseTaxCodeId], references: [id], onDelete: SetNull)
   salesLines       SalesDocumentLine[]
   purchaseLines    PurchaseDocumentLine[]
+  movements        InventoryTransaction[]
+  adjustmentLines  InventoryAdjustmentLine[]
 
   @@unique([orgId, name])
   @@unique([orgId, sku])
@@ -1701,4 +1734,128 @@ model ReconciliationEntry {
   @@unique([journalLineId])
   @@index([orgId, reconciliationId])
   @@map("reconciliation_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Inventory  (Phase 7)
+// ---------------------------------------------------------------------------
+
+/// Every movement of stock, and what it did to the average cost.
+///
+/// This is a ledger in its own right, and it obeys the same discipline as the
+/// general ledger: append-only, one row per event, running totals carried on the
+/// row rather than recomputed. Its total value must always equal the Inventory
+/// Asset balance in the general ledger — because every movement posts exactly its
+/// own `value` there, in the same transaction that writes this row.
+model InventoryTransaction {
+  id     String @id @default(cuid())
+  orgId  String
+  itemId String
+
+  date DateTime              @db.Date
+  type InventoryMovementType
+
+  /// What caused it, so a movement can be traced back to its document.
+  sourceType   JournalSourceType
+  sourceId     String?
+  sourceLineId String?
+
+  /// Signed: positive received, negative issued.
+  quantity Decimal @db.Decimal(19, 4)
+
+  /// Cost per unit for this movement. On a receipt, what was paid. On an issue,
+  /// the weighted average at the moment it was issued. Six decimals because a
+  /// per-unit cost divides badly and rounding it early moves the total.
+  unitCost Decimal @db.Decimal(19, 6)
+
+  /// Signed value change, and what is posted to the Inventory Asset account.
+  value Decimal @db.Decimal(19, 4)
+
+  /// The item's position after this movement.
+  runningQuantity Decimal @db.Decimal(19, 4)
+  runningValue    Decimal @db.Decimal(19, 4)
+
+  /// Monotonic per item, in the order movements were recorded. See
+  /// docs/phases/phase-07-inventory.md on why entry order rather than date order.
+  sequence Int
+
+  journalId String?
+
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  createdById String?
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  item         Item         @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  journal      Journal?     @relation(fields: [journalId], references: [id], onDelete: Restrict)
+
+  @@unique([itemId, sequence])
+  @@index([orgId, itemId, sequence(sort: Desc)])
+  @@index([orgId, date])
+  @@index([orgId, sourceType, sourceId])
+  @@map("inventory_transactions")
+}
+
+/// A count, a write-off, or a revaluation.
+model InventoryAdjustment {
+  id    String @id @default(cuid())
+  orgId String
+
+  number String
+  date   DateTime @db.Date
+
+  /// Where the difference goes — normally Inventory Shrinkage.
+  accountId String
+
+  memo   String?
+  reason String?
+
+  status BankDocumentStatus @default(POSTED)
+
+  journalId String?
+
+  voidedAt   DateTime? @db.Timestamptz(6)
+  voidReason String?
+
+  createdById String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization              @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account      LedgerAccount             @relation("AdjustmentAccount", fields: [accountId], references: [id], onDelete: Restrict)
+  journal      Journal?                  @relation(fields: [journalId], references: [id], onDelete: Restrict)
+  lines        InventoryAdjustmentLine[]
+
+  @@unique([orgId, number])
+  @@unique([id, orgId])
+  @@index([orgId, date(sort: Desc)])
+  @@map("inventory_adjustments")
+}
+
+model InventoryAdjustmentLine {
+  id           String @id @default(cuid())
+  adjustmentId String
+  orgId        String
+
+  lineNumber Int @db.SmallInt
+  itemId     String
+
+  /// What the count says is actually there.
+  countedQuantity Decimal @db.Decimal(19, 4)
+  /// What the books said before the adjustment, kept so the document can be read
+  /// years later without recomputing history.
+  previousQuantity Decimal @db.Decimal(19, 4)
+  /// countedQuantity - previousQuantity.
+  quantityChange Decimal @db.Decimal(19, 4)
+
+  unitCost Decimal @db.Decimal(19, 6)
+  value    Decimal @db.Decimal(19, 4)
+
+  description String?
+
+  adjustment InventoryAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  item       Item                @relation(fields: [itemId], references: [id], onDelete: Restrict)
+
+  @@unique([adjustmentId, lineNumber])
+  @@index([orgId, itemId])
+  @@map("inventory_adjustment_lines")
 }

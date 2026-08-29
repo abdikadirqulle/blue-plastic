@@ -43,7 +43,10 @@ export async function makeOrg(tx: Tx, options: { fiscalYearStartMonth?: number }
       fiscalYearStartMonth: options.fiscalYearStartMonth ?? 1,
       timeZone: 'UTC',
     },
-    select: { id: true, name: true, baseCurrency: true, fiscalYearStartMonth: true, timeZone: true },
+    select: {
+      id: true, name: true, baseCurrency: true, fiscalYearStartMonth: true,
+      timeZone: true, allowNegativeStock: true,
+    },
   })
 
   const user = await tx.user.create({

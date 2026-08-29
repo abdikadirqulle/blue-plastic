@@ -12,6 +12,12 @@ export type DraftSalesLine = {
   taxCodeId?: string | null
   incomeAccountId?: string | null
   serviceDate?: string | null
+  /**
+   * Tracked stock. Its cost belongs to the inventory asset, so the journal
+   * builder must not also post it to an expense account — doing both would debit
+   * the same purchase twice.
+   */
+  isStock?: boolean
 }
 
 export type PricedLine = {
@@ -25,6 +31,7 @@ export type PricedLine = {
   tax: TaxResult
   incomeAccountId: string | null
   taxCodeId: string | null
+  isStock: boolean
 }
 
 export type PricedDocument = {
@@ -96,6 +103,7 @@ export function priceDocument(
       tax,
       incomeAccountId: line.incomeAccountId ?? null,
       taxCodeId: line.taxCodeId ?? null,
+      isStock: line.isStock ?? false,
     })
 
     subtotal = subtotal.plus(net)

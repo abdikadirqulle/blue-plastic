@@ -136,6 +136,24 @@ const EXPECTED_TRIGGERS: { name: string; table: string; rule: string; protects: 
     rule: '—',
     protects: 'a reconciliation only clears lines on the account it is reconciling',
   },
+  {
+    name: 'trg_inventory_movement_immutable',
+    table: 'inventory_transactions',
+    rule: '—',
+    protects: 'the stock ledger is append-only, like the general ledger',
+  },
+  {
+    name: 'trg_movement_item_tracked',
+    table: 'inventory_transactions',
+    rule: '—',
+    protects: 'only a tracked item has stock to move',
+  },
+  {
+    name: 'trg_movement_continuity',
+    table: 'inventory_transactions',
+    rule: '—',
+    protects: 'every running total follows from the movement before it',
+  },
 ]
 
 const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protects: string }[] = [
@@ -235,6 +253,18 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
     rule: '—',
     protects: 'a deposit line banks a positive amount',
   },
+  {
+    name: 'inventory_transactions_non_zero',
+    table: 'inventory_transactions',
+    rule: '—',
+    protects: 'a movement of nothing is not a movement',
+  },
+  {
+    name: 'adjustment_lines_change',
+    table: 'inventory_adjustment_lines',
+    rule: '—',
+    protects: 'an adjustment line\'s arithmetic holds',
+  },
 ]
 
 const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] = [
@@ -282,6 +312,11 @@ const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] 
     name: 'deposit_lines_deposit_org_fkey',
     rule: 'R9',
     protects: 'a deposit line cannot cross organisations',
+  },
+  {
+    name: 'adjustment_lines_document_org_fkey',
+    rule: 'R9',
+    protects: 'an adjustment line cannot cross organisations',
   },
 ]
 

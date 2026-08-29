@@ -1,0 +1,155 @@
+import type { Metadata } from 'next'
+import Link from 'next/link'
+import { notFound } from 'next/navigation'
+import { ArrowLeftIcon } from 'lucide-react'
+
+import { PageHeader } from '@/components/data/page-header'
+import { Badge } from '@/components/ui/badge'
+import { buttonVariants } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { formatDate, toCalendarDate } from '@/lib/date'
+import { formatMoney } from '@/lib/money'
+import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
+import * as inventoryService from '@/server/services/inventory.service'
+
+export const metadata: Metadata = { title: 'Stock movements' }
+
+const TYPE_LABELS: Record<string, string> = {
+  PURCHASE: 'Received',
+  SALE: 'Sold',
+  SALE_RETURN: 'Returned by customer',
+  PURCHASE_RETURN: 'Returned to vendor',
+  ADJUSTMENT: 'Adjustment',
+  OPENING: 'Opening stock',
+}
+
+/**
+ * One item's stock ledger. The running quantity and value on every row are the
+ * item's actual position after that movement — not recomputed for display, but
+ * the figures the ledger was written with.
+ */
+export default async function ItemMovementsPage({
+  params,
+}: {
+  params: Promise<{ itemId: string }>
+}) {
+  const ctx = await requireOrgContext('inventory:read')
+  const { itemId } = await params
+
+  const item = await db.item.findFirst({
+    where: { id: itemId, orgId: ctx.orgId, type: 'INVENTORY' },
+    select: { id: true, name: true, sku: true, reorderPoint: true },
+  })
+  if (!item) notFound()
+
+  const movements = await inventoryService.movementsFor(ctx, itemId)
+  const currency = ctx.organization.baseCurrency
+  const latest = movements.at(-1)
+
+  return (
+    <>
+      <Link href="/inventory" className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}>
+        <ArrowLeftIcon /> Inventory
+      </Link>
+
+      <PageHeader title={item.name} description={item.sku ?? undefined} />
+
+      <div className="mb-4 grid gap-4 sm:grid-cols-3">
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">On hand</p>
+            <p className="tabular mt-0.5 text-lg font-semibold">
+              {latest ? latest.runningQuantity.toFixed(2) : '0.00'}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Average cost</p>
+            <p className="tabular mt-0.5 text-lg font-semibold">
+              {latest && !latest.runningQuantity.isZero()
+                ? formatMoney(latest.runningValue.dividedBy(latest.runningQuantity), currency)
+                : '—'}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground">Value</p>
+            <p className="tabular mt-0.5 text-lg font-semibold">
+              {formatMoney(latest?.runningValue ?? 0, currency)}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {movements.length === 0 ? (
+        <Card>
+          <CardContent className="p-6 text-sm text-muted-foreground">
+            Nothing has moved yet. Receive some on a bill, and it will appear here.
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="overflow-hidden p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-12">#</TableHead>
+                <TableHead className="w-28">Date</TableHead>
+                <TableHead>What happened</TableHead>
+                <TableHead className="numeric w-24">Quantity</TableHead>
+                <TableHead className="numeric w-28">Unit cost</TableHead>
+                <TableHead className="numeric w-28">Value</TableHead>
+                <TableHead className="numeric w-24">On hand</TableHead>
+                <TableHead className="numeric w-28">Held at</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {movements.map((movement) => (
+                <TableRow key={movement.id}>
+                  <TableCell className="tabular text-muted-foreground">{movement.sequence}</TableCell>
+                  <TableCell className="tabular whitespace-nowrap text-muted-foreground">
+                    {formatDate(toCalendarDate(movement.date))}
+                  </TableCell>
+                  <TableCell>
+                    <span className="block">{TYPE_LABELS[movement.type] ?? movement.type}</span>
+                    {movement.journal ? (
+                      <Link
+                        href={`/journals/${movement.journal.id}`}
+                        className="tabular block text-xs text-muted-foreground underline-offset-4 hover:underline"
+                      >
+                        {movement.journal.journalNumber}
+                      </Link>
+                    ) : (
+                      <Badge variant="destructive" className="mt-1">
+                        no entry
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="numeric tabular">
+                    {movement.quantity.isPositive() ? '+' : ''}
+                    {movement.quantity.toFixed(2)}
+                  </TableCell>
+                  <TableCell className="numeric tabular text-muted-foreground">
+                    {formatMoney(movement.unitCost, currency)}
+                  </TableCell>
+                  <TableCell className="numeric tabular">
+                    {formatMoney(movement.value, currency)}
+                  </TableCell>
+                  <TableCell className="numeric tabular font-medium">
+                    {movement.runningQuantity.toFixed(2)}
+                  </TableCell>
+                  <TableCell className="numeric tabular font-medium">
+                    {formatMoney(movement.runningValue, currency)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+    </>
+  )
+}
