@@ -9,10 +9,8 @@ import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { CURRENCIES, MONTHS } from '@/lib/constants'
+import { NativeSelect } from '@/components/ui/native-select'
 import { updateAccountingSettingsForm } from './actions'
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50'
 
 export function AccountingForm({
   baseCurrency,
@@ -49,33 +47,31 @@ export function AccountingForm({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field name="baseCurrency" label="Base currency" required error={e?.baseCurrency}>
-              <select
+              <NativeSelect
                 {...fieldProps('baseCurrency', e?.baseCurrency)}
                 defaultValue={baseCurrency}
                 disabled={!canEdit}
-                className={selectClass}
               >
                 {CURRENCIES.map((c) => (
                   <option key={c.code} value={c.code}>
                     {c.code} — {c.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field name="fiscalYearStartMonth" label="Fiscal year starts" required error={e?.fiscalYearStartMonth}>
-              <select
+              <NativeSelect
                 {...fieldProps('fiscalYearStartMonth', e?.fiscalYearStartMonth)}
                 defaultValue={String(fiscalYearStartMonth)}
                 disabled={!canEdit}
-                className={selectClass}
               >
                 {MONTHS.map((m, i) => (
                   <option key={m} value={i + 1}>
                     {m}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
           </div>
         </CardContent>

@@ -6,6 +6,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, Loader2Icon, UploadIcon } from 'lu
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { previewImport, runImport } from '@/app/(app)/customers/actions'
 import type { ContactSide } from './contact-dialog'
 
@@ -79,17 +80,11 @@ export function ImportDialog({ side, columns }: { side: ContactSide; columns: { 
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto p-4 sm:place-items-center">
-      <button type="button" aria-label="Cancel" className="fixed inset-0 bg-black/40" onClick={reset} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="import-title"
-        className="relative my-4 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg"
-      >
-        <h2 id="import-title" className="text-base font-semibold">
-          Import {noun}
-        </h2>
+    <Dialog open onOpenChange={(next) => { if (!next) reset() }}>
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle>Import {noun}</DialogTitle>
+        </DialogHeader>
         <p className="mt-1 text-sm text-muted-foreground">
           Upload a CSV exported from a spreadsheet. Nothing is written until you have seen what will
           happen.
@@ -199,7 +194,7 @@ export function ImportDialog({ side, columns }: { side: ContactSide; columns: { 
             </Button>
           )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

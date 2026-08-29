@@ -6,11 +6,13 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import type { SalesTypeConfig } from '@/lib/sales-types'
 import { saveDocumentForm } from '@/app/(app)/sales/actions'
@@ -44,9 +46,6 @@ const empty = (key: number): Line => ({
   discountPercent: '',
   taxCodeId: '',
 })
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * One form for every customer-facing document. The type decides the wording, the
@@ -222,20 +221,16 @@ export function DocumentForm({
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Field name="customerId" label="Customer" required error={state.fieldErrors?.customerId}>
-              <select
-                {...fieldProps('customerId', state.fieldErrors?.customerId)}
-                value={customerId}
-                onChange={(event) => setCustomerId(event.target.value)}
-                className={selectClass}
+              <EntityPicker
+                id="customerId"
+                kind="customer"
+                options={customers}
+                value={customerId || null}
+                onChange={(next) => setCustomerId(next ?? '')}
+                placeholder="Search or add a customer"
                 required
-              >
-                <option value="">— choose —</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.label}
-                  </option>
-                ))}
-              </select>
+                error={state.fieldErrors?.customerId}
+              />
             </Field>
 
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -255,11 +250,10 @@ export function DocumentForm({
                 hint="Sets the due date from this document's own date."
                 error={state.fieldErrors?.paymentTermId}
               >
-                <select
+                <NativeSelect
                   {...fieldProps('paymentTermId', state.fieldErrors?.paymentTermId, true)}
                   value={paymentTermId}
                   onChange={(event) => setPaymentTermId(event.target.value)}
-                  className={selectClass}
                 >
                   <option value="">Customer&rsquo;s default</option>
                   {terms.map((term) => (
@@ -267,7 +261,7 @@ export function DocumentForm({
                       {term.label}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Field>
             ) : null}
 
@@ -278,19 +272,15 @@ export function DocumentForm({
                 required
                 error={state.fieldErrors?.depositAccountId}
               >
-                <select
-                  {...fieldProps('depositAccountId', state.fieldErrors?.depositAccountId)}
-                  value={depositAccountId}
-                  onChange={(event) => setDepositAccountId(event.target.value)}
-                  className={selectClass}
+                <EntityPicker
+                  id="depositAccountId"
+                  options={depositAccounts}
+                  value={depositAccountId || null}
+                  onChange={(next) => setDepositAccountId(next ?? '')}
+                  placeholder="Search accounts"
                   required
-                >
-                  {depositAccounts.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.label}
-                    </option>
-                  ))}
-                </select>
+                  error={state.fieldErrors?.depositAccountId}
+                />
               </Field>
             ) : null}
 
@@ -334,19 +324,14 @@ export function DocumentForm({
                 return (
                   <tr key={line.key} className="border-b last:border-0">
                     <td className="px-2 py-1.5">
-                      <select
-                        aria-label="Item"
-                        value={line.itemId}
-                        onChange={(event) => chooseItem(line.key, event.target.value)}
-                        className={selectClass}
-                      >
-                        <option value="">— none —</option>
-                        {items.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.label}
-                          </option>
-                        ))}
-                      </select>
+                      <EntityPicker
+                        kind="item"
+                        options={items}
+                        value={line.itemId || null}
+                        onChange={(next) => chooseItem(line.key, next ?? '')}
+                        placeholder="Item"
+                        clearable
+                      />
                     </td>
                     <td className="px-2 py-1.5">
                       <Input
@@ -383,11 +368,11 @@ export function DocumentForm({
                       />
                     </td>
                     <td className="px-2 py-1.5">
-                      <select
+                      <NativeSelect
                         aria-label="Tax code"
                         value={line.taxCodeId}
                         onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
-                        className={selectClass}
+                        className="px-2"
                       >
                         <option value="">No tax</option>
                         {taxCodes.map((code) => (
@@ -395,7 +380,7 @@ export function DocumentForm({
                             {code.label}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </td>
                     <td className="tabular px-3 py-1.5 text-right">
                       {formatMoney(gross.minus(discount), currency)}

@@ -6,11 +6,13 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import { saveDepositForm } from '@/app/(app)/banking/actions'
@@ -25,9 +27,6 @@ type Payment = {
 }
 type Option = { id: string; label: string }
 type OtherLine = { key: number; accountId: string; description: string; amount: string }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 export function DepositForm({
   bankAccounts,
@@ -95,11 +94,10 @@ export function DepositForm({
           <FormError message={state.message} />
 
           <Field name="bankAccountId" label="Deposit to" required error={state.fieldErrors?.bankAccountId}>
-            <select
+            <NativeSelect
               {...fieldProps('bankAccountId', state.fieldErrors?.bankAccountId)}
               value={bankAccountId}
               onChange={(event) => setBankAccountId(event.target.value)}
-              className={selectClass}
               required
             >
               {bankAccounts.map((account) => (
@@ -107,7 +105,7 @@ export function DepositForm({
                   {account.label}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </Field>
 
           <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -196,23 +194,16 @@ export function DepositForm({
               {otherLines.map((line) => (
                 <tr key={line.key} className="border-b last:border-0">
                   <td className="w-64 px-2 py-1.5">
-                    <select
-                      aria-label="Account"
-                      value={line.accountId}
-                      onChange={(event) =>
+                    <EntityPicker
+                      options={otherAccounts}
+                      value={line.accountId || null}
+                      onChange={(next) =>
                         setOtherLines((current) =>
-                          current.map((l) => (l.key === line.key ? { ...l, accountId: event.target.value } : l)),
+                          current.map((l) => (l.key === line.key ? { ...l, accountId: next ?? '' } : l)),
                         )
                       }
-                      className={selectClass}
-                    >
-                      <option value="">— choose an account —</option>
-                      {otherAccounts.map((account) => (
-                        <option key={account.id} value={account.id}>
-                          {account.label}
-                        </option>
-                      ))}
-                    </select>
+                      placeholder="Search accounts"
+                    />
                   </td>
                   <td className="px-2 py-1.5">
                     <Input

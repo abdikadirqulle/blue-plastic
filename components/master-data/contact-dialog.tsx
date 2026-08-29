@@ -10,7 +10,9 @@ import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { Separator } from '@/components/ui/separator'
 import {
   createCustomerForm,
@@ -47,9 +49,6 @@ export type ContactValues = {
 }
 
 export type Option = { id: string; label: string }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 export function NewContactButton(props: {
   side: ContactSide
@@ -117,17 +116,11 @@ export function ContactDialog({
   const noun = side === 'customer' ? 'customer' : 'vendor'
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto p-4 sm:place-items-center">
-      <button type="button" aria-label="Cancel" className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="contact-dialog-title"
-        className="relative my-4 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg"
-      >
-        <h2 id="contact-dialog-title" className="text-base font-semibold">
-          {mode === 'create' ? `New ${noun}` : `Edit ${contact?.displayName}`}
-        </h2>
+    <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle>{mode === 'create' ? `New ${noun}` : `Edit ${contact?.displayName}`}</DialogTitle>
+        </DialogHeader>
 
         <form action={submit} className="mt-4 space-y-5">
           <FormError message={state.message} />
@@ -242,10 +235,9 @@ export function ContactDialog({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field name="paymentTermId" label="Payment terms" error={e?.paymentTermId}>
-              <select
+              <NativeSelect
                 {...fieldProps('paymentTermId', e?.paymentTermId)}
                 defaultValue={contact?.paymentTermId ?? ''}
-                className={selectClass}
               >
                 <option value="">— none —</option>
                 {terms.map((term) => (
@@ -253,7 +245,7 @@ export function ContactDialog({
                     {term.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field name="taxRegistrationNumber" label="Tax registration number" error={e?.taxRegistrationNumber}>
@@ -285,10 +277,9 @@ export function ContactDialog({
               hint="Pre-selected on a bill, so routine spending is categorised the same way every time."
               error={e?.defaultExpenseAccountId}
             >
-              <select
+              <NativeSelect
                 {...fieldProps('defaultExpenseAccountId', e?.defaultExpenseAccountId, true)}
                 defaultValue={contact?.defaultExpenseAccountId ?? ''}
-                className={selectClass}
               >
                 <option value="">— none —</option>
                 {expenseAccounts.map((account) => (
@@ -296,7 +287,7 @@ export function ContactDialog({
                     {account.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
           )}
 
@@ -340,7 +331,7 @@ export function ContactDialog({
             </SubmitButton>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

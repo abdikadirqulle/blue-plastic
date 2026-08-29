@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { Field } from '@/components/forms/field'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { formatDate, toCalendarDate } from '@/lib/date'
@@ -206,14 +207,15 @@ export function ReconcileView({
       </div>
 
       {undoing ? (
-        <div className="fixed inset-0 z-50 grid place-items-center p-4">
-          <button type="button" aria-label="Cancel" className="absolute inset-0 bg-black/40" onClick={() => setUndoing(false)} />
-          <div role="dialog" aria-modal="true" className="relative w-full max-w-md rounded-xl border bg-card p-6 shadow-lg">
-            <h2 className="text-base font-semibold">Undo this reconciliation</h2>
-            <p className="mt-1 mb-4 text-sm text-muted-foreground">
-              The reconciliation is deleted and every item it cleared becomes available again. The journal
-              entries themselves are untouched — they always were. This is logged.
-            </p>
+        <Dialog open onOpenChange={(next) => { if (!next) setUndoing(false) }}>
+          <DialogContent size="sm">
+            <DialogHeader>
+              <DialogTitle>Undo this reconciliation</DialogTitle>
+              <DialogDescription>
+                The reconciliation is deleted and every item it cleared becomes available again. The journal
+                entries themselves are untouched — they always were. This is logged.
+              </DialogDescription>
+            </DialogHeader>
 
             {error ? (
               <p role="alert" className="mb-3 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
@@ -256,8 +258,8 @@ export function ReconcileView({
                 Undo it
               </Button>
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       ) : null}
     </>
   )

@@ -10,11 +10,10 @@ import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { saveAgencyForm, saveCodeForm, saveRateForm } from './actions'
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 type Option = { id: string; label: string }
 
@@ -32,7 +31,7 @@ function useCloseOnSuccess(status: string, message: string | undefined, onClose:
   }, [status, message, router, onClose])
 }
 
-function Dialog({
+function TaxDialog({
   title,
   description,
   children,
@@ -44,18 +43,15 @@ function Dialog({
   onClose: () => void
 }) {
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto p-4 sm:place-items-center">
-      <button type="button" aria-label="Cancel" className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        className="relative my-4 w-full max-w-lg rounded-xl border bg-card p-6 shadow-lg"
-      >
-        <h2 className="text-base font-semibold">{title}</h2>
-        {description ? <p className="mt-1 text-sm text-muted-foreground">{description}</p> : null}
+    <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
+      <DialogContent size="md">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        {description ? <DialogDescription>{description}</DialogDescription> : null}
         <div className="mt-4">{children}</div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -79,7 +75,7 @@ function AgencyDialog({ onClose }: { onClose: () => void }) {
   const e = state.fieldErrors
 
   return (
-    <Dialog
+    <TaxDialog
       title="New tax agency"
       description="Who the tax is owed to, and how often it is filed."
       onClose={onClose}
@@ -93,11 +89,11 @@ function AgencyDialog({ onClose }: { onClose: () => void }) {
           <Input {...fieldProps('registrationNumber', e?.registrationNumber)} />
         </Field>
         <Field name="filingFrequency" label="Filing frequency" required error={e?.filingFrequency}>
-          <select {...fieldProps('filingFrequency', e?.filingFrequency)} className={selectClass} defaultValue="MONTHLY">
+          <NativeSelect {...fieldProps('filingFrequency', e?.filingFrequency)} defaultValue="MONTHLY">
             <option value="MONTHLY">Monthly</option>
             <option value="QUARTERLY">Quarterly</option>
             <option value="ANNUALLY">Annually</option>
-          </select>
+          </NativeSelect>
         </Field>
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" onClick={onClose}>
@@ -106,7 +102,7 @@ function AgencyDialog({ onClose }: { onClose: () => void }) {
           <SubmitButton pendingLabel="Saving…">Create agency</SubmitButton>
         </div>
       </form>
-    </Dialog>
+    </TaxDialog>
   )
 }
 
@@ -138,7 +134,7 @@ function RateDialog({
   const e = state.fieldErrors
 
   return (
-    <Dialog
+    <TaxDialog
       title="New tax rate"
       description="A single percentage owed to one agency. Combine rates into a tax code to charge them together."
       onClose={onClose}
@@ -162,21 +158,21 @@ function RateDialog({
         </div>
 
         <Field name="agencyId" label="Agency" required error={e?.agencyId}>
-          <select {...fieldProps('agencyId', e?.agencyId)} className={selectClass} required>
+          <NativeSelect {...fieldProps('agencyId', e?.agencyId)} required>
             {agencies.map((agency) => (
               <option key={agency.id} value={agency.id}>
                 {agency.label}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
 
         <Field name="appliesTo" label="Applies to" required error={e?.appliesTo}>
-          <select {...fieldProps('appliesTo', e?.appliesTo)} className={selectClass} defaultValue="BOTH">
+          <NativeSelect {...fieldProps('appliesTo', e?.appliesTo)} defaultValue="BOTH">
             <option value="BOTH">Sales and purchases</option>
             <option value="SALES">Sales only</option>
             <option value="PURCHASES">Purchases only</option>
-          </select>
+          </NativeSelect>
         </Field>
 
         <Field
@@ -185,14 +181,14 @@ function RateDialog({
           hint="Defaults to Sales Tax Payable — tax collected is money held for the authority, not income."
           error={e?.salesAccountId}
         >
-          <select {...fieldProps('salesAccountId', e?.salesAccountId, true)} className={selectClass} defaultValue="">
+          <NativeSelect {...fieldProps('salesAccountId', e?.salesAccountId, true)} defaultValue="">
             <option value="">Sales Tax Payable (default)</option>
             {accounts.map((account) => (
               <option key={account.id} value={account.id}>
                 {account.label}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </Field>
 
         <div className="flex justify-end gap-2">
@@ -202,7 +198,7 @@ function RateDialog({
           <SubmitButton pendingLabel="Saving…">Create rate</SubmitButton>
         </div>
       </form>
-    </Dialog>
+    </TaxDialog>
   )
 }
 
@@ -253,7 +249,7 @@ function CodeDialog({
   })
 
   return (
-    <Dialog
+    <TaxDialog
       title="New tax code"
       description="What someone picks on a document line. One code can combine several rates."
       onClose={onClose}
@@ -301,7 +297,7 @@ function CodeDialog({
           <p className="text-sm font-medium">Rates</p>
           {components.map((component, index) => (
             <div key={component.key} className="flex items-center gap-2">
-              <select
+              <NativeSelect
                 aria-label={`Rate ${index + 1}`}
                 value={component.taxRateId}
                 onChange={(event) =>
@@ -311,14 +307,13 @@ function CodeDialog({
                     ),
                   )
                 }
-                className={selectClass}
               >
                 {rates.map((rate) => (
                   <option key={rate.id} value={rate.id}>
                     {rate.label} ({(Number(rate.rate) * 100).toFixed(2)}%)
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
 
               {index > 0 ? (
                 <label className="flex shrink-0 items-center gap-1.5 text-xs whitespace-nowrap">
@@ -382,6 +377,6 @@ function CodeDialog({
           </SubmitButton>
         </div>
       </form>
-    </Dialog>
+    </TaxDialog>
   )
 }

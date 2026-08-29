@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 
 import { Field } from '@/components/forms/field'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { convertEstimate, voidDocument } from '@/app/(app)/sales/actions'
 
@@ -26,10 +27,11 @@ export function VoidDocumentButton({ id, number }: { id: string; number: string 
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center p-4">
-      <button type="button" aria-label="Cancel" className="absolute inset-0 bg-black/40" onClick={() => setOpen(false)} />
-      <div role="dialog" aria-modal="true" className="relative w-full max-w-md rounded-xl border bg-card p-6 shadow-lg">
-        <h2 className="text-base font-semibold">Void {number}</h2>
+    <Dialog open onOpenChange={(next) => { if (!next) setOpen(false) }}>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>Void {number}</DialogTitle>
+        </DialogHeader>
         <p className="mt-1 mb-4 text-sm text-muted-foreground">
           The entry is reversed and both stay in the ledger. The document is kept — a missing number is a
           question nobody can answer later, and a voided one answers it.
@@ -76,8 +78,8 @@ export function VoidDocumentButton({ id, number }: { id: string; number: string 
             Void {number}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 

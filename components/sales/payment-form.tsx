@@ -5,11 +5,13 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import { PAYMENT_METHOD_LABELS } from '@/lib/sales-types'
@@ -17,9 +19,6 @@ import { savePaymentForm } from '@/app/(app)/sales/actions'
 
 type OpenInvoice = { id: string; number: string; date: string; dueDate: string | null; balance: string }
 type Option = { id: string; label: string }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * Recording money received.
@@ -131,20 +130,16 @@ export function PaymentForm({
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <Field name="customerId" label="Customer" required error={state.fieldErrors?.customerId}>
-              <select
-                {...fieldProps('customerId', state.fieldErrors?.customerId)}
-                value={customerId}
-                onChange={(event) => chooseCustomer(event.target.value)}
-                className={selectClass}
+              <EntityPicker
+                id="customerId"
+                kind="customer"
+                options={customers}
+                value={customerId || null}
+                onChange={(next) => chooseCustomer(next ?? '')}
+                placeholder="Search or add a customer"
                 required
-              >
-                <option value="">— choose —</option>
-                {customers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.label}
-                  </option>
-                ))}
-              </select>
+                error={state.fieldErrors?.customerId}
+              />
             </Field>
 
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -170,18 +165,17 @@ export function PaymentForm({
             </Field>
 
             <Field name="method" label="Method" error={state.fieldErrors?.method}>
-              <select
+              <NativeSelect
                 {...fieldProps('method', state.fieldErrors?.method)}
                 value={method}
                 onChange={(event) => setMethod(event.target.value)}
-                className={selectClass}
               >
                 {Object.entries(PAYMENT_METHOD_LABELS).map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field
@@ -191,11 +185,10 @@ export function PaymentForm({
               required
               error={state.fieldErrors?.depositAccountId}
             >
-              <select
+              <NativeSelect
                 {...fieldProps('depositAccountId', state.fieldErrors?.depositAccountId, true)}
                 value={depositAccountId}
                 onChange={(event) => setDepositAccountId(event.target.value)}
-                className={selectClass}
                 required
               >
                 {depositAccounts.map((account) => (
@@ -203,7 +196,7 @@ export function PaymentForm({
                     {account.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field name="reference" label="Reference" error={state.fieldErrors?.reference}>

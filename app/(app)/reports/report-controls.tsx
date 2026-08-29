@@ -6,12 +6,10 @@ import { DownloadIcon, Loader2Icon } from 'lucide-react'
 
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { Label } from '@/components/ui/label'
 import { PERIOD_LABELS, type PeriodKey } from '@/lib/report-periods'
 import { COMPARISON_LABELS, type ComparisonKey } from './params'
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 export type ControlSet = {
   /** A balance sheet is stated at a date; everything else covers a range. */
@@ -91,9 +89,9 @@ export function ReportControls({
     <div className="mb-4 flex flex-wrap items-end gap-3">
       <div className="space-y-1.5">
         <Label htmlFor="period">Period</Label>
-        <select
+        <NativeSelect
           id="period"
-          className={`${selectClass} w-44`}
+          className="w-44"
           value={draft.period}
           onChange={(event) => apply({ period: event.target.value as PeriodKey })}
         >
@@ -102,7 +100,7 @@ export function ReportControls({
               {PERIOD_LABELS[key]}
             </option>
           ))}
-        </select>
+        </NativeSelect>
       </div>
 
       {controls.mode === 'range' ? (
@@ -147,24 +145,24 @@ export function ReportControls({
       {controls.basis ? (
         <div className="space-y-1.5">
           <Label htmlFor="basis">Basis</Label>
-          <select
+          <NativeSelect
             id="basis"
-            className={`${selectClass} w-36`}
+            className="w-36"
             value={draft.basis}
             onChange={(event) => apply({ basis: event.target.value as 'accrual' | 'cash' })}
           >
             <option value="accrual">Accrual</option>
             <option value="cash">Cash</option>
-          </select>
+          </NativeSelect>
         </div>
       ) : null}
 
       {controls.comparison ? (
         <div className="space-y-1.5">
           <Label htmlFor="compare">Compare</Label>
-          <select
+          <NativeSelect
             id="compare"
-            className={`${selectClass} w-44`}
+            className="w-44"
             value={draft.comparison}
             onChange={(event) => apply({ comparison: event.target.value as ComparisonKey })}
           >
@@ -173,7 +171,7 @@ export function ReportControls({
                 {COMPARISON_LABELS[key]}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
       ) : null}
 

@@ -6,11 +6,13 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import type { PurchaseTypeConfig } from '@/lib/purchase-types'
 import { savePurchaseForm } from '@/app/(app)/purchases/actions'
@@ -46,9 +48,6 @@ const empty = (key: number, account = ''): Line => ({
   unitPrice: '',
   taxCodeId: '',
 })
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * One form for bills, expenses, vendor credits and purchase orders.
@@ -199,20 +198,16 @@ export function BillForm({
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Field name="vendorId" label="Vendor" required error={state.fieldErrors?.vendorId}>
-              <select
-                {...fieldProps('vendorId', state.fieldErrors?.vendorId)}
-                value={vendorId}
-                onChange={(event) => chooseVendor(event.target.value)}
-                className={selectClass}
+              <EntityPicker
+                id="vendorId"
+                kind="vendor"
+                options={vendors}
+                value={vendorId || null}
+                onChange={(next) => chooseVendor(next ?? '')}
+                placeholder="Search or add a vendor"
                 required
-              >
-                <option value="">— choose —</option>
-                {vendors.map((vendor) => (
-                  <option key={vendor.id} value={vendor.id}>
-                    {vendor.label}
-                  </option>
-                ))}
-              </select>
+                error={state.fieldErrors?.vendorId}
+              />
             </Field>
 
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -227,11 +222,10 @@ export function BillForm({
 
             {config.type === 'BILL' ? (
               <Field name="paymentTermId" label="Terms" error={state.fieldErrors?.paymentTermId}>
-                <select
+                <NativeSelect
                   {...fieldProps('paymentTermId', state.fieldErrors?.paymentTermId)}
                   value={paymentTermId}
                   onChange={(event) => setPaymentTermId(event.target.value)}
-                  className={selectClass}
                 >
                   <option value="">Vendor&rsquo;s default</option>
                   {terms.map((term) => (
@@ -239,7 +233,7 @@ export function BillForm({
                       {term.label}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Field>
             ) : null}
 
@@ -250,11 +244,10 @@ export function BillForm({
                 required
                 error={state.fieldErrors?.paymentAccountId}
               >
-                <select
+                <NativeSelect
                   {...fieldProps('paymentAccountId', state.fieldErrors?.paymentAccountId)}
                   value={paymentAccountId}
                   onChange={(event) => setPaymentAccountId(event.target.value)}
-                  className={selectClass}
                   required
                 >
                   {paymentAccounts.map((account) => (
@@ -262,7 +255,7 @@ export function BillForm({
                       {account.label}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Field>
             ) : null}
 
@@ -308,34 +301,23 @@ export function BillForm({
                 return (
                   <tr key={line.key} className="border-b last:border-0">
                     <td className="px-2 py-1.5">
-                      <select
-                        aria-label="Item"
-                        value={line.itemId}
-                        onChange={(event) => chooseItem(line.key, event.target.value)}
-                        className={selectClass}
-                      >
-                        <option value="">— none —</option>
-                        {items.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.label}
-                          </option>
-                        ))}
-                      </select>
+                      <EntityPicker
+                        kind="item"
+                        options={items}
+                        value={line.itemId || null}
+                        onChange={(next) => chooseItem(line.key, next ?? '')}
+                        placeholder="Item"
+                        clearable
+                      />
                     </td>
                     <td className="px-2 py-1.5">
-                      <select
-                        aria-label="Category"
-                        value={line.expenseAccountId}
-                        onChange={(event) => update(line.key, { expenseAccountId: event.target.value })}
-                        className={selectClass}
-                      >
-                        <option value="">— uncategorised —</option>
-                        {expenseAccounts.map((account) => (
-                          <option key={account.id} value={account.id}>
-                            {account.label}
-                          </option>
-                        ))}
-                      </select>
+                      <EntityPicker
+                        options={expenseAccounts}
+                        value={line.expenseAccountId || null}
+                        onChange={(next) => update(line.key, { expenseAccountId: next ?? '' })}
+                        placeholder="Uncategorised"
+                        clearable
+                      />
                     </td>
                     <td className="px-2 py-1.5">
                       <Input
@@ -363,11 +345,10 @@ export function BillForm({
                       />
                     </td>
                     <td className="px-2 py-1.5">
-                      <select
+                      <NativeSelect
                         aria-label="Tax code"
                         value={line.taxCodeId}
                         onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
-                        className={selectClass}
                       >
                         <option value="">No tax</option>
                         {taxCodes.map((code) => (
@@ -375,7 +356,7 @@ export function BillForm({
                             {code.label}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </td>
                     <td className="tabular px-3 py-1.5 text-right">{formatMoney(amount, currency)}</td>
                     <td className="px-1 py-1.5">

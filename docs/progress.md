@@ -11,7 +11,7 @@
 | 7 — Inventory               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-07-inventory.md) · migration `inventory` · 51 integrity objects · 226 tests                                                                                                                      |
 | 8 — Reporting               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-08-reporting.md) · no migration — reports read the ledger · 51 integrity objects · 272 tests · [ADR-0010](./decisions/0010-no-balance-rollup-table.md)                                          |
 | 9 — Period Close & Year-End | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-09-period-close.md) · migration written, not yet applied · 56 integrity objects · [ADR-0011](./decisions/0011-closing-entries-excluded-from-the-profit-and-loss.md)                                |
-| 10 — Hardening & Polish     | ⚪ Not started         |                                                                                                                                                                                                                                       |
+| 10 — Interface & Hardening  | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-10-hardening.md) · no migration · [ADR-0012](./decisions/0012-owned-combobox-and-dialog.md) · not clicked through in a browser                                                                  |
 
 Phases advance only on explicit instruction from the owner.
 

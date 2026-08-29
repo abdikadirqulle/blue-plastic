@@ -8,6 +8,7 @@ import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { TIME_ZONES } from '@/lib/constants'
 import { updateOrganizationForm } from './actions'
 
@@ -26,9 +27,6 @@ type Organization = {
   website: string | null
   timeZone: string
 }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50'
 
 export function OrganizationForm({ organization, canEdit }: { organization: Organization; canEdit: boolean }) {
   const [state, formAction] = useActionState(updateOrganizationForm, idleState)
@@ -77,18 +75,17 @@ export function OrganizationForm({ organization, canEdit }: { organization: Orga
               required
               error={e?.timeZone}
             >
-              <select
+              <NativeSelect
                 {...fieldProps('timeZone', e?.timeZone, true)}
                 defaultValue={organization.timeZone}
                 disabled={!canEdit}
-                className={selectClass}
               >
                 {TIME_ZONES.map((tz) => (
                   <option key={tz} value={tz}>
                     {tz}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
           </div>
 

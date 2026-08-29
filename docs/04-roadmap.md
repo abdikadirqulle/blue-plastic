@@ -209,9 +209,22 @@ opening balance lands in AR and on the aging report.
 
 ---
 
-## Phase 10 — Hardening & Polish
+## Phase 10 — Interface & Hardening
 
-Performance passes on the heavy report queries, attachments on documents, activity
-feed UI, full-text search, keyboard-driven navigation, rate limiting, backup/restore
-runbook, multi-currency activation, and an end-to-end test suite covering a full
-accounting cycle from opening balances to year-end close.
+Re-scoped by the owner on 2026-08-29 towards the interface, which is where the
+remaining cost was: the accounting has been right since Phase 2.
+
+| # | Task |
+| --- | --- |
+| 10.1 | Sidebar reduced to modules; related screens become tabs inside each module |
+| 10.2 | Searchable comboboxes for every record picker, with inline create where it is safe |
+| 10.3 | One dialog primitive and one select primitive; retire the hand-rolled duplicates |
+| 10.4 | Navigation progress indicator |
+| 10.5 | Frontend performance pass — fewer client components, no unused libraries in the first load |
+| 10.6 | Command palette and keyboard shortcuts for common actions |
+| 10.7 | Help and system guidance inside the application, in place of a separate manual |
+
+Carried forward, unbuilt: attachments on documents, full-text search, rate
+limiting, backup/restore runbook, multi-currency activation, and an end-to-end
+browser test suite covering a full accounting cycle from opening balances to
+year-end close.

@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 
 import { Field } from '@/components/forms/field'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { reverseJournalAction } from '../actions'
 
@@ -49,17 +50,11 @@ export function ReverseDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center p-4">
-      <button type="button" aria-label="Cancel" className="absolute inset-0 bg-black/40" onClick={() => setOpen(false)} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="reverse-title"
-        className="relative w-full max-w-md rounded-xl border bg-card p-6 shadow-lg"
-      >
-        <h2 id="reverse-title" className="text-base font-semibold">
-          Reverse {journalNumber}
-        </h2>
+    <Dialog open onOpenChange={(next) => { if (!next) setOpen(false) }}>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>Reverse {journalNumber}</DialogTitle>
+        </DialogHeader>
         <p className="mt-1 mb-4 text-sm text-muted-foreground">
           This posts a mirror-image entry. Both stay in the ledger and cancel out — nothing is erased,
           and the original remains readable exactly as it was.
@@ -105,7 +100,7 @@ export function ReverseDialog({
             Post reversal
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

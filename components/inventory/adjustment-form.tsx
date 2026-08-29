@@ -6,19 +6,18 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import { saveAdjustmentForm } from '@/app/(app)/inventory/actions'
 
 type ItemOption = { id: string; label: string; onHand: string; averageCost: string }
 type Line = { key: number; itemId: string; counted: string; description: string }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * A stock count.
@@ -111,11 +110,10 @@ export function AdjustmentForm({
             hint="Inventory Shrinkage unless you say otherwise."
             error={state.fieldErrors?.accountId}
           >
-            <select
+            <NativeSelect
               {...fieldProps('accountId', state.fieldErrors?.accountId, true)}
               value={accountId}
               onChange={(event) => setAccountId(event.target.value)}
-              className={selectClass}
             >
               <option value="">Inventory Shrinkage (default)</option>
               {accounts.map((account) => (
@@ -123,7 +121,7 @@ export function AdjustmentForm({
                   {account.label}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </Field>
 
           <Field name="reason" label="Reason" error={state.fieldErrors?.reason}>
@@ -167,25 +165,16 @@ export function AdjustmentForm({
                 return (
                   <tr key={line.key} className="border-b last:border-0">
                     <td className="px-2 py-1.5">
-                      <select
-                        aria-label="Item"
-                        value={line.itemId}
-                        onChange={(event) =>
+                      <EntityPicker
+                        options={items}
+                        value={line.itemId || null}
+                        onChange={(next) =>
                           setLines((current) =>
-                            current.map((l) =>
-                              l.key === line.key ? { ...l, itemId: event.target.value } : l,
-                            ),
+                            current.map((l) => (l.key === line.key ? { ...l, itemId: next ?? '' } : l)),
                           )
                         }
-                        className={selectClass}
-                      >
-                        <option value="">— choose an item —</option>
-                        {items.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
+                        placeholder="Search items"
+                      />
                     </td>
                     <td className="tabular px-3 py-1.5 text-right text-muted-foreground">
                       {item?.onHand ?? '—'}

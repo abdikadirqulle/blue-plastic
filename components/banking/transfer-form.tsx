@@ -11,10 +11,8 @@ import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { saveTransferForm } from '@/app/(app)/banking/actions'
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 export function TransferForm({
   accounts,
@@ -52,11 +50,10 @@ export function TransferForm({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field name="fromAccountId" label="From" required error={e?.fromAccountId}>
-              <select
+              <NativeSelect
                 {...fieldProps('fromAccountId', e?.fromAccountId)}
                 value={fromAccountId}
                 onChange={(event) => setFrom(event.target.value)}
-                className={selectClass}
                 required
               >
                 {accounts.map((account) => (
@@ -64,7 +61,7 @@ export function TransferForm({
                     {account.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field
@@ -73,11 +70,10 @@ export function TransferForm({
               required
               error={sameAccount ? ['A transfer to itself moves nothing'] : e?.toAccountId}
             >
-              <select
+              <NativeSelect
                 {...fieldProps('toAccountId', sameAccount ? ['x'] : e?.toAccountId)}
                 value={toAccountId}
                 onChange={(event) => setTo(event.target.value)}
-                className={selectClass}
                 required
               >
                 {accounts.map((account) => (
@@ -85,7 +81,7 @@ export function TransferForm({
                     {account.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
           </div>
 

@@ -10,7 +10,9 @@ import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { Separator } from '@/components/ui/separator'
 import { createItemForm, updateItemForm } from '@/app/(app)/items/actions'
 import type { ItemType } from '@prisma/client'
@@ -38,9 +40,6 @@ export type ItemValues = {
 
 export type AccountOption = { id: string; label: string; type: string; subtype: string }
 export type SimpleOption = { id: string; label: string }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 const TYPE_HELP: Record<ItemType, string> = {
   SERVICE: 'Labour or a service. Needs an income account only.',
@@ -107,17 +106,11 @@ export function ItemDialog({
   const e = state.fieldErrors
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start overflow-y-auto p-4 sm:place-items-center">
-      <button type="button" aria-label="Cancel" className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="item-dialog-title"
-        className="relative my-4 w-full max-w-2xl rounded-xl border bg-card p-6 shadow-lg"
-      >
-        <h2 id="item-dialog-title" className="text-base font-semibold">
-          {mode === 'create' ? 'New item' : `Edit ${item?.name}`}
-        </h2>
+    <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle>{mode === 'create' ? 'New item' : `Edit ${item?.name}`}</DialogTitle>
+        </DialogHeader>
 
         <form action={formAction} className="mt-4 space-y-5">
           <FormError message={state.message} />
@@ -135,16 +128,15 @@ export function ItemDialog({
 
           <Field name="type" label="Type" hint={TYPE_HELP[type]} required error={e?.type}>
             {mode === 'create' ? (
-              <select
+              <NativeSelect
                 {...fieldProps('type', e?.type, true)}
                 value={type}
                 onChange={(event) => setType(event.target.value as ItemType)}
-                className={selectClass}
               >
                 <option value="SERVICE">Service</option>
                 <option value="NON_INVENTORY">Non-inventory product</option>
                 <option value="INVENTORY">Inventory product</option>
-              </select>
+              </NativeSelect>
             ) : (
               <Input
                 id="type"
@@ -160,10 +152,9 @@ export function ItemDialog({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field name="categoryId" label="Category" error={e?.categoryId}>
-              <select
+              <NativeSelect
                 {...fieldProps('categoryId', e?.categoryId)}
                 defaultValue={item?.categoryId ?? ''}
-                className={selectClass}
               >
                 <option value="">— none —</option>
                 {categories.map((category) => (
@@ -171,7 +162,7 @@ export function ItemDialog({
                     {category.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
             <Field name="unitOfMeasure" label="Unit" error={e?.unitOfMeasure}>
               <Input
@@ -203,10 +194,9 @@ export function ItemDialog({
                 required
                 error={e?.incomeAccountId}
               >
-                <select
+                <NativeSelect
                   {...fieldProps('incomeAccountId', e?.incomeAccountId, true)}
                   defaultValue={item?.incomeAccountId ?? ''}
-                  className={selectClass}
                 >
                   <option value="">— choose —</option>
                   {income.map((account) => (
@@ -214,15 +204,14 @@ export function ItemDialog({
                       {account.label}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Field>
             </div>
 
             <Field name="salesTaxCodeId" label="Default sales tax" error={e?.salesTaxCodeId}>
-              <select
+              <NativeSelect
                 {...fieldProps('salesTaxCodeId', e?.salesTaxCodeId)}
                 defaultValue={item?.salesTaxCodeId ?? ''}
-                className={selectClass}
               >
                 <option value="">— none —</option>
                 {taxCodes.map((code) => (
@@ -230,7 +219,7 @@ export function ItemDialog({
                     {code.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
           </div>
 
@@ -257,10 +246,9 @@ export function ItemDialog({
                   required
                   error={e?.cogsAccountId}
                 >
-                  <select
+                  <NativeSelect
                     {...fieldProps('cogsAccountId', e?.cogsAccountId, true)}
                     defaultValue={item?.cogsAccountId ?? ''}
-                    className={selectClass}
                   >
                     <option value="">— choose —</option>
                     {expense.map((account) => (
@@ -268,14 +256,13 @@ export function ItemDialog({
                         {account.label}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </Field>
               ) : (
                 <Field name="expenseAccountId" label="Expense account" error={e?.expenseAccountId}>
-                  <select
+                  <NativeSelect
                     {...fieldProps('expenseAccountId', e?.expenseAccountId)}
                     defaultValue={item?.expenseAccountId ?? ''}
-                    className={selectClass}
                   >
                     <option value="">— none —</option>
                     {expense.map((account) => (
@@ -283,7 +270,7 @@ export function ItemDialog({
                         {account.label}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </Field>
               )}
             </div>
@@ -297,10 +284,9 @@ export function ItemDialog({
                   required
                   error={e?.inventoryAccountId}
                 >
-                  <select
+                  <NativeSelect
                     {...fieldProps('inventoryAccountId', e?.inventoryAccountId, true)}
                     defaultValue={item?.inventoryAccountId ?? ''}
-                    className={selectClass}
                   >
                     <option value="">— choose —</option>
                     {inventory.map((account) => (
@@ -308,7 +294,7 @@ export function ItemDialog({
                         {account.label}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </Field>
                 <Field name="reorderPoint" label="Reorder at" error={e?.reorderPoint}>
                   <Input
@@ -335,7 +321,7 @@ export function ItemDialog({
             </SubmitButton>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

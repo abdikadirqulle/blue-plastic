@@ -1,14 +1,5 @@
-import { Suspense } from 'react'
-
-import { ReportsNav } from './reports-nav'
-
 export default function ReportsLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <>
-      <Suspense fallback={<div className="mb-4 h-10 border-b" />}>
-        <ReportsNav />
-      </Suspense>
-      {children}
-    </>
-  )
+  // The report tabs are rendered by the shell, which carries the current period
+  // across them. See components/layout/module-tabs.tsx.
+  return <>{children}</>
 }

@@ -5,11 +5,13 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import { PAYMENT_METHOD_LABELS } from '@/lib/sales-types'
@@ -24,9 +26,6 @@ type OpenBill = {
   balance: string
 }
 type Option = { id: string; label: string }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * Paying bills.
@@ -119,20 +118,16 @@ export function BillPaymentForm({
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <Field name="vendorId" label="Vendor" required error={state.fieldErrors?.vendorId}>
-              <select
-                {...fieldProps('vendorId', state.fieldErrors?.vendorId)}
-                value={vendorId}
-                onChange={(event) => chooseVendor(event.target.value)}
-                className={selectClass}
+              <EntityPicker
+                id="vendorId"
+                kind="vendor"
+                options={vendors}
+                value={vendorId || null}
+                onChange={(next) => chooseVendor(next ?? '')}
+                placeholder="Search or add a vendor"
                 required
-              >
-                <option value="">— choose —</option>
-                {vendors.map((vendor) => (
-                  <option key={vendor.id} value={vendor.id}>
-                    {vendor.label}
-                  </option>
-                ))}
-              </select>
+                error={state.fieldErrors?.vendorId}
+              />
             </Field>
 
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -151,11 +146,10 @@ export function BillPaymentForm({
               required
               error={state.fieldErrors?.paymentAccountId}
             >
-              <select
+              <NativeSelect
                 {...fieldProps('paymentAccountId', state.fieldErrors?.paymentAccountId)}
                 value={paymentAccountId}
                 onChange={(event) => setPaymentAccountId(event.target.value)}
-                className={selectClass}
                 required
               >
                 {paymentAccounts.map((account) => (
@@ -163,22 +157,21 @@ export function BillPaymentForm({
                     {account.label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field name="method" label="Method" error={state.fieldErrors?.method}>
-              <select
+              <NativeSelect
                 {...fieldProps('method', state.fieldErrors?.method)}
                 value={method}
                 onChange={(event) => setMethod(event.target.value)}
-                className={selectClass}
               >
                 {Object.entries(PAYMENT_METHOD_LABELS).map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
 
             <Field name="reference" label="Reference" error={state.fieldErrors?.reference}>

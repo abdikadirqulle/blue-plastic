@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { NativeSelect } from '@/components/ui/native-select'
 import { Card } from '@/components/ui/card'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { Decimal, formatMoney } from '@/lib/money'
@@ -38,9 +39,6 @@ type Suggestion = {
   amount: string
   dayGap: number
 }
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * Importing a statement, then deciding what each line is.
@@ -93,18 +91,17 @@ export function StatementWorkbench({
             <label htmlFor="account" className="mb-1.5 block text-sm font-medium">
               Account
             </label>
-            <select
+            <NativeSelect
               id="account"
               value={accountId}
               onChange={(event) => router.push(`/banking/import?account=${event.target.value}`)}
-              className={selectClass}
             >
               {accounts.map((account) => (
                 <option key={account.id} value={account.id}>
                   {account.label}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </div>
 
           <div>

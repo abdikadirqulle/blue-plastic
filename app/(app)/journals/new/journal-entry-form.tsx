@@ -6,6 +6,7 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
@@ -30,9 +31,6 @@ type Line = {
 }
 
 const EMPTY = (key: number): Line => ({ key, accountId: '', debit: '', credit: '', description: '' })
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 /**
  * The one screen where a person chooses both sides of an entry, so it has to
@@ -166,19 +164,17 @@ export function JournalEntryForm({
               {lines.map((line) => (
                 <tr key={line.key} className="border-b last:border-0">
                   <td className="px-2 py-1.5">
-                    <select
-                      aria-label="Account"
-                      value={line.accountId}
-                      onChange={(event) => update(line.key, { accountId: event.target.value })}
-                      className={selectClass}
-                    >
-                      <option value="">— choose an account —</option>
-                      {accounts.map((account) => (
-                        <option key={account.id} value={account.id}>
-                          {account.code} {account.name}
-                        </option>
-                      ))}
-                    </select>
+                    <EntityPicker
+                      options={accounts.map((account) => ({
+                        id: account.id,
+                        label: account.name,
+                        hint: account.code,
+                      }))}
+                      value={line.accountId || null}
+                      onChange={(next) => update(line.key, { accountId: next ?? '' })}
+                      placeholder="Search accounts"
+                      emptyMessage="No account matches. Search by code or by name."
+                    />
                   </td>
                   <td className="px-2 py-1.5">
                     <Input

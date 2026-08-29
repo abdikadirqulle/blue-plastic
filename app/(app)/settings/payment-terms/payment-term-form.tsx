@@ -10,11 +10,10 @@ import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import { savePaymentTermForm } from '../tax/actions'
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
 
 export function PaymentTermButton() {
   const [open, setOpen] = useState(false)
@@ -47,10 +46,11 @@ function PaymentTermDialog({ onClose }: { onClose: () => void }) {
   const e = state.fieldErrors
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center p-4">
-      <button type="button" aria-label="Cancel" className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div role="dialog" aria-modal="true" className="relative w-full max-w-md rounded-xl border bg-card p-6 shadow-lg">
-        <h2 className="text-base font-semibold">New payment term</h2>
+    <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>New payment term</DialogTitle>
+        </DialogHeader>
 
         <form action={formAction} className="mt-4 space-y-4">
           <FormError message={state.message} />
@@ -60,16 +60,15 @@ function PaymentTermDialog({ onClose }: { onClose: () => void }) {
           </Field>
 
           <Field name="type" label="Type" required error={e?.type}>
-            <select
+            <NativeSelect
               {...fieldProps('type', e?.type)}
               value={type}
               onChange={(event) => setType(event.target.value)}
-              className={selectClass}
             >
               <option value="DUE_ON_RECEIPT">Due on receipt</option>
               <option value="NET_DAYS">A number of days after the document date</option>
               <option value="DAY_OF_MONTH">A fixed day of the month</option>
-            </select>
+            </NativeSelect>
           </Field>
 
           {type !== 'DUE_ON_RECEIPT' ? (
@@ -115,7 +114,7 @@ function PaymentTermDialog({ onClose }: { onClose: () => void }) {
             <SubmitButton pendingLabel="Saving…">Create term</SubmitButton>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

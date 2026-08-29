@@ -10,7 +10,9 @@ import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { NativeSelect } from '@/components/ui/native-select'
 import {
   ACCOUNT_SUBTYPE_LABELS,
   ACCOUNT_TYPE_LABELS,
@@ -19,9 +21,6 @@ import {
 } from '@/lib/accounting-labels'
 import type { AccountType } from '@prisma/client'
 import { createAccountForm, updateAccountForm } from './actions'
-
-const selectClass =
-  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50'
 
 export type AccountFormValues = {
   id: string
@@ -117,17 +116,13 @@ function AccountDialog({
   const e = state.fieldErrors
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4">
-      <button type="button" aria-label="Cancel" className="fixed inset-0 bg-black/40" onClick={onClose} />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="account-dialog-title"
-        className="relative my-8 w-full max-w-lg rounded-xl border bg-card p-6 shadow-lg"
-      >
-        <h2 id="account-dialog-title" className="text-base font-semibold">
-          {mode === 'create' ? 'New account' : `Edit ${account?.code} ${account?.name}`}
-        </h2>
+    <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
+      <DialogContent size="md">
+        <DialogHeader>
+          <DialogTitle>
+            {mode === 'create' ? 'New account' : `Edit ${account?.code} ${account?.name}`}
+          </DialogTitle>
+        </DialogHeader>
         <p className="mt-1 mb-4 text-sm text-muted-foreground">
           {mode === 'create'
             ? 'Account numbers order the chart: 1000s assets, 2000s liabilities, 3000s equity, 4000s income, 5000s cost of sales, 6000s expenses.'
@@ -157,28 +152,27 @@ function AccountDialog({
           {mode === 'create' ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <Field name="type" label="Type" required error={e?.type}>
-                <select
+                <NativeSelect
                   {...fieldProps('type', e?.type)}
                   value={type}
                   onChange={(event) => setType(event.target.value as AccountType)}
-                  className={selectClass}
                 >
                   {ACCOUNT_TYPE_ORDER.map((value) => (
                     <option key={value} value={value}>
                       {ACCOUNT_TYPE_LABELS[value]}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Field>
 
               <Field name="subtype" label="Detail type" required error={e?.subtype}>
-                <select {...fieldProps('subtype', e?.subtype)} className={selectClass}>
+                <NativeSelect {...fieldProps('subtype', e?.subtype)}>
                   {SUBTYPES_BY_TYPE[type].map((value) => (
                     <option key={value} value={value}>
                       {ACCOUNT_SUBTYPE_LABELS[value]}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Field>
             </div>
           ) : null}
@@ -189,10 +183,9 @@ function AccountDialog({
             hint="Optional. A parent becomes a grouping heading and stops accepting postings of its own."
             error={e?.parentId}
           >
-            <select
+            <NativeSelect
               {...fieldProps('parentId', e?.parentId, true)}
               defaultValue={account?.parentId ?? ''}
-              className={selectClass}
             >
               <option value="">— none —</option>
               {eligibleParents.map((parent) => (
@@ -200,7 +193,7 @@ function AccountDialog({
                   {parent.code} {parent.name}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </Field>
 
           <Field name="description" label="Description" error={e?.description}>
@@ -242,7 +235,7 @@ function AccountDialog({
             </SubmitButton>
           </div>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
