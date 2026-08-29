@@ -49,6 +49,15 @@ const FLOWS: { title: string; steps: { text: string; href?: string }[] }[] = [
     ],
   },
   {
+    title: 'Stock',
+    steps: [
+      { text: 'Only an item whose type is "Inventory product" tracks stock. The type is fixed once the item exists.', href: '/items' },
+      { text: 'A tracked item starts at zero. Stock arrives by entering the bill or expense you bought it on.', href: '/purchases/bills/new' },
+      { text: 'If the books already have stock, record the count and its cost as an adjustment.', href: '/inventory/adjustments/new' },
+      { text: 'Selling a tracked item moves stock and posts its cost in the same entry as the sale. A non-inventory item does neither.', href: '/inventory' },
+    ],
+  },
+  {
     title: 'Every month',
     steps: [
       { text: 'Import or enter the bank statement, then reconcile each account to it.', href: '/banking' },

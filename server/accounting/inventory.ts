@@ -284,6 +284,7 @@ export async function valuation(tx: Tx, orgId: string) {
       sku: string | null
       quantity: string
       value: string
+      salesPrice: string | null
       reorderPoint: string | null
     }[]
   >`
@@ -292,6 +293,7 @@ export async function valuation(tx: Tx, orgId: string) {
            i.sku            AS "sku",
            COALESCE(t."runningQuantity", 0) AS "quantity",
            COALESCE(t."runningValue", 0)    AS "value",
+           i."salesPrice"   AS "salesPrice",
            i."reorderPoint" AS "reorderPoint"
       FROM items i
       LEFT JOIN LATERAL (
@@ -316,6 +318,7 @@ export async function valuation(tx: Tx, orgId: string) {
       quantity,
       value,
       averageCost: quantity.isZero() ? ZERO : value.dividedBy(quantity).toDecimalPlaces(6),
+      salesPrice: row.salesPrice ? new Decimal(row.salesPrice) : null,
       reorderPoint: row.reorderPoint ? new Decimal(row.reorderPoint) : null,
       belowReorder: row.reorderPoint ? quantity.lessThanOrEqualTo(row.reorderPoint) : false,
     }

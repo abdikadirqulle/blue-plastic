@@ -39,6 +39,11 @@ const GLOSSARY: { term: string; meaning: string }[] = [
       'A journal nobody in the business made: depreciation, an accrual, a prepayment, a correction. Marked as such so it can be found and reviewed on its own.',
   },
   {
+    term: 'Inventory, non-inventory, service',
+    meaning:
+      'Only an inventory item has a quantity. Selling one reduces stock and posts its cost against the sale. A non-inventory item is bought and expensed at the time of purchase, so selling it moves no stock and posts no cost — which is why it never appears on the Inventory screen. The type cannot be changed after an item exists, because it would reclassify everything already sold through it.',
+  },
+  {
     term: 'Undeposited Funds',
     meaning:
       'Money received but not yet in the bank. It sits here until the deposit is recorded, which is what makes the bank reconciliation possible.',

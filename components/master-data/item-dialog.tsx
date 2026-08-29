@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { PlusIcon } from 'lucide-react'
+import { AlertTriangleIcon, PackageIcon, PlusIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
@@ -42,10 +42,18 @@ export type AccountOption = { id: string; label: string; type: string; subtype: 
 export type SimpleOption = { id: string; label: string }
 
 const TYPE_HELP: Record<ItemType, string> = {
-  SERVICE: 'Labour or a service. Needs an income account only.',
-  NON_INVENTORY: 'Goods bought and resold without tracking stock levels.',
+  SERVICE: 'Labour or a service. Needs an income account only. No stock is tracked.',
+  NON_INVENTORY:
+    'Goods bought and resold without tracking stock levels. Selling one will NOT reduce any stock figure and posts no cost — the purchase was expensed when you bought it.',
   INVENTORY:
-    'Goods with tracked quantity and cost. Selling one will move inventory and post cost of goods sold in the same journal as the sale.',
+    'Goods with tracked quantity and cost. Selling one moves inventory and posts cost of goods sold in the same journal as the sale.',
+}
+
+/** Cannot be changed later, so it is worth being blunt about at the moment of choosing. */
+const TYPE_WARNING: Partial<Record<ItemType, string>> = {
+  SERVICE: 'Stock is never tracked for a service. This cannot be changed later.',
+  NON_INVENTORY:
+    'This item will not appear on the Inventory screen and its quantity will never change, however many you sell. If you want to count this one, choose Inventory product — the type cannot be changed after the item is created.',
 }
 
 export function NewItemButton(props: {
@@ -161,6 +169,25 @@ export function ItemDialog({
               />
             )}
           </Field>
+
+          {mode === 'create' && TYPE_WARNING[type] ? (
+            <p className="-mt-2 flex gap-2 rounded-md border border-warning/40 bg-warning/5 p-2.5 text-xs text-muted-foreground">
+              <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0 text-warning" />
+              <span>{TYPE_WARNING[type]}</span>
+            </p>
+          ) : null}
+
+          {type === 'INVENTORY' ? (
+            <p className="-mt-2 flex gap-2 rounded-md border bg-muted/40 p-2.5 text-xs text-muted-foreground">
+              <PackageIcon className="mt-0.5 size-3.5 shrink-0" />
+              <span>
+                This item starts at <strong>zero on hand</strong>. There is no opening-quantity box on
+                purpose: stock only exists where the ledger says it does. Put stock in by entering the bill
+                or expense you bought it on, or — if you are setting up books that already have stock — by
+                recording a stock adjustment for the count and its cost.
+              </span>
+            </p>
+          ) : null}
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field name="categoryId" label="Category" error={e?.categoryId}>

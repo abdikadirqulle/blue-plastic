@@ -10,13 +10,13 @@ import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDate, toCalendarDate } from '@/lib/date'
-import { formatMoney } from '@/lib/money'
+import { formatMoney, ZERO } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
 import * as inventoryService from '@/server/services/inventory.service'
 
 export const metadata: Metadata = { title: 'Inventory' }
 
-const SORTABLE = ['name', 'quantity', 'cost', 'value'] as const
+const SORTABLE = ['name', 'quantity', 'price', 'cost', 'value'] as const
 
 export default async function InventoryPage({
   searchParams,
@@ -43,6 +43,8 @@ export default async function InventoryPage({
     switch (sort.sort) {
       case 'quantity':
         return direction * a.quantity.comparedTo(b.quantity)
+      case 'price':
+        return direction * (a.salesPrice ?? ZERO).comparedTo(b.salesPrice ?? ZERO)
       case 'cost':
         return direction * a.averageCost.comparedTo(b.averageCost)
       case 'value':
@@ -104,12 +106,34 @@ export default async function InventoryPage({
             </Card>
           </div>
 
+          {stock.items.every((item) => item.quantity.isZero()) ? (
+            <Card className="mb-4">
+              <CardContent className="flex items-start gap-2.5 p-4 text-sm">
+                <PackageIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                <span className="text-muted-foreground">
+                  <strong className="text-foreground">Nothing has been received yet.</strong> A tracked item
+                  starts at zero and there is no opening-quantity box: stock only exists where the ledger
+                  says it does. Put stock in by{' '}
+                  <Link href="/purchases/bills/new" className="underline underline-offset-4">
+                    entering the bill
+                  </Link>{' '}
+                  you bought it on, or — for books that already have stock —{' '}
+                  <Link href="/inventory/adjustments/new" className="underline underline-offset-4">
+                    recording the count as an adjustment
+                  </Link>
+                  .
+                </span>
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card className="mb-6 overflow-hidden p-0">
             <Table>
               <TableHeader>
                 <TableRow>
                   <SortableHeader column="name" label="Item" state={sort} basePath="/inventory" />
                   <SortableHeader column="quantity" label="On hand" state={sort} basePath="/inventory" className="w-28" numeric defaultDirection="desc" />
+                  <SortableHeader column="price" label="Sales price" state={sort} basePath="/inventory" className="w-32" numeric defaultDirection="desc" />
                   <SortableHeader column="cost" label="Average cost" state={sort} basePath="/inventory" className="w-32" numeric defaultDirection="desc" />
                   <SortableHeader column="value" label="Value" state={sort} basePath="/inventory" className="w-32" numeric defaultDirection="desc" />
                   <TableHead className="w-32" />
@@ -138,6 +162,9 @@ export default async function InventoryPage({
                       ) : null}
                     </TableCell>
                     <TableCell className="numeric tabular text-muted-foreground">
+                      {item.salesPrice ? formatMoney(item.salesPrice, currency) : '—'}
+                    </TableCell>
+                    <TableCell className="numeric tabular text-muted-foreground">
                       {item.averageCost.isZero() ? '—' : formatMoney(item.averageCost, currency)}
                     </TableCell>
                     <TableCell className="numeric tabular font-medium">
@@ -155,7 +182,7 @@ export default async function InventoryPage({
               </TableBody>
               <TableFooter>
                 <TableRow>
-                  <TableCell colSpan={3} className="font-semibold">
+                  <TableCell colSpan={4} className="font-semibold">
                     Total
                   </TableCell>
                   <TableCell className="numeric tabular font-semibold">
