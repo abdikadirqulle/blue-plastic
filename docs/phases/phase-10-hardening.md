@@ -21,25 +21,35 @@ nothing that makes them wait without saying so.
 | 10.5 | Frontend performance pass | see below | ✅ |
 | 10.6 | Command palette and keyboard shortcuts | `lib/shortcuts.ts`, `layout/command-palette.tsx` | ✅ |
 | 10.7 | Help and system guidance inside the application | `app/(app)/help/` | ✅ |
+| 10.8 | Quick Create — one button that starts any document or record | `components/layout/quick-create.tsx` | ✅ |
+| 10.9 | Calendar date picker in place of the browser's date input | `components/ui/calendar.tsx`, `date-field.tsx` | ✅ |
 
-## 10.1 — Nine things in the sidebar
+## 10.1 — Nine modules, with their screens underneath
 
 The sidebar listed twenty-two destinations under five headings. That is a table
 of contents, not a navigation. Somebody doing the books thinks in terms of
-*sales* or *purchases*; which document they need is the second question, and the
-second question belongs on the page.
+*sales* or *purchases*; which document they need is the second question.
 
 So: Dashboard, Sales, Purchases, Banking, Inventory, Accounting, Reports,
-Settings, Help — and within each, a tab row.
+Settings, Help — each expanding to show its own screens. The module you are in is
+open, the others are closed until you ask, and a chevron overrides that. It was
+briefly a tab row across the top of the page instead; the sidebar tree is better,
+because it shows where you are *and* what else is there without a click.
 
 No routes moved. The module a URL belongs to is derived from a list of path
-prefixes (`moduleFor`), which means the tabs work for `/customers/{id}` and
-`/sales/invoices/new` without either of them knowing they are inside a module.
-Settings and Reports had their own tab components in their own layouts; both are
-deleted, and the shell renders every module's tabs in one place with one
-implementation of the active state. The reports module carries the query string
-across its tabs, because losing the period on every tab click would make the tabs
-worse than a link.
+prefixes (`moduleFor`), which is what makes `/customers/{id}` and
+`/sales/invoices/new` light up the right entry without either of them knowing it
+is inside a module. Settings and Reports had their own tab components in their
+own layouts; both are deleted for the one implementation in the shell.
+
+Products & services sits under Inventory rather than Sales. Items are sold, so
+Sales has a claim on them, but they are also counted, valued and reordered, which
+is more of the work — and one module has to own the route or the navigation moves
+under the user when they click it.
+
+**The sidebar is pinned to the viewport** (`sticky top-0 h-svh`) with its own
+scroll region. It was scrolling away with the page, which on a long report meant
+no navigation by the time you reached the bottom.
 
 ## 10.2 — Pickers that search, and create
 
@@ -55,18 +65,22 @@ clears the selection — the behaviours a text field already has.
 Where the record might not exist yet, typing a name that matches nothing offers
 to create it as the **first** row in the list: at that point it is the only thing
 left to do, so it belongs under the cursor rather than below a list of
-near-misses. Customers and vendors are created from the name alone. An item is
-created as a service sold into the uncategorised income account, because a
-tracked item needs an inventory account, a cost account and an opening quantity —
-decisions that belong on the item screen, not in a dropdown on an invoice.
+near-misses.
+
+Choosing it opens that record's **real** dialog, with the typed name filled in.
+The first attempt created the record from the name alone, and that was wrong: an
+item needs its income, inventory and cost-of-sales accounts, and a form that
+silently picked those produces an item posting to the wrong place. Three fields
+to fill in is a smaller cost than a mis-posted sale. The dialog hands the new
+record back through the form state, so it is selected the moment it is saved.
+
+The dialog's own option lists — payment terms, accounts, tax codes — are fetched
+when it opens (`app/(app)/quick-create/actions.ts`), so an invoice screen does not
+load them on the chance that a customer turns out to be missing.
 
 **Accounts are deliberately not creatable this way.** An account needs a type and
 a subtype that determine where it lands on the balance sheet, and guessing those
 from a name typed into a dropdown is how a chart of accounts becomes a mess.
-
-Quick creates go through the same Zod schemas as the full forms
-(`app/(app)/quick-create/actions.ts`), parsed rather than cast, so a shortcut
-cannot slip past a rule the long way enforces.
 
 ## 10.3 — Two primitives, not twelve implementations
 
@@ -106,7 +120,11 @@ are the slowest screens in the application — around 520 ms against a
 fifty-thousand-line ledger, most of it network round-trip — and are the ones that
 most need to show their shape first.
 
-**No new client components.** The three added by this phase — the tabs, the
+**The create dialogs are code-split.** `ContactDialog` and `ItemDialog` are among
+the largest components in the application and are loaded only when somebody
+actually opens one, rather than by every form that has a picker on it.
+
+**No unnecessary client components.** The ones added by this phase — the tabs, the
 progress bar, the palette — are the chrome, and each exists because it reads the
 current pathname or listens for a key. Every page and every report added in
 Phases 8 and 9 remains a Server Component.
@@ -139,6 +157,31 @@ Three pages: the order of work (setting up, a sale end to end, a purchase end to
 end, every month, every year), the rules that will not bend and why, and the
 keyboard shortcuts. What belongs there is what the screens cannot say for
 themselves. What does not belong is a description of which button is where.
+
+## 10.8 — Quick Create
+
+One button in the header opens a panel of everything that can be started, in four
+columns: customers, vendors, banking, other. Documents navigate; records that are
+dialogs — a customer, a vendor, a product — open as dialogs, so adding one does
+not throw away the page you were on.
+
+The alternative is remembering which module a refund receipt lives under before
+you can begin one, which is a thing about the filing system rather than about the
+work.
+
+## 10.9 — Dates
+
+The browser's `type="date"` is inconsistent between browsers, ignores the
+application's own typography, and on some platforms cannot be typed into at all.
+`DateField` replaces all seventeen of them: a text box that still takes typing —
+`4/3`, `04/03/2026`, or `4` for the fourth of the current month — with a calendar
+attached for when you need to see where a date falls.
+
+The calendar is written here, on `lib/date`, rather than taken from a date
+library. What it has to be right about is the *calendar date*, not an instant:
+every date in this system is a `YYYY-MM-DD` string, an invoice dated the 1st is
+dated the 1st in every timezone, and a picker built on `Date` objects is one
+daylight-saving boundary away from posting an entry into the wrong month.
 
 ## Verification
 

@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { createPortal } from 'react-dom'
-import { CheckIcon, ChevronDownIcon, Loader2Icon, PlusIcon } from 'lucide-react'
+import { CheckIcon, ChevronDownIcon, PlusIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
@@ -50,10 +50,11 @@ export type ComboboxProps = {
   'aria-describedby'?: string
   clearable?: boolean
   /**
-   * Offered when the typed text matches nothing. Returning the new option's
-   * value selects it; returning null leaves the box open.
+   * Offered when the typed text matches nothing. The caller decides what
+   * creating means — here it opens that record's own dialog — so this only
+   * hands over the typed text.
    */
-  onCreate?: (label: string) => Promise<string | null>
+  onCreate?: (label: string) => void
   createLabel?: (label: string) => string
 }
 
@@ -80,7 +81,6 @@ export function Combobox({
   const [open, setOpen] = React.useState(false)
   const [query, setQuery] = React.useState('')
   const [active, setActive] = React.useState(0)
-  const [creating, setCreating] = React.useState(false)
 
   const rootRef = React.useRef<HTMLDivElement>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
@@ -198,15 +198,9 @@ export function Combobox({
     }
 
     if (!onCreate) return
-    setCreating(true)
-    void onCreate(query.trim())
-      .then((created) => {
-        if (created) {
-          onChange(created)
-          close()
-        }
-      })
-      .finally(() => setCreating(false))
+    const label = query.trim()
+    close(false)
+    onCreate(label)
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
@@ -331,7 +325,6 @@ export function Combobox({
                         key="__create"
                         type="button"
                         data-active={index === active}
-                        disabled={creating}
                         onPointerEnter={() => setActive(index)}
                         onClick={() => choose(row)}
                         className={cn(
@@ -339,11 +332,7 @@ export function Combobox({
                           index === active ? 'bg-accent' : '',
                         )}
                       >
-                        {creating ? (
-                          <Loader2Icon className="size-4 shrink-0 animate-spin" />
-                        ) : (
-                          <PlusIcon className="size-4 shrink-0" />
-                        )}
+                        <PlusIcon className="size-4 shrink-0" />
                         <span className="truncate">{createLabel(query.trim())}</span>
                       </button>
                     )

@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { DownloadIcon, Loader2Icon } from 'lucide-react'
 
 import { Button, buttonVariants } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { DateField } from '@/components/ui/date-field'
 import { NativeSelect } from '@/components/ui/native-select'
 import { Label } from '@/components/ui/label'
 import { PERIOD_LABELS, type PeriodKey } from '@/lib/report-periods'
@@ -107,37 +107,40 @@ export function ReportControls({
         <>
           <div className="space-y-1.5">
             <Label htmlFor="from">From</Label>
-            <Input
+            <DateField
               id="from"
-              type="date"
-              className="w-40"
+              className="w-44"
               value={draft.from}
-              onChange={(event) => setDraft({ ...draft, period: 'custom', from: event.target.value })}
-              onBlur={() => draft.from !== from && apply({ period: 'custom' })}
+              onChange={(next) => {
+                setDraft({ ...draft, period: 'custom', from: next })
+                if (next !== from) apply({ period: 'custom', from: next })
+              }}
             />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="to">To</Label>
-            <Input
+            <DateField
               id="to"
-              type="date"
-              className="w-40"
+              className="w-44"
               value={draft.to}
-              onChange={(event) => setDraft({ ...draft, period: 'custom', to: event.target.value })}
-              onBlur={() => draft.to !== to && apply({ period: 'custom' })}
+              onChange={(next) => {
+                setDraft({ ...draft, period: 'custom', to: next })
+                if (next !== to) apply({ period: 'custom', to: next })
+              }}
             />
           </div>
         </>
       ) : (
         <div className="space-y-1.5">
           <Label htmlFor="asOf">As of</Label>
-          <Input
+          <DateField
             id="asOf"
-            type="date"
-            className="w-40"
+            className="w-44"
             value={draft.asOf}
-            onChange={(event) => setDraft({ ...draft, period: 'custom', asOf: event.target.value })}
-            onBlur={() => draft.asOf !== asOf && apply({ period: 'custom' })}
+            onChange={(next) => {
+              setDraft({ ...draft, period: 'custom', asOf: next })
+              if (next !== asOf) apply({ period: 'custom', asOf: next })
+            }}
           />
         </div>
       )}

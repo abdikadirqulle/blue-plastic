@@ -14,7 +14,7 @@ export const createItem = action
   .handler(async (ctx, input) => {
     const item = await itemService.create(ctx, input)
     revalidatePath('/items')
-    return { id: item.id }
+    return { id: item.id, name: item.name }
   })
 
 export const updateItem = action

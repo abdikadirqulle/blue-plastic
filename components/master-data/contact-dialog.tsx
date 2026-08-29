@@ -11,6 +11,7 @@ import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import { Separator } from '@/components/ui/separator'
@@ -79,6 +80,8 @@ export function ContactDialog({
   today,
   currency,
   onClose,
+  defaultName,
+  onCreated,
 }: {
   side: ContactSide
   mode: 'create' | 'edit'
@@ -88,6 +91,10 @@ export function ContactDialog({
   today: string
   currency: string
   onClose: () => void
+  /** Pre-fills the name, when the dialog was opened by typing one into a picker. */
+  defaultName?: string
+  /** Hands the new record back to whatever opened this. */
+  onCreated?: (record: { id: string; label: string }) => void
 }) {
   const router = useRouter()
   const formAction =
@@ -100,17 +107,19 @@ export function ContactDialog({
         : updateVendorForm
 
   const [state, submit] = useActionState(formAction, idleState)
+  const [openingBalanceDate, setOpeningBalanceDate] = useState(today)
   const handled = useRef(false)
 
   useEffect(() => {
     if (state.status === 'success' && !handled.current) {
       handled.current = true
       toast.success(state.message ?? 'Saved.')
+      if (state.created) onCreated?.({ id: state.created.id, label: state.created.label ?? '' })
       router.refresh()
       onClose()
     }
     if (state.status !== 'success') handled.current = false
-  }, [state, router, onClose])
+  }, [state, router, onClose, onCreated])
 
   const e = state.fieldErrors
   const noun = side === 'customer' ? 'customer' : 'vendor'
@@ -136,7 +145,7 @@ export function ContactDialog({
             >
               <Input
                 {...fieldProps('displayName', e?.displayName, true)}
-                defaultValue={contact?.displayName ?? ''}
+                defaultValue={contact?.displayName ?? defaultName ?? ''}
                 autoFocus
                 required
               />
@@ -312,10 +321,12 @@ export function ContactDialog({
                   />
                 </Field>
                 <Field name="openingBalanceDate" label="As at" error={e?.openingBalanceDate}>
-                  <Input
-                    {...fieldProps('openingBalanceDate', e?.openingBalanceDate)}
-                    type="date"
-                    defaultValue={today}
+                  <DateField
+                    id="openingBalanceDate"
+                    name="openingBalanceDate"
+                    value={openingBalanceDate}
+                    onChange={setOpeningBalanceDate}
+                    today={today}
                   />
                 </Field>
               </div>

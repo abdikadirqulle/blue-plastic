@@ -30,7 +30,9 @@ export const createCustomer = action
   .handler(async (ctx, input) => {
     const customer = await contactService.createCustomer(ctx, input)
     revalidateContacts()
-    return { id: customer.id }
+    // The label comes back so a picker that opened this dialog can show the new
+    // record immediately, without re-reading the list to find out its name.
+    return { id: customer.id, displayName: input.displayName }
   })
 
 export const updateCustomer = action
@@ -60,7 +62,7 @@ export const createVendor = action
   .handler(async (ctx, input) => {
     const vendor = await contactService.createVendor(ctx, input)
     revalidateContacts()
-    return { id: vendor.id }
+    return { id: vendor.id, displayName: input.displayName }
   })
 
 export const updateVendor = action

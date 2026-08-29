@@ -223,6 +223,8 @@ remaining cost was: the accounting has been right since Phase 2.
 | 10.5 | Frontend performance pass — fewer client components, no unused libraries in the first load |
 | 10.6 | Command palette and keyboard shortcuts for common actions |
 | 10.7 | Help and system guidance inside the application, in place of a separate manual |
+| 10.8 | Quick Create — one button that starts any document or record |
+| 10.9 | Calendar date picker in place of the browser's date input |
 
 Carried forward, unbuilt: attachments on documents, full-text search, rate
 limiting, backup/restore runbook, multi-currency activation, and an end-to-end

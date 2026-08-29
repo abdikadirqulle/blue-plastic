@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 import { Field } from '@/components/forms/field'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { reverseJournalAction } from '../actions'
 
@@ -82,12 +83,7 @@ export function ReverseDialog({
             label="Date of reversal"
             hint="If this period is closed, the reversal moves to the first open one."
           >
-            <Input
-              id="reverse-date"
-              type="date"
-              value={date}
-              onChange={(event) => setDate(event.target.value)}
-            />
+            <DateField id="reverse-date" value={date} onChange={setDate} />
           </Field>
         </div>
 

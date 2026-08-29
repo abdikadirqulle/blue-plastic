@@ -11,6 +11,7 @@ import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import {
@@ -95,6 +96,7 @@ function AccountDialog({
     mode === 'create' ? createAccountForm : updateAccountForm,
     idleState,
   )
+  const [openingBalanceDate, setOpeningBalanceDate] = useState(today ?? '')
   const [type, setType] = useState<AccountType>(account?.type ?? 'EXPENSE')
   const handled = useRef(false)
 
@@ -216,10 +218,12 @@ function AccountDialog({
                   />
                 </Field>
                 <Field name="openingBalanceDate" label="As at" error={e?.openingBalanceDate}>
-                  <Input
-                    {...fieldProps('openingBalanceDate', e?.openingBalanceDate)}
-                    type="date"
-                    defaultValue={today}
+                  <DateField
+                    id="openingBalanceDate"
+                    name="openingBalanceDate"
+                    value={openingBalanceDate}
+                    onChange={setOpeningBalanceDate}
+                    today={today}
                   />
                 </Field>
               </div>

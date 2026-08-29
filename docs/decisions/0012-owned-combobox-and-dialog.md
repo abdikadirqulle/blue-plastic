@@ -1,11 +1,12 @@
-# ADR-0012 — The combobox is written here, the dialog is not
+# ADR-0012 — The controls we write, and the ones we borrow
 
 **Status:** Accepted · 2026-08-29 · Applies from Phase 10
 
 ## Decision
-The searchable record picker (`components/ui/combobox.tsx`) is written by hand
-with no new dependency. The modal dialog (`components/ui/dialog.tsx`) is built on
-`@radix-ui/react-dialog`, which was already installed and unused.
+The searchable record picker (`components/ui/combobox.tsx`) and the calendar
+(`components/ui/calendar.tsx`) are written by hand with no new dependency. The
+modal dialog (`components/ui/dialog.tsx`) is built on `@radix-ui/react-dialog`,
+which was already installed and unused.
 
 ## Rationale
 These look like the same kind of decision and are not.
@@ -29,6 +30,13 @@ return, Escape, a scroll lock, a portal and correct `aria-modal` wiring. Twelve
 screens each had a `fixed inset-0` div and a click-to-close backdrop, and none of
 them had any of that. This is exactly the code that is tedious to write once and
 never written correctly twelve times, and Radix was already a dependency.
+
+**The calendar is domain logic in disguise.** What it has to be right about is
+the *calendar date*, not an instant. Every date in this system is a `YYYY-MM-DD`
+string — an invoice dated the 1st is dated the 1st in every timezone — and a
+picker built on `Date` objects is one daylight-saving boundary away from posting
+an entry into the wrong month. Its arithmetic goes through `lib/date`, the same
+code the ledger uses, which no library would have done.
 
 The line is: own the thing that encodes a decision about *this* product; borrow
 the thing that encodes a decision about *the platform*.

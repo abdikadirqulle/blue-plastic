@@ -9,12 +9,25 @@ export type FormState = {
   status: 'idle' | 'success' | 'error'
   message?: string
   fieldErrors?: Record<string, string[]>
+  /**
+   * The record that was created or saved. Carried so a dialog opened from
+   * inside another form can hand the new record back and have it selected —
+   * without the caller having to re-fetch the list and guess which one is new.
+   */
+  created?: { id: string; label?: string }
 }
 
 export const idleState: FormState = { status: 'idle' }
 
 export function toFormState(result: ActionResult<unknown>, successMessage: string): FormState {
-  if (result.ok) return { status: 'success', message: successMessage }
+  if (result.ok) {
+    const data = result.data as { id?: string; name?: string; displayName?: string } | undefined
+    return {
+      status: 'success',
+      message: successMessage,
+      created: data?.id ? { id: data.id, label: data.displayName ?? data.name } : undefined,
+    }
+  }
   return {
     status: 'error',
     // Field-level errors are shown against their fields; only show a banner for

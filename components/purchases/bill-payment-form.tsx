@@ -10,6 +10,7 @@ import { Field, fieldProps } from '@/components/forms/field'
 import { FormError } from '@/components/forms/form-error'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import { formatDate, toCalendarDate } from '@/lib/date'
@@ -131,12 +132,13 @@ export function BillPaymentForm({
             </Field>
 
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
-              <Input
-                {...fieldProps('date', state.fieldErrors?.date)}
-                type="date"
+              <DateField
+                id="date"
                 value={date}
-                onChange={(event) => setDate(event.target.value)}
+                onChange={setDate}
+                today={today}
                 required
+                aria-invalid={state.fieldErrors?.date ? true : undefined}
               />
             </Field>
 

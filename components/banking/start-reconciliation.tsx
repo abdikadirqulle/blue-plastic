@@ -7,6 +7,7 @@ import { Loader2Icon, ScaleIcon } from 'lucide-react'
 import { Field } from '@/components/forms/field'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { startReconciliation } from '@/app/(app)/banking/actions'
 
@@ -53,13 +54,7 @@ export function StartReconciliationButton({
 
         <div className="space-y-4">
           <Field name="statementDate" label="Statement date" required>
-            <Input
-              id="statementDate"
-              type="date"
-              value={statementDate}
-              onChange={(event) => setStatementDate(event.target.value)}
-              autoFocus
-            />
+            <DateField id="statementDate" value={statementDate} onChange={setStatementDate} />
           </Field>
           <Field name="endingBalance" label="Closing balance on the statement" required>
             <Input

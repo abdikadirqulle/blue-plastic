@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { DateField } from '@/components/ui/date-field'
 import { Label } from '@/components/ui/label'
 
 export function DateRangeForm({ from, to }: { from: string; to: string }) {
@@ -22,11 +22,11 @@ export function DateRangeForm({ from, to }: { from: string; to: string }) {
     >
       <div className="space-y-1.5">
         <Label htmlFor="from">From</Label>
-        <Input id="from" type="date" value={start} onChange={(e) => setStart(e.target.value)} className="w-40" />
+        <DateField id="from" value={start} onChange={setStart} className="w-44" />
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="to">To</Label>
-        <Input id="to" type="date" value={end} onChange={(e) => setEnd(e.target.value)} className="w-40" />
+        <DateField id="to" value={end} onChange={setEnd} className="w-44" />
       </div>
       <Button type="submit" variant="outline">
         Apply

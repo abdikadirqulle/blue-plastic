@@ -61,7 +61,7 @@ export const MODULES: NavModule[] = [
     href: '/sales/invoices',
     icon: ReceiptIcon,
     permission: 'invoice:read',
-    owns: ['/sales', '/payments', '/customers', '/items'],
+    owns: ['/sales', '/payments', '/customers'],
     tabs: [
       { label: 'Invoices', href: '/sales/invoices', permission: 'invoice:read' },
       { label: 'Estimates', href: '/sales/estimates', permission: 'invoice:read' },
@@ -69,7 +69,6 @@ export const MODULES: NavModule[] = [
       { label: 'Credit memos', href: '/sales/credit-memos', permission: 'invoice:read' },
       { label: 'Payments', href: '/payments', permission: 'payment:read' },
       { label: 'Customers', href: '/customers', permission: 'customer:read' },
-      { label: 'Products & services', href: '/items', permission: 'item:read' },
     ],
   },
   {
@@ -96,11 +95,13 @@ export const MODULES: NavModule[] = [
     permission: 'bank:read',
     owns: ['/banking'],
     tabs: [
+      // Reconciling starts from an account rather than from a list, so there is
+      // no /banking/reconcile index to link to — only a reconciliation in
+      // progress has a page of its own.
       { label: 'Accounts', href: '/banking', permission: 'bank:read' },
-      { label: 'Transfers', href: '/banking/transfers', permission: 'bank:read' },
-      { label: 'Deposits', href: '/banking/deposits', permission: 'bank:read' },
-      { label: 'Import', href: '/banking/import', permission: 'bank:read' },
-      { label: 'Reconcile', href: '/banking/reconcile', permission: 'bank:reconcile' },
+      { label: 'New transfer', href: '/banking/transfers/new', permission: 'bank:transact' },
+      { label: 'New deposit', href: '/banking/deposits/new', permission: 'bank:transact' },
+      { label: 'Import a statement', href: '/banking/import', permission: 'bank:import' },
     ],
   },
   {
@@ -109,10 +110,15 @@ export const MODULES: NavModule[] = [
     href: '/inventory',
     icon: PackageIcon,
     permission: 'inventory:read',
-    owns: ['/inventory'],
+    owns: ['/inventory', '/items'],
     tabs: [
       { label: 'Stock on hand', href: '/inventory', permission: 'inventory:read' },
-      { label: 'Adjustments', href: '/inventory/adjustments', permission: 'inventory:adjust' },
+      // Items are what is sold, so Sales has a claim on them — but they are also
+      // what is counted, valued and reordered, which is more of the work. One
+      // module has to own the route, or the tab row changes under the user when
+      // they click it.
+      { label: 'Products & services', href: '/items', permission: 'item:read' },
+      { label: 'New adjustment', href: '/inventory/adjustments/new', permission: 'inventory:adjust' },
     ],
   },
   {

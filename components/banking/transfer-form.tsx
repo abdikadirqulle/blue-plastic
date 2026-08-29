@@ -10,6 +10,7 @@ import { FormError } from '@/components/forms/form-error'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import { saveTransferForm } from '@/app/(app)/banking/actions'
@@ -25,6 +26,7 @@ export function TransferForm({
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(saveTransferForm, idleState)
+  const [date, setDate] = useState(today)
   const [fromAccountId, setFrom] = useState(accounts[0]?.id ?? '')
   const [toAccountId, setTo] = useState(accounts[1]?.id ?? '')
   const handled = useRef(false)
@@ -87,7 +89,7 @@ export function TransferForm({
 
           <div className="grid gap-4 sm:grid-cols-3">
             <Field name="date" label="Date" required error={e?.date}>
-              <Input {...fieldProps('date', e?.date)} type="date" defaultValue={today} required />
+              <DateField id="date" name="date" value={date} onChange={setDate} today={today} required />
             </Field>
             <Field name="amount" label={`Amount (${currency})`} required error={e?.amount}>
               <Input

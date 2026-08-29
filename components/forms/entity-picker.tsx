@@ -5,32 +5,44 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox'
-import {
-  quickCreateCustomer,
-  quickCreateItem,
-  quickCreateVendor,
-} from '@/app/(app)/quick-create/actions'
+import { contactDialogOptions, itemDialogOptions } from '@/app/(app)/quick-create/actions'
+import type { AccountOption, SimpleOption } from '@/components/master-data/item-dialog'
+import type { Option } from '@/components/master-data/contact-dialog'
+
+// Loaded on demand: a form that never opens the create dialog should not pay for
+// the dialog's code, and these two are among the largest components in the app.
+const ContactDialog = React.lazy(() =>
+  import('@/components/master-data/contact-dialog').then((m) => ({ default: m.ContactDialog })),
+)
+const ItemDialog = React.lazy(() =>
+  import('@/components/master-data/item-dialog').then((m) => ({ default: m.ItemDialog })),
+)
 
 export type PickerOption = { id: string; label: string; hint?: string; group?: string }
 
-const CREATORS = {
-  customer: { action: quickCreateCustomer, noun: 'Customer' },
-  vendor: { action: quickCreateVendor, noun: 'Vendor' },
-  item: { action: quickCreateItem, noun: 'Item' },
-} as const
+export type CreatableKind = 'customer' | 'vendor' | 'item'
 
-export type CreatableKind = keyof typeof CREATORS
+type DialogData =
+  | { kind: 'customer' | 'vendor'; terms: Option[]; expenseAccounts: Option[]; today: string; currency: string }
+  | { kind: 'item'; accounts: AccountOption[]; taxCodes: SimpleOption[]; categories: SimpleOption[] }
 
 /**
  * A searchable picker for a list of records.
  *
- * `kind` decides whether the list can be added to from inside the form. Accounts
- * are deliberately not creatable this way: an account needs a type and a subtype
- * that determine where it lands on the balance sheet, and guessing those from a
- * name typed into a dropdown is how a chart of accounts becomes a mess.
+ * `kind` decides whether the list can be added to from inside the form. Choosing
+ * "Add" opens that record's **real** dialog with the typed name filled in — not a
+ * shortened version of it. An item created from an invoice line still needs its
+ * income, inventory and cost-of-sales accounts; a form that quietly picked those
+ * would produce an item that posts to the wrong place, which is worse than
+ * making somebody fill in three fields.
  *
- * The new record is selected immediately and the router is refreshed, so the
- * rest of the form — a tax code defaulted from the customer, say — sees it too.
+ * The dialog's own option lists are fetched when it is opened, so a form that
+ * never needs them never loads them.
+ *
+ * Accounts are deliberately not creatable this way: an account needs a type and
+ * a subtype that determine where it lands on the balance sheet, and guessing
+ * those from a name typed into a dropdown is how a chart of accounts becomes a
+ * mess.
  */
 export function EntityPicker({
   options,
@@ -46,6 +58,7 @@ export function EntityPicker({
   required,
   error,
   className,
+  currency = 'USD',
 }: {
   options: PickerOption[]
   value: string | null
@@ -61,18 +74,20 @@ export function EntityPicker({
   required?: boolean
   error?: string[]
   className?: string
+  /** Needed by the item dialog, which shows prices. */
+  currency?: string
 }) {
   const router = useRouter()
   const [extra, setExtra] = React.useState<PickerOption[]>([])
+  const [pendingName, setPendingName] = React.useState<string | null>(null)
+  const [dialog, setDialog] = React.useState<DialogData | null>(null)
 
   const merged: ComboboxOption[] = React.useMemo(
     () =>
       [...extra, ...options]
-        // A quick-created record appears here immediately; after the refresh the
-        // server list contains it too, and the duplicate has to go.
-        .filter(
-          (option, index, all) => all.findIndex((other) => other.id === option.id) === index,
-        )
+        // A newly created record appears here at once; after the refresh the
+        // server list carries it too, and the duplicate has to go.
+        .filter((option, index, all) => all.findIndex((other) => other.id === option.id) === index)
         .map((option) => ({
           value: option.id,
           label: option.label,
@@ -82,38 +97,89 @@ export function EntityPicker({
     [options, extra],
   )
 
-  const onCreate = kind
-    ? async (label: string) => {
-        const result = await CREATORS[kind].action({ name: label })
-        if (!result.ok) {
-          toast.error(result.error.message)
-          return null
-        }
+  async function openCreate(label: string) {
+    if (!kind) return
+    setPendingName(label)
 
-        setExtra((current) => [{ id: result.data.id, label: result.data.label }, ...current])
-        toast.success(`${CREATORS[kind].noun} “${result.data.label}” created.`)
-        router.refresh()
-        return result.data.id
+    if (kind === 'item') {
+      const result = await itemDialogOptions(undefined)
+      if (!result.ok) {
+        toast.error(result.error.message)
+        setPendingName(null)
+        return
       }
-    : undefined
+      setDialog({ kind: 'item', ...result.data })
+      return
+    }
+
+    const result = await contactDialogOptions(undefined)
+    if (!result.ok) {
+      toast.error(result.error.message)
+      setPendingName(null)
+      return
+    }
+    setDialog({ kind, ...result.data })
+  }
+
+  function created(record: { id: string; label: string }) {
+    setExtra((current) => [{ id: record.id, label: record.label }, ...current])
+    onChange(record.id)
+    router.refresh()
+  }
+
+  function closeDialog() {
+    setDialog(null)
+    setPendingName(null)
+  }
 
   return (
-    <Combobox
-      options={merged}
-      value={value}
-      onChange={onChange}
-      name={name}
-      id={id}
-      placeholder={placeholder}
-      emptyMessage={emptyMessage ?? (kind ? 'No match. Type a name to create one.' : 'Nothing found.')}
-      clearable={clearable}
-      disabled={disabled}
-      required={required}
-      aria-invalid={error?.length ? true : undefined}
-      aria-describedby={error?.length ? `${name ?? id}-error` : undefined}
-      className={className}
-      onCreate={onCreate}
-      createLabel={(label) => `Add “${label}”`}
-    />
+    <>
+      <Combobox
+        options={merged}
+        value={value}
+        onChange={onChange}
+        name={name}
+        id={id}
+        placeholder={placeholder}
+        emptyMessage={emptyMessage ?? (kind ? 'No match. Type a name to add one.' : 'Nothing found.')}
+        clearable={clearable}
+        disabled={disabled}
+        required={required}
+        aria-invalid={error?.length ? true : undefined}
+        aria-describedby={error?.length ? `${name ?? id}-error` : undefined}
+        className={className}
+        onCreate={kind ? openCreate : undefined}
+        createLabel={(label) => `Add “${label}”`}
+      />
+
+      {dialog ? (
+        <React.Suspense fallback={null}>
+          {dialog.kind === 'item' ? (
+            <ItemDialog
+              mode="create"
+              accounts={dialog.accounts}
+              taxCodes={dialog.taxCodes}
+              categories={dialog.categories}
+              currency={currency}
+              defaultName={pendingName ?? ''}
+              onCreated={created}
+              onClose={closeDialog}
+            />
+          ) : (
+            <ContactDialog
+              side={dialog.kind}
+              mode="create"
+              terms={dialog.terms}
+              expenseAccounts={dialog.expenseAccounts}
+              today={dialog.today}
+              currency={dialog.currency}
+              defaultName={pendingName ?? ''}
+              onCreated={created}
+              onClose={closeDialog}
+            />
+          )}
+        </React.Suspense>
+      ) : null}
+    </>
   )
 }

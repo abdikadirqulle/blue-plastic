@@ -73,6 +73,8 @@ export function ItemDialog({
   categories,
   currency,
   onClose,
+  defaultName,
+  onCreated,
 }: {
   mode: 'create' | 'edit'
   item?: ItemValues
@@ -81,6 +83,10 @@ export function ItemDialog({
   categories: SimpleOption[]
   currency: string
   onClose: () => void
+  /** Pre-fills the name, when the dialog was opened by typing one into a picker. */
+  defaultName?: string
+  /** Hands the new record back to whatever opened this. */
+  onCreated?: (record: { id: string; label: string }) => void
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(
@@ -94,11 +100,12 @@ export function ItemDialog({
     if (state.status === 'success' && !handled.current) {
       handled.current = true
       toast.success(state.message ?? 'Saved.')
+      if (state.created) onCreated?.({ id: state.created.id, label: state.created.label ?? '' })
       router.refresh()
       onClose()
     }
     if (state.status !== 'success') handled.current = false
-  }, [state, router, onClose])
+  }, [state, router, onClose, onCreated])
 
   const income = accounts.filter((a) => a.type === 'REVENUE')
   const expense = accounts.filter((a) => a.type === 'EXPENSE')
@@ -119,7 +126,12 @@ export function ItemDialog({
 
           <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
             <Field name="name" label="Name" required error={e?.name}>
-              <Input {...fieldProps('name', e?.name)} defaultValue={item?.name ?? ''} autoFocus required />
+              <Input
+                {...fieldProps('name', e?.name)}
+                defaultValue={item?.name ?? defaultName ?? ''}
+                autoFocus
+                required
+              />
             </Field>
             <Field name="sku" label="SKU" error={e?.sku}>
               <Input {...fieldProps('sku', e?.sku)} defaultValue={item?.sku ?? ''} />
