@@ -33,9 +33,16 @@ export function SidebarNav({
   const allowedPermissions = new Set(permissions)
   const current = moduleFor(pathname)
 
-  // Which module the user has opened by hand, if any. Null means "follow the
-  // page", which is what it does until they say otherwise.
+  // Which module is open. Null means "the one the page is in", which is the
+  // state it returns to whenever the page moves to a different module — so
+  // arriving somewhere always shows you what else is there.
   const [opened, setOpened] = React.useState<string | null>(null)
+
+  const [lastModule, setLastModule] = React.useState(current?.key)
+  if (current?.key !== lastModule) {
+    setLastModule(current?.key)
+    setOpened(null)
+  }
 
   return (
     <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-4">
@@ -60,7 +67,12 @@ export function SidebarNav({
             >
               <Link
                 href={entry.href}
-                onClick={onNavigate}
+                // Clicking the module opens it as well as going there: the point
+                // of the click is usually to see what is inside.
+                onClick={() => {
+                  setOpened(entry.key)
+                  onNavigate?.()
+                }}
                 aria-current={active && !activeTab ? 'page' : undefined}
                 className={cn('flex min-w-0 flex-1 items-center gap-2.5 px-2 py-2 text-sm', active && 'font-medium')}
               >
@@ -73,6 +85,8 @@ export function SidebarNav({
                   type="button"
                   aria-label={`${expanded ? 'Collapse' : 'Expand'} ${entry.label}`}
                   aria-expanded={expanded}
+                  // The chevron only opens and closes. It never navigates, which
+                  // is what makes it worth having next to a link that does.
                   onClick={() => setOpened(expanded ? '' : entry.key)}
                   className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:text-foreground"
                 >
