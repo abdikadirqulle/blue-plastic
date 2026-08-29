@@ -5,6 +5,7 @@
 // Phase 3: master data — customers, vendors, items, tax and payment terms.
 // Phase 4: sales — invoices, estimates, receipts, credit memos, payments.
 // Phase 5: purchases — bills, expenses, vendor credits, purchase orders.
+// Phase 6: banking — transfers, deposits, statement import, reconciliation.
 //
 // The integrity rules that make this a real double-entry ledger (R1–R10 in
 // docs/02-accounting-design.md) are enforced by database triggers, which Prisma
@@ -233,6 +234,27 @@ enum PurchaseDocumentStatus {
   CLOSED
 }
 
+enum BankDocumentStatus {
+  POSTED
+  VOID
+}
+
+/// Where an imported statement line has got to.
+enum ImportedTransactionStatus {
+  /// Read from the file, not yet dealt with.
+  PENDING
+  /// Tied to a journal line that was already in the books.
+  MATCHED
+  /// Deliberately set aside — a duplicate, or something already entered by hand.
+  EXCLUDED
+}
+
+enum ReconciliationStatus {
+  IN_PROGRESS
+  /// Finished and balanced. Its lines are locked.
+  COMPLETED
+}
+
 enum PaymentMethod {
   CASH
   BANK_TRANSFER
@@ -327,6 +349,10 @@ model Organization {
   customerPayments   CustomerPayment[]
   purchaseDocuments  PurchaseDocument[]
   billPayments       BillPayment[]
+  bankTransfers      BankTransfer[]
+  deposits           Deposit[]
+  importedTransactions ImportedTransaction[]
+  reconciliations    BankReconciliation[]
   items          Item[]
   itemCategories ItemCategory[]
   paymentTerms   PaymentTerm[]
@@ -546,6 +572,12 @@ model LedgerAccount {
   purchaseLines     PurchaseDocumentLine[] @relation("PurchaseLineExpense")
   purchasePayments  PurchaseDocument[]     @relation("PurchasePaymentAccount")
   billPaymentSource BillPayment[]          @relation("BillPaymentAccount")
+  transfersFrom     BankTransfer[]         @relation("TransferFrom")
+  transfersTo       BankTransfer[]         @relation("TransferTo")
+  deposits          Deposit[]              @relation("DepositBankAccount")
+  depositLines      DepositLine[]          @relation("DepositLineAccount")
+  importedLines     ImportedTransaction[]
+  reconciliations   BankReconciliation[]
 
   @@unique([orgId, code])
   @@unique([orgId, systemKey])
@@ -662,6 +694,8 @@ model Journal {
   customerPayments  CustomerPayment[]
   purchaseDocuments PurchaseDocument[]
   billPayments      BillPayment[]
+  bankTransfers     BankTransfer[]
+  deposits          Deposit[]
 
   reversalOf Journal? @relation("JournalReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
   reversedBy Journal? @relation("JournalReversal")
@@ -718,6 +752,13 @@ model JournalLine {
   account  LedgerAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
   customer Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
   vendor   Vendor?       @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+
+  /// Whether this line has been reconciled is recorded in a separate table, not
+  /// as a column here. A posted line is immutable (R4), and marking it cleared
+  /// would be a change to it — so the fact lives beside the line rather than on
+  /// it. See ReconciliationEntry.
+  reconciliation  ReconciliationEntry?
+  matchedImports  ImportedTransaction[]
 
   /// R9 is enforced by *additional* composite foreign keys on
   /// (journalId, orgId) and (accountId, orgId), created in raw SQL by
@@ -1233,6 +1274,7 @@ model CustomerPayment {
   depositAccount LedgerAccount      @relation("PaymentDepositAccount", fields: [depositAccountId], references: [id], onDelete: Restrict)
   journal        Journal?           @relation(fields: [journalId], references: [id], onDelete: Restrict)
   applications   SalesApplication[]
+  depositLines   DepositLine[]
 
   @@unique([orgId, number])
   @@unique([id, orgId])
@@ -1445,4 +1487,218 @@ model PurchaseApplication {
   @@unique([creditDocumentId, billId])
   @@index([orgId, billId])
   @@map("purchase_applications")
+}
+
+// ---------------------------------------------------------------------------
+// Banking  (Phase 6)
+// ---------------------------------------------------------------------------
+
+/// Money moved between two of the business's own accounts.
+///
+/// Not income, not an expense — nothing has been earned or spent, so this posts
+/// only between two asset or liability accounts. Recording a transfer as a sale
+/// on one side and a purchase on the other is one of the commonest ways a set of
+/// books ends up overstating both.
+model BankTransfer {
+  id    String @id @default(cuid())
+  orgId String
+
+  number String
+  date   DateTime @db.Date
+
+  fromAccountId String
+  toAccountId   String
+  amount        Decimal @db.Decimal(19, 4)
+
+  memo      String?
+  reference String?
+
+  currencyCode String @db.Char(3)
+
+  journalId String?
+  status    BankDocumentStatus @default(POSTED)
+
+  voidedAt   DateTime? @db.Timestamptz(6)
+  voidReason String?
+
+  createdById String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  fromAccount  LedgerAccount @relation("TransferFrom", fields: [fromAccountId], references: [id], onDelete: Restrict)
+  toAccount    LedgerAccount @relation("TransferTo", fields: [toAccountId], references: [id], onDelete: Restrict)
+  journal      Journal?      @relation(fields: [journalId], references: [id], onDelete: Restrict)
+
+  @@unique([orgId, number])
+  @@index([orgId, date(sort: Desc)])
+  @@map("bank_transfers")
+}
+
+/// Taking money to the bank.
+///
+/// Payments received into Undeposited Funds sit there until someone physically
+/// banks them. A deposit clears that holding account and puts the money where the
+/// bank statement will show it — which is what makes the register match the
+/// statement line for line, rather than showing five payments where the bank
+/// shows one paying-in slip.
+model Deposit {
+  id    String @id @default(cuid())
+  orgId String
+
+  number String
+  date   DateTime @db.Date
+
+  bankAccountId String
+  total         Decimal @db.Decimal(19, 4)
+
+  memo      String?
+  reference String?
+
+  currencyCode String @db.Char(3)
+
+  journalId String?
+  status    BankDocumentStatus @default(POSTED)
+
+  voidedAt   DateTime? @db.Timestamptz(6)
+  voidReason String?
+
+  createdById String?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  bankAccount  LedgerAccount @relation("DepositBankAccount", fields: [bankAccountId], references: [id], onDelete: Restrict)
+  journal      Journal?      @relation(fields: [journalId], references: [id], onDelete: Restrict)
+  lines        DepositLine[]
+
+  @@unique([orgId, number])
+  @@unique([id, orgId])
+  @@index([orgId, date(sort: Desc)])
+  @@map("deposits")
+}
+
+/// One item on a paying-in slip.
+///
+/// Either a customer payment being cleared out of Undeposited Funds, or money
+/// from somewhere else entirely — bank interest, a refund, an owner's injection.
+/// Exactly one of the two, enforced by a CHECK.
+model DepositLine {
+  id        String @id @default(cuid())
+  depositId String
+  orgId     String
+
+  lineNumber Int @db.SmallInt
+
+  /// Set when this line clears a payment out of Undeposited Funds.
+  customerPaymentId String?
+  /// Set when the money came from somewhere other than a customer payment.
+  accountId         String?
+
+  description String?
+  amount      Decimal @db.Decimal(19, 4)
+
+  deposit         Deposit          @relation(fields: [depositId], references: [id], onDelete: Cascade)
+  customerPayment CustomerPayment? @relation(fields: [customerPaymentId], references: [id], onDelete: Restrict)
+  account         LedgerAccount?   @relation("DepositLineAccount", fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@unique([depositId, lineNumber])
+  @@unique([customerPaymentId])
+  @@index([orgId, depositId])
+  @@map("deposit_lines")
+}
+
+/// A line read from a bank statement, before anyone has decided what it is.
+///
+/// Kept separate from the ledger on purpose: an imported row is a claim by the
+/// bank, not an entry in the books. It becomes an entry only when someone matches
+/// it to something already posted, or uses it to create something.
+model ImportedTransaction {
+  id    String @id @default(cuid())
+  orgId String
+
+  accountId String
+
+  date        DateTime @db.Date
+  description String
+  reference   String?
+
+  /// Signed as the statement reads it: positive money in, negative money out.
+  amount Decimal @db.Decimal(19, 4)
+
+  /// The bank's own identifier where the file provides one, used to avoid
+  /// importing the same line twice.
+  externalId String?
+
+  status ImportedTransactionStatus @default(PENDING)
+
+  matchedJournalLineId String?
+  matchedAt            DateTime? @db.Timestamptz(6)
+
+  importedAt   DateTime @default(now()) @db.Timestamptz(6)
+  importedById String?
+
+  organization      Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account           LedgerAccount  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  matchedJournalLine JournalLine?  @relation(fields: [matchedJournalLineId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, accountId, externalId])
+  @@index([orgId, accountId, status, date])
+  @@map("imported_transactions")
+}
+
+/// One reconciliation of one account against one statement.
+model BankReconciliation {
+  id    String @id @default(cuid())
+  orgId String
+
+  accountId String
+
+  statementDate           DateTime @db.Date
+  /// What the statement says the account held on that date.
+  statementEndingBalance  Decimal  @db.Decimal(19, 4)
+  /// The total of everything reconciled before this one. Recorded rather than
+  /// recomputed, so a finished reconciliation reads the same for ever.
+  beginningBalance        Decimal  @db.Decimal(19, 4)
+
+  status ReconciliationStatus @default(IN_PROGRESS)
+
+  notes String?
+
+  startedAt     DateTime  @default(now()) @db.Timestamptz(6)
+  startedById   String?
+  completedAt   DateTime? @db.Timestamptz(6)
+  completedById String?
+
+  organization Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account      LedgerAccount         @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  entries      ReconciliationEntry[]
+
+  @@index([orgId, accountId, statementDate(sort: Desc)])
+  @@map("bank_reconciliations")
+}
+
+/// One journal line marked as cleared by one reconciliation.
+///
+/// This table exists because a posted journal line is immutable (R4). Setting a
+/// `cleared` flag on the line would be a change to it, and the trigger would
+/// refuse — rightly. Recording the fact beside the line instead keeps the ledger
+/// append-only and, as a bonus, keeps the full history of which reconciliation
+/// cleared what.
+model ReconciliationEntry {
+  id    String @id @default(cuid())
+  orgId String
+
+  reconciliationId String
+  journalLineId    String
+
+  clearedAt DateTime @default(now()) @db.Timestamptz(6)
+
+  reconciliation BankReconciliation @relation(fields: [reconciliationId], references: [id], onDelete: Cascade)
+  journalLine    JournalLine        @relation(fields: [journalLineId], references: [id], onDelete: Restrict)
+
+  /// A line can be cleared by at most one reconciliation.
+  @@unique([journalLineId])
+  @@index([orgId, reconciliationId])
+  @@map("reconciliation_entries")
 }

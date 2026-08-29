@@ -45,7 +45,13 @@ enforcement -- a psql session, a migration script or a future service will bypas
 | R9 | All lines of a journal belong to the journal's organisation | composite FK on `(orgId, accountId)` |
 | R10 | An account with posted lines cannot be deleted | `ON DELETE RESTRICT` + soft delete (`isActive`) only |
 
-A consequence worth stating plainly: because R4 and R10 hold all the way down, an
+R4 has a consequence worth stating: reconciliation cannot mark a journal line as
+cleared, because that would be a change to a posted line. Clearing is therefore
+recorded in a separate table (`reconciliation_entries`) keyed by journal line —
+the fact lives beside the line rather than on it, and the ledger stays append-only
+through reconciliation. See docs/phases/phase-06-banking.md.
+
+A second consequence: because R4 and R10 hold all the way down, an
 **organisation with a posted ledger cannot be deleted either** — a cascade is
 refused by the immutability triggers. Erasing one is a deliberate out-of-band
 operation, never an application feature.

@@ -1,0 +1,288 @@
+'use client'
+
+import { useActionState, useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { PlusIcon, Trash2Icon } from 'lucide-react'
+import { toast } from 'sonner'
+
+import { idleState } from '@/components/forms/action-state'
+import { Field, fieldProps } from '@/components/forms/field'
+import { FormError } from '@/components/forms/form-error'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { formatDate, toCalendarDate } from '@/lib/date'
+import { formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
+import { saveDepositForm } from '@/app/(app)/banking/actions'
+
+type Payment = {
+  id: string
+  number: string
+  date: string
+  amount: string
+  customer: string
+  reference: string | null
+}
+type Option = { id: string; label: string }
+type OtherLine = { key: number; accountId: string; description: string; amount: string }
+
+const selectClass =
+  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
+
+export function DepositForm({
+  bankAccounts,
+  otherAccounts,
+  payments,
+  today,
+  currency,
+}: {
+  bankAccounts: Option[]
+  otherAccounts: Option[]
+  payments: Payment[]
+  today: string
+  currency: string
+}) {
+  const router = useRouter()
+  const [state, formAction] = useActionState(saveDepositForm, idleState)
+
+  const [bankAccountId, setBankAccountId] = useState(bankAccounts[0]?.id ?? '')
+  const [date, setDate] = useState(today)
+  const [reference, setReference] = useState('')
+  const [memo, setMemo] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [otherLines, setOtherLines] = useState<OtherLine[]>([])
+  const nextKey = useRef(1)
+  const handled = useRef(false)
+
+  useEffect(() => {
+    if (state.status === 'success' && !handled.current) {
+      handled.current = true
+      toast.success(state.message ?? 'Recorded.')
+      router.push('/banking')
+      router.refresh()
+    }
+    if (state.status !== 'success') handled.current = false
+  }, [state, router])
+
+  const total = useMemo(() => {
+    const fromPayments = payments
+      .filter((payment) => selected.has(payment.id))
+      .reduce((sum, payment) => sum.plus(payment.amount), ZERO)
+    const fromOther = otherLines.reduce(
+      (sum, line) => sum.plus(parseMoneyInput(line.amount) ?? ZERO),
+      ZERO,
+    )
+    return fromPayments.plus(fromOther)
+  }, [payments, selected, otherLines])
+
+  const payload = JSON.stringify({
+    bankAccountId,
+    date,
+    reference,
+    memo,
+    paymentIds: [...selected],
+    otherLines: otherLines
+      .filter((line) => line.accountId && (parseMoneyInput(line.amount) ?? ZERO).greaterThan(0))
+      .map((line) => ({ accountId: line.accountId, description: line.description, amount: line.amount })),
+  })
+
+  return (
+    <form action={formAction} className="space-y-4">
+      <input type="hidden" name="payload" value={payload} />
+
+      <Card>
+        <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
+          <FormError message={state.message} />
+
+          <Field name="bankAccountId" label="Deposit to" required error={state.fieldErrors?.bankAccountId}>
+            <select
+              {...fieldProps('bankAccountId', state.fieldErrors?.bankAccountId)}
+              value={bankAccountId}
+              onChange={(event) => setBankAccountId(event.target.value)}
+              className={selectClass}
+              required
+            >
+              {bankAccounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field name="date" label="Date" required error={state.fieldErrors?.date}>
+            <Input
+              {...fieldProps('date', state.fieldErrors?.date)}
+              type="date"
+              value={date}
+              onChange={(event) => setDate(event.target.value)}
+              required
+            />
+          </Field>
+
+          <Field name="reference" label="Reference" error={state.fieldErrors?.reference}>
+            <Input
+              {...fieldProps('reference', state.fieldErrors?.reference)}
+              value={reference}
+              onChange={(event) => setReference(event.target.value)}
+              placeholder="Paying-in slip number"
+            />
+          </Field>
+
+          <Field name="memo" label="Note" error={state.fieldErrors?.memo}>
+            <Input
+              {...fieldProps('memo', state.fieldErrors?.memo)}
+              value={memo}
+              onChange={(event) => setMemo(event.target.value)}
+            />
+          </Field>
+        </CardContent>
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">
+          Payments waiting to be banked
+        </div>
+        {payments.length === 0 ? (
+          <p className="p-6 text-sm text-muted-foreground">
+            Nothing in Undeposited Funds. Payments received straight into a bank account do not need a
+            deposit — they are already there.
+          </p>
+        ) : (
+          <ul className="divide-y">
+            {payments.map((payment) => (
+              <li key={payment.id}>
+                <label className="flex cursor-pointer items-center gap-3 px-3 py-2 hover:bg-muted/40">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(payment.id)}
+                    onChange={() =>
+                      setSelected((current) => {
+                        const next = new Set(current)
+                        if (next.has(payment.id)) next.delete(payment.id)
+                        else next.add(payment.id)
+                        return next
+                      })
+                    }
+                    className="size-4 rounded border-input"
+                    aria-label={`Bank ${payment.number}`}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium">{payment.customer}</span>
+                    <span className="block text-xs text-muted-foreground">
+                      <span className="tabular">{payment.number}</span>
+                      {' · '}
+                      <span className="tabular">{formatDate(toCalendarDate(new Date(payment.date)))}</span>
+                      {payment.reference ? ` · ${payment.reference}` : ''}
+                    </span>
+                  </span>
+                  <span className="tabular text-sm font-medium">
+                    {formatMoney(payment.amount, currency)}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">
+          Anything else on the slip
+        </div>
+        {otherLines.length > 0 ? (
+          <table className="w-full text-sm">
+            <tbody>
+              {otherLines.map((line) => (
+                <tr key={line.key} className="border-b last:border-0">
+                  <td className="w-64 px-2 py-1.5">
+                    <select
+                      aria-label="Account"
+                      value={line.accountId}
+                      onChange={(event) =>
+                        setOtherLines((current) =>
+                          current.map((l) => (l.key === line.key ? { ...l, accountId: event.target.value } : l)),
+                        )
+                      }
+                      className={selectClass}
+                    >
+                      <option value="">— choose an account —</option>
+                      {otherAccounts.map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.label}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <Input
+                      aria-label="Description"
+                      value={line.description}
+                      onChange={(event) =>
+                        setOtherLines((current) =>
+                          current.map((l) => (l.key === line.key ? { ...l, description: event.target.value } : l)),
+                        )
+                      }
+                    />
+                  </td>
+                  <td className="w-32 px-2 py-1.5">
+                    <Input
+                      aria-label="Amount"
+                      inputMode="decimal"
+                      className="tabular text-right"
+                      value={line.amount}
+                      onChange={(event) =>
+                        setOtherLines((current) =>
+                          current.map((l) => (l.key === line.key ? { ...l, amount: event.target.value } : l)),
+                        )
+                      }
+                    />
+                  </td>
+                  <td className="w-10 px-1 py-1.5">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Remove line"
+                      onClick={() => setOtherLines((current) => current.filter((l) => l.key !== line.key))}
+                    >
+                      <Trash2Icon />
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+        <div className="p-3">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setOtherLines((current) => [
+                ...current,
+                { key: nextKey.current++, accountId: '', description: '', amount: '' },
+              ])
+            }
+          >
+            <PlusIcon /> Add a line
+          </Button>
+        </div>
+      </Card>
+
+      <div className="flex flex-wrap items-center justify-end gap-4">
+        <span className="text-sm">
+          <span className="text-muted-foreground">Deposit total </span>
+          <span className="tabular text-base font-semibold">{formatMoney(total, currency)}</span>
+        </span>
+        <Button type="button" variant="outline" onClick={() => router.push('/banking')}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={!total.greaterThan(0) || bankAccountId === ''}>
+          Record deposit
+        </Button>
+      </div>
+    </form>
+  )
+}

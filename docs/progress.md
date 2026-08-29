@@ -7,7 +7,7 @@
 | 3 — Master Data & Tax | ✅ Complete | 2026-08-29 · [detail](./phases/phase-03-master-data.md) · migrations `master_data` ×2 · 15 integrity objects · 137 tests |
 | 4 — Sales / AR | ✅ Complete | 2026-08-29 · [detail](./phases/phase-04-sales.md) · migration `sales` · 25 integrity objects · 173 tests |
 | 5 — Purchases / AP | ✅ Complete | 2026-08-29 · [detail](./phases/phase-05-purchases.md) · migration `purchases` · 35 integrity objects · 196 tests |
-| 6 — Banking & Cash | ⚪ Not started | |
+| 6 — Banking & Cash | ✅ Complete | 2026-08-29 · [detail](./phases/phase-06-banking.md) · migration `banking` · 45 integrity objects · 212 tests |
 | 7 — Inventory | ⚪ Not started | |
 | 8 — Reporting | ⚪ Not started | |
 | 9 — Period Close & Year-End | ⚪ Not started | |

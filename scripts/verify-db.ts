@@ -112,6 +112,30 @@ const EXPECTED_TRIGGERS: { name: string; table: string; rule: string; protects: 
     rule: '—',
     protects: 'a posted bill\'s totals agree with its own lines',
   },
+  {
+    name: 'trg_deposit_total',
+    table: 'deposits',
+    rule: '—',
+    protects: 'a deposit totals what its own lines add up to',
+  },
+  {
+    name: 'trg_reconciliation_immutable',
+    table: 'bank_reconciliations',
+    rule: '—',
+    protects: 'a completed reconciliation cannot be quietly changed',
+  },
+  {
+    name: 'trg_reconciliation_entry_locked',
+    table: 'reconciliation_entries',
+    rule: '—',
+    protects: 'nothing is added to or removed from a completed reconciliation',
+  },
+  {
+    name: 'trg_entry_account_matches',
+    table: 'reconciliation_entries',
+    rule: '—',
+    protects: 'a reconciliation only clears lines on the account it is reconciling',
+  },
 ]
 
 const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protects: string }[] = [
@@ -187,6 +211,30 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
     rule: '—',
     protects: 'a bill payment is a positive amount',
   },
+  {
+    name: 'bank_transfers_distinct_accounts',
+    table: 'bank_transfers',
+    rule: '—',
+    protects: 'a transfer moves money between two different accounts',
+  },
+  {
+    name: 'bank_transfers_positive',
+    table: 'bank_transfers',
+    rule: '—',
+    protects: 'a transfer moves a positive amount',
+  },
+  {
+    name: 'deposit_lines_one_source',
+    table: 'deposit_lines',
+    rule: '—',
+    protects: 'a deposit line banks a payment or names an account, never both or neither',
+  },
+  {
+    name: 'deposit_lines_positive',
+    table: 'deposit_lines',
+    rule: '—',
+    protects: 'a deposit line banks a positive amount',
+  },
 ]
 
 const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] = [
@@ -230,6 +278,11 @@ const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] 
     rule: 'R9',
     protects: 'an application cannot settle another organisation\'s bill',
   },
+  {
+    name: 'deposit_lines_deposit_org_fkey',
+    rule: 'R9',
+    protects: 'a deposit line cannot cross organisations',
+  },
 ]
 
 async function main() {
@@ -258,6 +311,11 @@ async function main() {
       name: 'payment_terms_one_default',
       rule: '—',
       protects: 'exactly one default payment term per organisation',
+    },
+    {
+      name: 'reconciliations_one_in_progress',
+      rule: '—',
+      protects: 'one reconciliation in progress per account at a time',
     },
   ]
 
