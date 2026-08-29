@@ -259,6 +259,70 @@ that received them; the ledger records what happened and is not rewritten to mat
 a later preference. The screen says so before the change, with a count of the
 entries that will be left behind, and the change is written to the audit log.
 
+## 10.12 — Two bugs in the form plumbing
+
+Both found by the owner using it, and both one line deep.
+
+**A form could be submitted twice.** `SubmitButton` computed
+`disabled={pending || props.disabled}` and then spread `{...props}` *after* it,
+so the caller's own `disabled` — usually `undefined` — overwrote the computed
+value. The button stayed live for the whole round trip and a second click posted
+the document a second time. The spread now comes first. Seven document forms were
+also using a bare `<Button type="submit">` with no pending state at all; they use
+`SubmitButton` now, so every form in the application disables its own button and
+shows a spinner while it is saving.
+
+**A successful save announced itself in red.** Forms rendered
+`<FormError message={state.message} />` unconditionally, and `state.message`
+carries the *success* text as well as the failure text — so saving an invoice
+displayed "INV-0001 saved." in the destructive banner. `FormStatus` already
+existed to make that distinction and was not being used. All seventeen call sites
+now use it: red on failure, green on success, nothing before either.
+
+## 10.13 — Actions, print and export
+
+**Edit.** The document forms and the update services always supported editing —
+`saveDocumentForm` has branched on the presence of an id since Phase 4 — but
+there was no route rendering the form with a document in it. There is now, for
+both sales and purchases, reached from an Edit button on the detail page and from
+the row menu. Saving reverses the original journal and posts a replacement
+(ADR-0002); nothing is rewritten.
+
+The button follows the same rule the service enforces rather than restating it:
+hidden for a voided document, and hidden once a payment or credit has been
+applied, because the application would have to be unpicked first. Better to hide
+the button than to explain the refusal afterwards.
+
+**Row menus** carry navigation only — open, edit, print. Voiding keeps its own
+button on the record's own page, where there is room to say what it will do
+before it does it. A destructive action two clicks deep in a row menu, with a
+table of near-identical rows around it, is how the wrong invoice gets voided.
+Payments have no detail page, so their rows have no menu rather than a menu whose
+only entry is a dead link.
+
+**Print** uses the browser. The print stylesheet already hid the shell; it now
+also unwraps the scroll containers, because an `overflow` container prints only
+what was visible and silently truncates the table.
+
+**Export is CSV, not `.xlsx`.** Excel opens it directly — the file carries a
+byte-order mark and CRLF endings for exactly that reason — and every amount
+arrives as a number rather than as text, which is what people mean when they ask
+for an Excel export. A real `.xlsx` would put a spreadsheet library in the bundle
+to produce a file that opens the same way. The export covers **every row the
+current filter matches**, not the page on screen: exporting page 2 of 7 without
+saying so is the kind of quiet wrongness that ends up in somebody's board pack.
+
+**A tax column that is not there.** With no tax codes configured, the tax column
+on invoice and bill lines is hidden entirely, along with the tax line in the
+totals. An empty dropdown reading "No tax" on every line is a question the form is
+asking and already knows the answer to.
+
+**Country stopped being mandatory.** `countryCode` was
+`.length(2).nullable().optional()` — which accepts an *absent* value, but a form
+always submits `""` for a field left blank, and `""` is not two characters. Every
+contact whose country was not filled in was rejected. It now treats the empty
+string as nothing, like every other optional field in the schema.
+
 ## Verification
 
 `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` — all clean. The test

@@ -1,12 +1,14 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ReceiptIcon, PlusIcon } from 'lucide-react'
+import { PlusIcon, ReceiptIcon } from 'lucide-react'
 
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
+import { RowActions } from '@/components/data/row-actions'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
@@ -56,6 +58,7 @@ export default async function PurchaseListPage({
 
   const page = await purchaseService.list(ctx, config.type, query, { status, ...sort })
   const basePath = `/purchases/${config.slug}`
+  const canEditDocuments = ctx.permissions.has('bill:update')
   const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
   const currency = ctx.organization.baseCurrency
   const now = today(ctx.organization.timeZone)
@@ -91,6 +94,9 @@ export default async function PurchaseListPage({
             })}
           </div>
         ) : null}
+        <TableToolbar exportHref={`/api/exports/${config.slug}?${new URLSearchParams(
+          Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+        ).toString()}`} />
       </div>
 
       {page.total === 0 ? (
@@ -115,6 +121,7 @@ export default async function PurchaseListPage({
                 <SortableHeader column="total" label="Total" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
                 {config.type === 'BILL' ? <TableHead className="numeric w-32">Owing</TableHead> : null}
                 <SortableHeader column="status" label="Status" state={sort} basePath={basePath} params={linkParams} className="w-24" />
+                <TableHead className="w-10 print:hidden" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -163,6 +170,16 @@ export default async function PurchaseListPage({
                       <Badge variant={STATUS_VARIANTS[row.status] ?? 'secondary'}>
                         {STATUS_LABELS[row.status] ?? row.status}
                       </Badge>
+                    </TableCell>
+                    <TableCell className="print:hidden">
+                      <RowActions
+                        actions={[
+                          { label: 'Open', href: `${basePath}/${row.id}`, icon: 'open' as const },
+                          ...(canEditDocuments && row.status !== 'VOID'
+                            ? [{ label: 'Edit', href: `${basePath}/${row.id}/edit`, icon: 'edit' as const }]
+                            : []),
+                        ]}
+                      />
                     </TableCell>
                   </TableRow>
                 )

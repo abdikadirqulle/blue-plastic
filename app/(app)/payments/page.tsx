@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
@@ -49,8 +50,13 @@ export default async function PaymentsPage({
         actions={newButton}
       />
 
-      <div className="mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
         <SearchInput placeholder="Search number, reference or customer" />
+        <div className="ml-auto">
+          <TableToolbar exportHref={`/api/exports/payments?${new URLSearchParams(
+            Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+          ).toString()}`} />
+        </div>
       </div>
 
       {page.total === 0 ? (

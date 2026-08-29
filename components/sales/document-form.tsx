@@ -137,6 +137,13 @@ export function DocumentForm({
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
   const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
 
+  /**
+   * No tax codes set up means this business does not charge tax, so the column
+   * is not shown at all. An empty dropdown reading "No tax" on every line is a
+   * question the form is asking and already knows the answer to.
+   */
+  const showTax = taxCodes.length > 0
+
   /** Mirrors `server/accounting/sales-pricing.ts`: price, then discount, then tax. */
   const totals = useMemo(() => {
     let subtotal = ZERO
@@ -309,7 +316,11 @@ export function DocumentForm({
                 <th className="w-24 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Qty</th>
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Price</th>
                 <th className="w-20 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Disc %</th>
-                <th className="w-40 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Tax</th>
+                {showTax ? (
+                  <th className="w-40 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+                    Tax
+                  </th>
+                ) : null}
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Amount</th>
                 <th className="w-10" />
               </tr>
@@ -370,21 +381,23 @@ export function DocumentForm({
                         onChange={(event) => update(line.key, { discountPercent: event.target.value })}
                       />
                     </td>
-                    <td className="px-2 py-1.5">
-                      <NativeSelect
-                        aria-label="Tax code"
-                        value={line.taxCodeId}
-                        onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
-                        className="px-2"
-                      >
-                        <option value="">No tax</option>
-                        {taxCodes.map((code) => (
-                          <option key={code.id} value={code.id}>
-                            {code.label}
-                          </option>
-                        ))}
-                      </NativeSelect>
-                    </td>
+                    {showTax ? (
+                      <td className="px-2 py-1.5">
+                        <NativeSelect
+                          aria-label="Tax code"
+                          value={line.taxCodeId}
+                          onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
+                          className="px-2"
+                        >
+                          <option value="">No tax</option>
+                          {taxCodes.map((code) => (
+                            <option key={code.id} value={code.id}>
+                              {code.label}
+                            </option>
+                          ))}
+                        </NativeSelect>
+                      </td>
+                    ) : null}
                     <td className="tabular px-3 py-1.5 text-right">
                       {formatMoney(gross.minus(discount), currency)}
                     </td>
@@ -422,10 +435,12 @@ export function DocumentForm({
               <dt className="text-muted-foreground">Subtotal</dt>
               <dd className="tabular">{formatMoney(totals.subtotal, currency)}</dd>
             </div>
-            <div className="flex justify-between gap-8">
-              <dt className="text-muted-foreground">Tax</dt>
-              <dd className="tabular">{formatMoney(totals.tax, currency)}</dd>
-            </div>
+            {showTax ? (
+              <div className="flex justify-between gap-8">
+                <dt className="text-muted-foreground">Tax</dt>
+                <dd className="tabular">{formatMoney(totals.tax, currency)}</dd>
+              </div>
+            ) : null}
             <div className="flex justify-between gap-8 border-t pt-1 font-semibold">
               <dt>Total</dt>
               <dd className="tabular">{formatMoney(totals.total, currency)}</dd>

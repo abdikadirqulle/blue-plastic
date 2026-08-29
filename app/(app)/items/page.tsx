@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { NewItemButton } from '@/components/master-data/item-dialog'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
@@ -107,6 +108,11 @@ export default async function ItemsPage({
         >
           {includeInactive ? 'Hide archived' : 'Show archived'}
         </Link>
+        <div className="ml-auto">
+          <TableToolbar exportHref={`/api/exports/items?${new URLSearchParams(
+            Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+          ).toString()}`} />
+        </div>
       </div>
 
       {page.total === 0 ? (

@@ -69,6 +69,7 @@ export function BillForm({
   terms,
   today,
   currency,
+  document,
 }: {
   config: PurchaseTypeConfig
   vendors: VendorOption[]
@@ -79,33 +80,72 @@ export function BillForm({
   terms: Option[]
   today: string
   currency: string
+  /** Present when editing. Saving reverses the original journal and posts a new one. */
+  document?: {
+    id: string
+    vendorId: string
+    date: string
+    reference: string | null
+    memo: string | null
+    paymentTermId: string | null
+    paymentAccountId: string | null
+    lines: {
+      itemId: string | null
+      expenseAccountId: string | null
+      description: string | null
+      quantity: string
+      unitPrice: string
+      taxCodeId: string | null
+    }[]
+  }
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(savePurchaseForm, idleState)
 
-  const [vendorId, setVendorId] = useState('')
-  const [date, setDate] = useState(today)
-  const [reference, setReference] = useState('')
-  const [memo, setMemo] = useState('')
-  const [paymentTermId, setPaymentTermId] = useState('')
-  const [paymentAccountId, setPaymentAccountId] = useState(paymentAccounts[0]?.id ?? '')
-  const [lines, setLines] = useState<Line[]>([empty(1), empty(2)])
+  const [vendorId, setVendorId] = useState(document?.vendorId ?? '')
+  const [date, setDate] = useState(document?.date ?? today)
+  const [reference, setReference] = useState(document?.reference ?? '')
+  const [memo, setMemo] = useState(document?.memo ?? '')
+  const [paymentTermId, setPaymentTermId] = useState(document?.paymentTermId ?? '')
+  const [paymentAccountId, setPaymentAccountId] = useState(
+    document?.paymentAccountId ?? paymentAccounts[0]?.id ?? '',
+  )
+  const [lines, setLines] = useState<Line[]>(
+    document?.lines.length
+      ? document.lines.map((line, index) => ({
+          key: index + 1,
+          itemId: line.itemId ?? '',
+          expenseAccountId: line.expenseAccountId ?? '',
+          description: line.description ?? '',
+          quantity: line.quantity,
+          unitPrice: line.unitPrice,
+          taxCodeId: line.taxCodeId ?? '',
+        }))
+      : [empty(1), empty(2)],
+  )
   const [saveAsDraft, setSaveAsDraft] = useState(false)
-  const nextKey = useRef(3)
+  const nextKey = useRef((document?.lines.length ?? 2) + 1)
   const handled = useRef(false)
 
   useEffect(() => {
     if (state.status === 'success' && !handled.current) {
       handled.current = true
       toast.success(state.message ?? 'Saved.')
-      router.push(`/purchases/${config.slug}`)
+      router.push(document?.id ? `/purchases/${config.slug}/${document.id}` : `/purchases/${config.slug}`)
       router.refresh()
     }
     if (state.status !== 'success') handled.current = false
-  }, [state, router, config.slug])
+  }, [state, router, config.slug, document?.id])
 
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
   const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
+
+  /**
+   * No tax codes set up means this business does not charge tax, so the column
+   * is not shown at all. An empty dropdown reading "No tax" on every line is a
+   * question the form is asking and already knows the answer to.
+   */
+  const showTax = taxCodes.length > 0
 
   const totals = useMemo(() => {
     let subtotal = ZERO
@@ -170,7 +210,7 @@ export function BillForm({
   )
 
   const payload = JSON.stringify({
-    type: config.type,
+    ...(document?.id ? { id: document.id } : { type: config.type }),
     vendorId,
     date,
     reference,
@@ -290,7 +330,11 @@ export function BillForm({
                 <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Description</th>
                 <th className="w-20 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Qty</th>
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Cost</th>
-                <th className="w-36 px-3 py-2 text-left text-xs font-medium text-muted-foreground">Tax</th>
+                {showTax ? (
+                  <th className="w-36 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+                    Tax
+                  </th>
+                ) : null}
                 <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Amount</th>
                 <th className="w-10" />
               </tr>
@@ -347,20 +391,22 @@ export function BillForm({
                         onChange={(event) => update(line.key, { unitPrice: event.target.value })}
                       />
                     </td>
-                    <td className="px-2 py-1.5">
-                      <NativeSelect
-                        aria-label="Tax code"
-                        value={line.taxCodeId}
-                        onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
-                      >
-                        <option value="">No tax</option>
-                        {taxCodes.map((code) => (
-                          <option key={code.id} value={code.id}>
-                            {code.label}
-                          </option>
-                        ))}
-                      </NativeSelect>
-                    </td>
+                    {showTax ? (
+                      <td className="px-2 py-1.5">
+                        <NativeSelect
+                          aria-label="Tax code"
+                          value={line.taxCodeId}
+                          onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
+                        >
+                          <option value="">No tax</option>
+                          {taxCodes.map((code) => (
+                            <option key={code.id} value={code.id}>
+                              {code.label}
+                            </option>
+                          ))}
+                        </NativeSelect>
+                      </td>
+                    ) : null}
                     <td className="tabular px-3 py-1.5 text-right">{formatMoney(amount, currency)}</td>
                     <td className="px-1 py-1.5">
                       <Button
@@ -404,10 +450,12 @@ export function BillForm({
               <dt className="text-muted-foreground">Subtotal</dt>
               <dd className="tabular">{formatMoney(totals.subtotal, currency)}</dd>
             </div>
-            <div className="flex justify-between gap-8">
-              <dt className="text-muted-foreground">Tax</dt>
-              <dd className="tabular">{formatMoney(totals.tax, currency)}</dd>
-            </div>
+            {showTax ? (
+              <div className="flex justify-between gap-8">
+                <dt className="text-muted-foreground">Tax</dt>
+                <dd className="tabular">{formatMoney(totals.tax, currency)}</dd>
+              </div>
+            ) : null}
             <div className="flex justify-between gap-8 border-t pt-1 font-semibold">
               <dt>Total</dt>
               <dd className="tabular">{formatMoney(totals.total, currency)}</dd>

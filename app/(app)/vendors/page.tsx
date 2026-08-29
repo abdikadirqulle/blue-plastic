@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { ImportDialog } from '@/components/master-data/import-dialog'
 import { NewContactButton } from '@/components/master-data/contact-dialog'
 import { readSort } from '@/components/data/sortable-header'
@@ -85,6 +86,11 @@ export default async function VendorsPage({
         >
           {includeInactive ? 'Hide archived' : 'Show archived'}
         </Link>
+        <div className="ml-auto">
+          <TableToolbar exportHref={`/api/exports/vendors?${new URLSearchParams(
+            Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+          ).toString()}`} />
+        </div>
       </div>
 
       {page.total === 0 ? (

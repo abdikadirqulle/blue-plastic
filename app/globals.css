@@ -161,8 +161,30 @@
   aside,
   header,
   nav,
-  [data-slot='toaster'] {
+  [data-slot='toaster'],
+  .print\:hidden {
     display: none !important;
+  }
+
+  /*
+   * A table that scrolls on screen has to print whole: an `overflow` container
+   * prints only what was visible, silently truncating the page.
+   */
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-auto,
+  .overflow-hidden {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* Rows should not be split across a page break. */
+  tr {
+    break-inside: avoid;
+  }
+
+  thead {
+    display: table-header-group;
   }
 
   main {

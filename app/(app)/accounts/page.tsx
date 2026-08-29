@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { SignedMoney } from '@/components/data/signed-money'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
@@ -145,10 +146,15 @@ export default async function AccountsPage({
         </Link>
         <Link
           href="/settings/accounts"
-          className="ml-auto text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
         >
           Which account the system posts to
         </Link>
+        <div className="ml-auto">
+          <TableToolbar exportHref={`/api/exports/accounts?${new URLSearchParams(
+            Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+          ).toString()}`} />
+        </div>
       </div>
 
       {total === 0 ? (

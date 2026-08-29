@@ -5,7 +5,9 @@ import { FileTextIcon, PlusIcon } from 'lucide-react'
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
+import { RowActions } from '@/components/data/row-actions'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
@@ -54,8 +56,13 @@ export default async function JournalsPage({
         actions={newEntry}
       />
 
-      <div className="mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
         <SearchInput placeholder="Search by number or description" />
+        <div className="ml-auto">
+          <TableToolbar exportHref={`/api/exports/journals?${new URLSearchParams(
+            Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+          ).toString()}`} />
+        </div>
       </div>
 
       {total === 0 ? (
@@ -80,6 +87,7 @@ export default async function JournalsPage({
                 <SortableHeader column="source" label="Source" state={sort} basePath="/journals" params={linkParams} />
                 <TableHead className="numeric w-32">Amount</TableHead>
                 <SortableHeader column="status" label="Status" state={sort} basePath="/journals" params={linkParams} className="w-24" />
+                <TableHead className="w-10 print:hidden" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -112,6 +120,11 @@ export default async function JournalsPage({
                     <Badge variant={journal.status === 'POSTED' ? 'success' : 'secondary'}>
                       {journal.status.toLowerCase()}
                     </Badge>
+                  </TableCell>
+                  <TableCell className="print:hidden">
+                    <RowActions
+                      actions={[{ label: 'Open', href: `/journals/${journal.id}`, icon: 'open' }]}
+                    />
                   </TableCell>
                 </TableRow>
               ))}

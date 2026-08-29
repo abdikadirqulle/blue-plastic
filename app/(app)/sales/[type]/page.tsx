@@ -6,7 +6,9 @@ import { FileTextIcon, PlusIcon } from 'lucide-react'
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
+import { RowActions } from '@/components/data/row-actions'
 import { SearchInput } from '@/components/data/search-input'
+import { TableToolbar } from '@/components/data/table-toolbar'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
@@ -62,6 +64,7 @@ export default async function SalesListPage({
   const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
 
   const canCreate = ctx.permissions.has(config.createPermission)
+  const canEditDocuments = ctx.permissions.has('invoice:update')
   const newButton = canCreate ? (
     <Link href={`/sales/${config.slug}/new`} className={buttonVariants({ size: 'sm' })}>
       <PlusIcon /> New {config.singular.toLowerCase()}
@@ -96,6 +99,9 @@ export default async function SalesListPage({
             })}
           </div>
         ) : null}
+        <TableToolbar exportHref={`/api/exports/${config.slug}?${new URLSearchParams(
+          Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
+        ).toString()}`} />
       </div>
 
       {page.total === 0 ? (
@@ -121,6 +127,7 @@ export default async function SalesListPage({
                   <TableHead className="numeric w-32">Outstanding</TableHead>
                 ) : null}
                 <SortableHeader column="status" label="Status" state={sort} basePath={basePath} params={linkParams} className="w-28" />
+                <TableHead className="w-10 print:hidden" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -168,6 +175,17 @@ export default async function SalesListPage({
                       <Badge variant={STATUS_VARIANTS[row.status] ?? 'secondary'}>
                         {STATUS_LABELS[row.status] ?? row.status}
                       </Badge>
+                    </TableCell>
+                    <TableCell className="print:hidden">
+                      <RowActions
+                        actions={[
+                          { label: 'Open', href: `${basePath}/${row.id}`, icon: 'open' as const },
+                          ...(canEditDocuments && row.status !== 'VOID'
+                            ? [{ label: 'Edit', href: `${basePath}/${row.id}/edit`, icon: 'edit' as const }]
+                            : []),
+                          { label: 'Print', href: `${basePath}/${row.id}/print`, icon: 'print' as const },
+                        ]}
+                      />
                     </TableCell>
                   </TableRow>
                 )

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
+import { ArrowLeftIcon, PencilIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { ReceiveOrderButton, VoidPurchaseButton } from '@/components/purchases/purchase-actions'
@@ -34,6 +34,11 @@ export default async function PurchaseDocumentPage({
   const currency = ctx.organization.baseCurrency
   const canVoid =
     ctx.permissions.has('bill:void') && document.status !== 'VOID' && document.status !== 'DRAFT'
+
+  // The same rule the service enforces: no editing a voided document, or one
+  // with a payment or credit already applied to it.
+  const canEdit =
+    ctx.permissions.has('bill:update') && document.status !== 'VOID' && document.applications.length === 0
   const canReceive =
     config.type === 'PURCHASE_ORDER' &&
     ctx.permissions.has('bill:create') &&
@@ -60,6 +65,14 @@ export default async function PurchaseDocumentPage({
                 number={document.number}
                 today={today(ctx.organization.timeZone)}
               />
+            ) : null}
+            {canEdit ? (
+              <Link
+                href={`/purchases/${config.slug}/${id}/edit`}
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+              >
+                <PencilIcon /> Edit
+              </Link>
             ) : null}
             {canVoid ? <VoidPurchaseButton id={id} number={document.number} /> : null}
           </>

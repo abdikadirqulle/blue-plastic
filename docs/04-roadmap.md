@@ -227,6 +227,8 @@ remaining cost was: the accounting has been right since Phase 2.
 | 10.9 | Calendar date picker in place of the browser's date input |
 | 10.10 | Sortable column headers and pagination on the list screens |
 | 10.11 | Default accounts — which account each system role posts to, editable |
+| 10.12 | Every form disables its button while saving; success is green, not red |
+| 10.13 | Edit routes, row action menus, print, and CSV export on every list |
 
 Carried forward, unbuilt: attachments on documents, full-text search, rate
 limiting, backup/restore runbook, multi-currency activation, and an end-to-end

@@ -38,7 +38,19 @@ export const currencyCode = z
   .toUpperCase()
   .length(3, 'Use a 3-letter ISO currency code')
 
-export const countryCode = z.string().trim().toUpperCase().length(2).nullable().optional()
+/**
+ * A two-letter country code, or nothing.
+ *
+ * The empty string has to be handled explicitly. `.optional()` accepts an absent
+ * value, but a form always submits `""` for a field left blank — so a plain
+ * `.length(2).optional()` rejects every contact whose country was not filled in,
+ * which is most of them.
+ */
+export const countryCode = z
+  .union([z.string().trim().toUpperCase().length(2), z.literal('')])
+  .transform((value) => (value === '' ? null : value))
+  .nullable()
+  .optional()
 
 /** Money crosses the wire as a decimal string, never a float (ADR-0003). */
 export const moneyString = z

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon, PrinterIcon } from 'lucide-react'
+import { ArrowLeftIcon, PencilIcon, PrinterIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { ConvertEstimateButton, VoidDocumentButton } from '@/components/sales/document-actions'
@@ -32,6 +32,12 @@ export default async function SalesDocumentPage({
 
   const currency = ctx.organization.baseCurrency
   const canVoid = ctx.permissions.has('invoice:void') && document.status !== 'VOID' && document.status !== 'DRAFT'
+
+  // The same rule the service enforces: a voided document cannot be edited, and
+  // neither can one with money already applied to it — the payment would have to
+  // be unpicked first. Better to hide the button than to explain the refusal.
+  const applied = document.applications.length > 0
+  const canEdit = ctx.permissions.has('invoice:update') && document.status !== 'VOID' && !applied
   const canConvert =
     config.type === 'ESTIMATE' &&
     ctx.permissions.has('invoice:create') &&
@@ -64,6 +70,14 @@ export default async function SalesDocumentPage({
                 number={document.number}
                 today={today(ctx.organization.timeZone)}
               />
+            ) : null}
+            {canEdit ? (
+              <Link
+                href={`/sales/${config.slug}/${id}/edit`}
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+              >
+                <PencilIcon /> Edit
+              </Link>
             ) : null}
             {canVoid ? <VoidDocumentButton id={id} number={document.number} /> : null}
           </>
