@@ -185,14 +185,14 @@ opening balance lands in AR and on the aging report.
 | # | Task |
 | --- | --- |
 | 8.1 | Report framework: date ranges, comparison periods, accrual/cash basis, drill-down |
-| 8.2 | Profit & Loss (with % of income, comparative, monthly columns) |
+| 8.2 | Profit & Loss (% of income, comparative period) — monthly columns dropped, the comparative answers the question |
 | 8.3 | Balance Sheet (with self-check assertion) |
 | 8.4 | Statement of Cash Flows (indirect) |
-| 8.5 | Trial balance, general ledger detail, journal report |
-| 8.6 | Sales by customer/item, purchases by vendor/item, expenses by category |
-| 8.7 | Tax liability and tax summary reports |
-| 8.8 | `account_period_balances` rollup + agreement test against raw lines |
-| 8.9 | CSV/PDF export, saved report settings |
+| 8.5 | Trial balance, general ledger detail, journal report — delivered in Phases 2 and 4–5 |
+| 8.6 | Sales by customer/item, purchases by vendor, expenses by category |
+| 8.7 | Tax summary, split rate by rate for filing |
+| 8.8 | ~~`account_period_balances` rollup~~ — not built; measured and declined in [ADR-0010](./decisions/0010-no-balance-rollup-table.md) |
+| 8.9 | CSV export; report settings carried in the URL. PDF dropped — the browser already prints one |
 | 8.10 | Dashboard: cash position, income vs expense, AR/AP aging summary, recent activity |
 
 ---

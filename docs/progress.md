@@ -8,8 +8,8 @@
 | 4 — Sales / AR              | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-04-sales.md) · migration `sales` · 25 integrity objects · 173 tests                                                                                                                              |
 | 5 — Purchases / AP          | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-05-purchases.md) · migration `purchases` · 35 integrity objects · 196 tests                                                                                                                      |
 | 6 — Banking & Cash          | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-06-banking.md) · migration `banking` · 45 integrity objects · 212 tests                                                                                                                          |
-| 7 — Inventory               | ⚪ Not started         |                                                                                                                                                                                                                                       |
-| 8 — Reporting               | ⚪ Not started         |                                                                                                                                                                                                                                       |
+| 7 — Inventory               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-07-inventory.md) · migration `inventory` · 51 integrity objects · 226 tests                                                                                                                      |
+| 8 — Reporting               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-08-reporting.md) · no migration — reports read the ledger · 51 integrity objects · 258 tests · [ADR-0010](./decisions/0010-no-balance-rollup-table.md)                                          |
 | 9 — Period Close & Year-End | ⚪ Not started         |                                                                                                                                                                                                                                       |
 | 10 — Hardening & Polish     | ⚪ Not started         |                                                                                                                                                                                                                                       |
 
@@ -21,5 +21,4 @@ Phases advance only on explicit instruction from the owner.
 | -------------------------------------------------------------------------------- | ----------------- |
 | Email delivery for invitations (currently the inviter sets a temporary password) | 10                |
 | Multi-currency behaviour — the schema is already currency-aware                  | 10                |
-| `account_period_balances` report rollup                                          | 8                 |
 | Rate limiting on the sign-in endpoint                                            | 10                |

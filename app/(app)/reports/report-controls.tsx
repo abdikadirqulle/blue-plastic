@@ -1,0 +1,192 @@
+'use client'
+
+import { useState, useTransition } from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { DownloadIcon, Loader2Icon } from 'lucide-react'
+
+import { Button, buttonVariants } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { PERIOD_LABELS, type PeriodKey } from '@/lib/report-periods'
+import { COMPARISON_LABELS, type ComparisonKey } from './params'
+
+const selectClass =
+  'flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30'
+
+export type ControlSet = {
+  /** A balance sheet is stated at a date; everything else covers a range. */
+  mode: 'range' | 'asOf'
+  basis?: boolean
+  comparison?: boolean
+  /** Report key for the CSV endpoint. Omitted where export makes no sense. */
+  exportAs?: string
+}
+
+/**
+ * One control bar for every report.
+ *
+ * It writes to the URL rather than holding state, so the server component
+ * re-renders with real data and the back button works. The transition keeps the
+ * previous figures on screen while the next set is fetched, which reads as fast
+ * even when the query is not.
+ */
+export function ReportControls({
+  period,
+  from,
+  to,
+  asOf,
+  basis,
+  comparison,
+  controls,
+}: {
+  period: PeriodKey
+  from: string
+  to: string
+  asOf: string
+  basis: 'accrual' | 'cash'
+  comparison: ComparisonKey
+  controls: ControlSet
+}) {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const [pending, startTransition] = useTransition()
+
+  const [draft, setDraft] = useState({ period, from, to, asOf, basis, comparison })
+
+  // The URL is the source of truth; the draft only holds an edit in flight. When
+  // the server comes back with different dates — which it does whenever a preset
+  // is chosen — the inputs have to show them rather than what was typed before.
+  const settled = `${period}|${from}|${to}|${asOf}|${basis}|${comparison}`
+  const [lastSettled, setLastSettled] = useState(settled)
+  if (settled !== lastSettled) {
+    setLastSettled(settled)
+    setDraft({ period, from, to, asOf, basis, comparison })
+  }
+
+  const apply = (next: Partial<typeof draft>) => {
+    const merged = { ...draft, ...next }
+    setDraft(merged)
+
+    const params = new URLSearchParams()
+    params.set('period', merged.period)
+    // A preset resolves its own dates on the server. Sending the old ones would
+    // only survive to confuse a later switch to a custom range.
+    if (merged.period === 'custom') {
+      params.set('from', merged.from)
+      params.set('to', merged.to)
+      params.set('asOf', merged.asOf)
+    }
+    if (controls.basis) params.set('basis', merged.basis)
+    if (controls.comparison) params.set('compare', merged.comparison)
+
+    startTransition(() => router.push(`${pathname}?${params.toString()}`, { scroll: false }))
+  }
+
+  const exportHref = controls.exportAs
+    ? `/api/reports/${controls.exportAs}?${new URLSearchParams(searchParams).toString()}`
+    : null
+
+  return (
+    <div className="mb-4 flex flex-wrap items-end gap-3">
+      <div className="space-y-1.5">
+        <Label htmlFor="period">Period</Label>
+        <select
+          id="period"
+          className={`${selectClass} w-44`}
+          value={draft.period}
+          onChange={(event) => apply({ period: event.target.value as PeriodKey })}
+        >
+          {(Object.keys(PERIOD_LABELS) as PeriodKey[]).map((key) => (
+            <option key={key} value={key}>
+              {PERIOD_LABELS[key]}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {controls.mode === 'range' ? (
+        <>
+          <div className="space-y-1.5">
+            <Label htmlFor="from">From</Label>
+            <Input
+              id="from"
+              type="date"
+              className="w-40"
+              value={draft.from}
+              onChange={(event) => setDraft({ ...draft, period: 'custom', from: event.target.value })}
+              onBlur={() => draft.from !== from && apply({ period: 'custom' })}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="to">To</Label>
+            <Input
+              id="to"
+              type="date"
+              className="w-40"
+              value={draft.to}
+              onChange={(event) => setDraft({ ...draft, period: 'custom', to: event.target.value })}
+              onBlur={() => draft.to !== to && apply({ period: 'custom' })}
+            />
+          </div>
+        </>
+      ) : (
+        <div className="space-y-1.5">
+          <Label htmlFor="asOf">As of</Label>
+          <Input
+            id="asOf"
+            type="date"
+            className="w-40"
+            value={draft.asOf}
+            onChange={(event) => setDraft({ ...draft, period: 'custom', asOf: event.target.value })}
+            onBlur={() => draft.asOf !== asOf && apply({ period: 'custom' })}
+          />
+        </div>
+      )}
+
+      {controls.basis ? (
+        <div className="space-y-1.5">
+          <Label htmlFor="basis">Basis</Label>
+          <select
+            id="basis"
+            className={`${selectClass} w-36`}
+            value={draft.basis}
+            onChange={(event) => apply({ basis: event.target.value as 'accrual' | 'cash' })}
+          >
+            <option value="accrual">Accrual</option>
+            <option value="cash">Cash</option>
+          </select>
+        </div>
+      ) : null}
+
+      {controls.comparison ? (
+        <div className="space-y-1.5">
+          <Label htmlFor="compare">Compare</Label>
+          <select
+            id="compare"
+            className={`${selectClass} w-44`}
+            value={draft.comparison}
+            onChange={(event) => apply({ comparison: event.target.value as ComparisonKey })}
+          >
+            {(Object.keys(COMPARISON_LABELS) as ComparisonKey[]).map((key) => (
+              <option key={key} value={key}>
+                {COMPARISON_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+
+      <Button type="button" variant="outline" onClick={() => apply({})} disabled={pending}>
+        {pending ? <Loader2Icon className="animate-spin" /> : null}
+        Apply
+      </Button>
+
+      {exportHref ? (
+        <a href={exportHref} className={buttonVariants({ variant: 'ghost' })} download>
+          <DownloadIcon /> CSV
+        </a>
+      ) : null}
+    </div>
+  )
+}
