@@ -4,6 +4,7 @@ import { AlertTriangleIcon, CheckCircle2Icon, PackageIcon, ScaleIcon } from 'luc
 
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -15,7 +16,14 @@ import * as inventoryService from '@/server/services/inventory.service'
 
 export const metadata: Metadata = { title: 'Inventory' }
 
-export default async function InventoryPage() {
+const SORTABLE = ['name', 'quantity', 'cost', 'value'] as const
+
+export default async function InventoryPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
+  const sort = readSort(await searchParams, SORTABLE, { sort: 'name', dir: 'asc' })
   const ctx = await requireOrgContext('inventory:read')
 
   const [stock, agreement, adjustments] = await Promise.all([
@@ -27,6 +35,22 @@ export default async function InventoryPage() {
   const currency = ctx.organization.baseCurrency
   const canAdjust = ctx.permissions.has('inventory:adjust')
   const lowStock = stock.items.filter((item) => item.belowReorder)
+
+  // Sorted here rather than in the query: quantity, average cost and value are
+  // computed from the stock ledger, so there is no column to order by.
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const items = [...stock.items].sort((a, b) => {
+    switch (sort.sort) {
+      case 'quantity':
+        return direction * a.quantity.comparedTo(b.quantity)
+      case 'cost':
+        return direction * a.averageCost.comparedTo(b.averageCost)
+      case 'value':
+        return direction * a.value.comparedTo(b.value)
+      default:
+        return direction * a.name.localeCompare(b.name)
+    }
+  })
 
   return (
     <>
@@ -84,15 +108,15 @@ export default async function InventoryPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Item</TableHead>
-                  <TableHead className="numeric w-28">On hand</TableHead>
-                  <TableHead className="numeric w-32">Average cost</TableHead>
-                  <TableHead className="numeric w-32">Value</TableHead>
+                  <SortableHeader column="name" label="Item" state={sort} basePath="/inventory" />
+                  <SortableHeader column="quantity" label="On hand" state={sort} basePath="/inventory" className="w-28" numeric defaultDirection="desc" />
+                  <SortableHeader column="cost" label="Average cost" state={sort} basePath="/inventory" className="w-32" numeric defaultDirection="desc" />
+                  <SortableHeader column="value" label="Value" state={sort} basePath="/inventory" className="w-32" numeric defaultDirection="desc" />
                   <TableHead className="w-32" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {stock.items.map((item) => (
+                {items.map((item) => (
                   <TableRow key={item.itemId}>
                     <TableCell>
                       <Link

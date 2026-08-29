@@ -23,6 +23,8 @@ nothing that makes them wait without saying so.
 | 10.7 | Help and system guidance inside the application | `app/(app)/help/` | ✅ |
 | 10.8 | Quick Create — one button that starts any document or record | `components/layout/quick-create.tsx` | ✅ |
 | 10.9 | Calendar date picker in place of the browser's date input | `components/ui/calendar.tsx`, `date-field.tsx` | ✅ |
+| 10.10 | Sortable column headers and pagination on the list screens | `components/data/sortable-header.tsx` | ✅ |
+| 10.11 | Default accounts: which account each system role posts to | `app/(app)/settings/accounts/` | ✅ |
 
 ## 10.1 — Nine modules, with their screens underneath
 
@@ -182,6 +184,57 @@ library. What it has to be right about is the *calendar date*, not an instant:
 every date in this system is a `YYYY-MM-DD` string, an invoice dated the 1st is
 dated the 1st in every timezone, and a picker built on `Date` objects is one
 daylight-saving boundary away from posting an entry into the wrong month.
+
+## 10.10 — Sorting and pagination
+
+Column headers sort. The sort lives in the URL alongside the page number and the
+search, so the ordering survives a refresh and can be sent to somebody else — and,
+more importantly, the sort happens **in the database over every row**, not in the
+browser over the page that happens to be loaded. Sorting only the visible page is
+the bug this design avoids.
+
+Applied to the chart of accounts, the sales and purchase document lists, journal
+entries and stock on hand. Where a column is computed rather than stored — a
+journal's total, an item's stock value, an account's balance — it is sorted after
+the rows are read, and the ones that cannot be sorted at all are left as plain
+headers rather than offered and then ignored.
+
+The chart of accounts was one long ungrouped table; it is now one sortable,
+paginated table of 25. Its balances are coloured: positive bold green, negative
+bold red. That is not good-and-bad — every balance there is shown on its account's
+natural side, so a negative figure is a *contra* position (a bank overdrawn, an
+expense in credit) and those are exactly the rows worth finding on a page of
+numbers. Zero stays plain, because a page where everything is coloured is a page
+where the colour means nothing.
+
+Indentation showing the parent/child structure is dropped when the table is
+sorted by anything other than account number. A child three rows away from its
+parent, indented under nothing, would be misleading rather than helpful.
+
+The balance colouring is deliberately **not** applied to the account detail page:
+its running balance is debit-minus-credit, not natural side, so a revenue account
+reads negative there and red would be simply wrong.
+
+## 10.11 — Default accounts
+
+The engine never names an account. It asks for a *role* — the receivable control
+account, the account uncategorised income lands in — and Settings → Default
+accounts is where a role is bound to an account. Every invoice, bill, payment and
+closing entry resolves through those bindings, so changing one changes what every
+form does without any form knowing about it.
+
+The schema used to say these were "seeded once, never reassigned". A business
+with its own chart should be able to say *our receivables account is 1150* rather
+than be told what to call things, so they can now be moved — with guards. A role
+only accepts an account of the right type and detail type, because putting
+receivables on an expense account puts it in the wrong half of the balance sheet.
+An archived account, a heading with sub-accounts, and an account already holding
+another role are all refused.
+
+**Rebinding does not move a balance.** Entries already posted stay on the account
+that received them; the ledger records what happened and is not rewritten to match
+a later preference. The screen says so before the change, with a count of the
+entries that will be left behind, and the change is written to the audit log.
 
 ## Verification
 

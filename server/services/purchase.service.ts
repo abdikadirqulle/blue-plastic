@@ -44,11 +44,25 @@ const DOCUMENT_SELECT = {
   convertedTo: { select: { id: true, number: true, type: true } },
 } satisfies Prisma.PurchaseDocumentSelect
 
+/** Orderings the list screen offers. Sorting happens here, over every row. */
+const PURCHASE_ORDER: Record<
+  string,
+  (dir: 'asc' | 'desc') => Prisma.PurchaseDocumentOrderByWithRelationInput[]
+> = {
+  number: (dir) => [{ number: dir }],
+  date: (dir) => [{ date: dir }, { number: dir }],
+  vendor: (dir) => [{ vendor: { displayName: dir } }, { date: 'desc' }],
+  reference: (dir) => [{ reference: dir }, { date: 'desc' }],
+  dueDate: (dir) => [{ dueDate: dir }, { number: 'desc' }],
+  total: (dir) => [{ total: dir }, { date: 'desc' }],
+  status: (dir) => [{ status: dir }, { date: 'desc' }],
+}
+
 export async function list(
   ctx: OrgContext,
   type: PurchaseDocumentType,
   query: ListQuery,
-  options: { status?: string; vendorId?: string } = {},
+  options: { status?: string; vendorId?: string; sort?: string; dir?: 'asc' | 'desc' } = {},
 ) {
   const where: Prisma.PurchaseDocumentWhereInput = {
     orgId: ctx.orgId,
@@ -74,7 +88,9 @@ export async function list(
     db.purchaseDocument.findMany({
       where,
       select: DOCUMENT_SELECT,
-      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      orderBy:
+        (options.sort ? PURCHASE_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
+        [{ date: 'desc' }, { number: 'desc' }],
       ...paginate(query),
     }),
     db.purchaseDocument.count({ where }),

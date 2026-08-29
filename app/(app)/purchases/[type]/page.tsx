@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -35,6 +36,8 @@ const FILTERS = [
   { value: 'draft', label: 'Drafts' },
 ]
 
+const SORTABLE = ['number', 'date', 'vendor', 'reference', 'dueDate', 'total', 'status'] as const
+
 export default async function PurchaseListPage({
   params,
   searchParams,
@@ -49,8 +52,11 @@ export default async function PurchaseListPage({
   const search = await searchParams
   const query = parseListQuery(search)
   const status = typeof search.status === 'string' ? search.status : undefined
+  const sort = readSort(search, SORTABLE, { sort: 'date', dir: 'desc' })
 
-  const page = await purchaseService.list(ctx, config.type, query, { status })
+  const page = await purchaseService.list(ctx, config.type, query, { status, ...sort })
+  const basePath = `/purchases/${config.slug}`
+  const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
   const currency = ctx.organization.baseCurrency
   const now = today(ctx.organization.timeZone)
 
@@ -99,14 +105,16 @@ export default async function PurchaseListPage({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-32">Number</TableHead>
-                <TableHead className="w-28">Date</TableHead>
-                <TableHead>Vendor</TableHead>
-                <TableHead>Their ref</TableHead>
-                {config.type === 'BILL' ? <TableHead className="w-28">Due</TableHead> : null}
-                <TableHead className="numeric w-32">Total</TableHead>
+                <SortableHeader column="number" label="Number" state={sort} basePath={basePath} params={linkParams} className="w-32" />
+                <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" defaultDirection="desc" />
+                <SortableHeader column="vendor" label="Vendor" state={sort} basePath={basePath} params={linkParams} />
+                <SortableHeader column="reference" label="Their ref" state={sort} basePath={basePath} params={linkParams} />
+                {config.type === 'BILL' ? (
+                  <SortableHeader column="dueDate" label="Due" state={sort} basePath={basePath} params={linkParams} className="w-28" />
+                ) : null}
+                <SortableHeader column="total" label="Total" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
                 {config.type === 'BILL' ? <TableHead className="numeric w-32">Owing</TableHead> : null}
-                <TableHead className="w-24">Status</TableHead>
+                <SortableHeader column="status" label="Status" state={sort} basePath={basePath} params={linkParams} className="w-24" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -167,7 +175,7 @@ export default async function PurchaseListPage({
             total={page.total}
             pageSize={page.pageSize}
             basePath={`/purchases/${config.slug}`}
-            params={{ q: query.q, status }}
+            params={linkParams}
           />
         </Card>
       )}

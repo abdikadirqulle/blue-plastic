@@ -48,11 +48,21 @@ const DOCUMENT_SELECT = {
 
 /* --- Reading -------------------------------------------------------------- */
 
+/** Orderings the list screen offers. Sorting happens here, over every row. */
+const SALES_ORDER: Record<string, (dir: 'asc' | 'desc') => Prisma.SalesDocumentOrderByWithRelationInput[]> = {
+  number: (dir) => [{ number: dir }],
+  date: (dir) => [{ date: dir }, { number: dir }],
+  customer: (dir) => [{ customer: { displayName: dir } }, { date: 'desc' }],
+  dueDate: (dir) => [{ dueDate: dir }, { number: 'desc' }],
+  total: (dir) => [{ total: dir }, { date: 'desc' }],
+  status: (dir) => [{ status: dir }, { date: 'desc' }],
+}
+
 export async function list(
   ctx: OrgContext,
   type: SalesDocumentType,
   query: ListQuery,
-  options: { status?: string; customerId?: string } = {},
+  options: { status?: string; customerId?: string; sort?: string; dir?: 'asc' | 'desc' } = {},
 ) {
   const where: Prisma.SalesDocumentWhereInput = {
     orgId: ctx.orgId,
@@ -78,7 +88,9 @@ export async function list(
     db.salesDocument.findMany({
       where,
       select: DOCUMENT_SELECT,
-      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      orderBy:
+        (options.sort ? SALES_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
+        [{ date: 'desc' }, { number: 'desc' }],
       ...paginate(query),
     }),
     db.salesDocument.count({ where }),

@@ -160,6 +160,7 @@ export const MODULES: NavModule[] = [
     owns: ['/settings'],
     tabs: [
       { label: 'Organisation', href: '/settings/organization' },
+      { label: 'Default accounts', href: '/settings/accounts', permission: 'account:read' },
       { label: 'Payment terms', href: '/settings/payment-terms' },
       { label: 'Tax', href: '/settings/tax', permission: 'tax:read' },
       { label: 'Users', href: '/settings/users', permission: 'user:read' },

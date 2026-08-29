@@ -225,6 +225,8 @@ remaining cost was: the accounting has been right since Phase 2.
 | 10.7 | Help and system guidance inside the application, in place of a separate manual |
 | 10.8 | Quick Create — one button that starts any document or record |
 | 10.9 | Calendar date picker in place of the browser's date input |
+| 10.10 | Sortable column headers and pagination on the list screens |
+| 10.11 | Default accounts — which account each system role posts to, editable |
 
 Carried forward, unbuilt: attachments on documents, full-text search, rate
 limiting, backup/restore runbook, multi-currency activation, and an end-to-end

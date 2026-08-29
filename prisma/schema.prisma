@@ -126,9 +126,11 @@ enum AccountSubtype {
   DEPRECIATION
 }
 
-/// Accounts the engine refers to by name. Seeded once per organisation, never
-/// deleted, never reassigned. Their code and display name remain editable — an
-/// accountant may prefer "Trade Debtors" to "Accounts Receivable".
+/// Roles the engine posts to, rather than accounts it names. Seeded once per
+/// organisation and never deleted, but the account a role points at can be
+/// changed in Settings -> Default accounts: a business with its own chart should
+/// be able to say "our receivables account is 1150" rather than be told what to
+/// call things. Moving a role does not move a balance.
 enum SystemAccountKey {
   ACCOUNTS_RECEIVABLE
   ACCOUNTS_PAYABLE

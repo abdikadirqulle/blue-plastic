@@ -21,7 +21,20 @@ export type JournalRow = {
   lineCount: number
 }
 
-export async function list(ctx: OrgContext, query: ListQuery) {
+/** Orderings the list screen offers. Sorting happens here, over every row. */
+const JOURNAL_ORDER: Record<string, (dir: 'asc' | 'desc') => Prisma.JournalOrderByWithRelationInput[]> = {
+  number: (dir) => [{ journalNumber: dir }],
+  date: (dir) => [{ date: dir }, { journalNumber: dir }],
+  memo: (dir) => [{ memo: dir }, { date: 'desc' }],
+  source: (dir) => [{ sourceType: dir }, { date: 'desc' }],
+  status: (dir) => [{ status: dir }, { date: 'desc' }],
+}
+
+export async function list(
+  ctx: OrgContext,
+  query: ListQuery,
+  options: { sort?: string; dir?: 'asc' | 'desc' } = {},
+) {
   const where: Prisma.JournalWhereInput = {
     orgId: ctx.orgId,
     ...(query.q
@@ -47,7 +60,9 @@ export async function list(ctx: OrgContext, query: ListQuery) {
         isAdjusting: true,
         lines: { select: { debit: true } },
       },
-      orderBy: [{ date: 'desc' }, { journalNumber: 'desc' }],
+      orderBy:
+        (options.sort ? JOURNAL_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
+        [{ date: 'desc' }, { journalNumber: 'desc' }],
       ...paginate(query),
     }),
     db.journal.count({ where }),

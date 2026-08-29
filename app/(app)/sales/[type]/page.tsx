@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -27,6 +28,8 @@ export async function generateMetadata({
   const config = bySlug((await params).type)
   return { title: config?.plural ?? 'Sales' }
 }
+
+const SORTABLE = ['number', 'date', 'customer', 'dueDate', 'total', 'status'] as const
 
 const FILTERS = [
   { value: '', label: 'All' },
@@ -49,10 +52,14 @@ export default async function SalesListPage({
   const search = await searchParams
   const query = parseListQuery(search)
   const status = typeof search.status === 'string' ? search.status : undefined
+  const sort = readSort(search, SORTABLE, { sort: 'date', dir: 'desc' })
 
-  const page = await salesService.list(ctx, config.type, query, { status })
+  const page = await salesService.list(ctx, config.type, query, { status, ...sort })
   const currency = ctx.organization.baseCurrency
   const now = today(ctx.organization.timeZone)
+
+  const basePath = `/sales/${config.slug}`
+  const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
 
   const canCreate = ctx.permissions.has(config.createPermission)
   const newButton = canCreate ? (
@@ -103,15 +110,17 @@ export default async function SalesListPage({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-32">Number</TableHead>
-                <TableHead className="w-28">Date</TableHead>
-                <TableHead>Customer</TableHead>
-                {config.type === 'INVOICE' ? <TableHead className="w-28">Due</TableHead> : null}
-                <TableHead className="numeric w-32">Total</TableHead>
+                <SortableHeader column="number" label="Number" state={sort} basePath={basePath} params={linkParams} className="w-32" />
+                <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" defaultDirection="desc" />
+                <SortableHeader column="customer" label="Customer" state={sort} basePath={basePath} params={linkParams} />
+                {config.type === 'INVOICE' ? (
+                  <SortableHeader column="dueDate" label="Due" state={sort} basePath={basePath} params={linkParams} className="w-28" />
+                ) : null}
+                <SortableHeader column="total" label="Total" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
                 {config.type === 'INVOICE' ? (
                   <TableHead className="numeric w-32">Outstanding</TableHead>
                 ) : null}
-                <TableHead className="w-28">Status</TableHead>
+                <SortableHeader column="status" label="Status" state={sort} basePath={basePath} params={linkParams} className="w-28" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -171,7 +180,7 @@ export default async function SalesListPage({
             total={page.total}
             pageSize={page.pageSize}
             basePath={`/sales/${config.slug}`}
-            params={{ q: query.q, status }}
+            params={linkParams}
           />
         </Card>
       )}

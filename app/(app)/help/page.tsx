@@ -25,6 +25,7 @@ const FLOWS: { title: string; steps: { text: string; href?: string }[] }[] = [
     steps: [
       { text: 'Install the chart of accounts, then rename or add what this business actually uses.', href: '/accounts' },
       { text: 'Set the base currency and the month your fiscal year starts.', href: '/settings/organization' },
+      { text: 'Check which account each system role posts to — receivables, payables, uncategorised income.', href: '/settings/accounts' },
       { text: 'Add tax agencies, rates and codes before entering anything taxable.', href: '/settings/tax' },
       { text: 'Enter customers and vendors, with their opening balances if the books are not new.', href: '/customers' },
       { text: 'Enter products and services, and the accounts each one is sold and bought into.', href: '/items' },
@@ -35,7 +36,7 @@ const FLOWS: { title: string; steps: { text: string; href?: string }[] }[] = [
     steps: [
       { text: 'Raise an invoice. It debits Accounts Receivable and credits income and tax.', href: '/sales/invoices/new' },
       { text: 'Receive the payment against it. Cash goes up, the receivable goes down.', href: '/payments/new' },
-      { text: 'If the money went to Undeposited Funds, record the deposit when it reaches the bank.', href: '/banking/deposits' },
+      { text: 'If the money went to Undeposited Funds, record the deposit when it reaches the bank.', href: '/banking/deposits/new' },
       { text: 'A return is a credit memo, applied to the invoice — never an edit to the invoice.', href: '/sales/credit-memos/new' },
     ],
   },
@@ -50,7 +51,7 @@ const FLOWS: { title: string; steps: { text: string; href?: string }[] }[] = [
   {
     title: 'Every month',
     steps: [
-      { text: 'Import or enter the bank statement, then reconcile each account to it.', href: '/banking/reconcile' },
+      { text: 'Import or enter the bank statement, then reconcile each account to it.', href: '/banking' },
       { text: 'Work through the close checklist and fix anything it flags.', href: '/periods' },
       { text: 'Read the profit and loss, and check the balance sheet says it balances.', href: '/reports/profit-loss' },
       { text: 'Close the period. Nothing can then be posted into it without reopening it.', href: '/periods' },
