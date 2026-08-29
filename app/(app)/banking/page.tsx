@@ -11,18 +11,42 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDate, toCalendarDate, today } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { requireOrgContext } from '@/server/auth/context'
 import * as bankingService from '@/server/services/banking.service'
 import { history } from '@/server/services/reconciliation.service'
 
+const SORTABLE = ['name', 'books', 'bank', 'pending'] as const
+
 export const metadata: Metadata = { title: 'Banking' }
 
-export default async function BankingPage() {
+export default async function BankingPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireOrgContext('bank:read')
-  const [accounts, reconciliations] = await Promise.all([
+  const sort = readSort(await searchParams, SORTABLE, { sort: 'name', dir: 'asc' })
+
+  const [allAccounts, reconciliations] = await Promise.all([
     bankingService.bankAccounts(ctx),
     history(ctx),
   ])
+
+  // Balances are computed from the ledger, so the ordering is applied here.
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const accounts = [...allAccounts].sort((a, b) => {
+    switch (sort.sort) {
+      case 'books':
+        return direction * a.balance.comparedTo(b.balance)
+      case 'bank':
+        return direction * a.cleared.comparedTo(b.cleared)
+      case 'pending':
+        return direction * a.uncleared.comparedTo(b.uncleared)
+      default:
+        return direction * a.code.localeCompare(b.code)
+    }
+  })
 
   const currency = ctx.organization.baseCurrency
   const canTransact = ctx.permissions.has('bank:transact')
@@ -65,10 +89,10 @@ export default async function BankingPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Account</TableHead>
-                <TableHead className="numeric w-40">In the books</TableHead>
-                <TableHead className="numeric w-40">Confirmed by the bank</TableHead>
-                <TableHead className="numeric w-40">Not yet confirmed</TableHead>
+                <SortableHeader column="name" label="Account" state={sort} basePath="/banking" />
+                <SortableHeader column="books" label="In the books" state={sort} basePath="/banking" className="w-40" numeric defaultDirection="desc" />
+                <SortableHeader column="bank" label="Confirmed by the bank" state={sort} basePath="/banking" className="w-40" numeric defaultDirection="desc" />
+                <SortableHeader column="pending" label="Not yet confirmed" state={sort} basePath="/banking" className="w-40" numeric defaultDirection="desc" />
                 <TableHead className="w-40" />
               </TableRow>
             </TableHeader>

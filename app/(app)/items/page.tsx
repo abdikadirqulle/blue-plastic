@@ -9,12 +9,15 @@ import { SearchInput } from '@/components/data/search-input'
 import { NewItemButton } from '@/components/master-data/item-dialog'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
+import { readSort } from '@/components/data/sortable-header'
 import { parseListQuery } from '@/lib/validation/common'
 import { requireOrgContext } from '@/server/auth/context'
 import * as accountService from '@/server/services/account.service'
 import * as itemService from '@/server/services/item.service'
 import * as taxService from '@/server/services/tax.service'
 import { ItemTable } from './item-table'
+
+const SORTABLE = ['name', 'type', 'price', 'cost', 'sku'] as const
 
 export const metadata: Metadata = { title: 'Products and services' }
 
@@ -35,9 +38,17 @@ export default async function ItemsPage({
   const query = parseListQuery(params)
   const type = typeof params.type === 'string' ? params.type : undefined
   const includeInactive = params.archived === '1'
+  const sort = readSort(params, SORTABLE, { sort: 'name', dir: 'asc' })
+  const linkParams = {
+    q: query.q,
+    type,
+    archived: includeInactive ? '1' : undefined,
+    sort: sort.sort,
+    dir: sort.dir,
+  }
 
   const [page, accounts, taxCodes, categories] = await Promise.all([
-    itemService.list(ctx, query, { type, includeInactive }),
+    itemService.list(ctx, query, { type, includeInactive, ...sort }),
     accountService.postableAccounts(ctx),
     taxService.listCodes(ctx),
     itemService.listCategories(ctx),
@@ -112,6 +123,8 @@ export default async function ItemsPage({
       ) : (
         <Card className="overflow-hidden p-0">
           <ItemTable
+            sort={sort}
+            linkParams={linkParams}
             rows={page.rows}
             accounts={accountOptions}
             taxCodes={taxOptions}
@@ -126,7 +139,7 @@ export default async function ItemsPage({
             total={page.total}
             pageSize={page.pageSize}
             basePath="/items"
-            params={{ q: query.q, type, archived: includeInactive ? '1' : undefined }}
+            params={linkParams}
           />
         </Card>
       )}

@@ -8,7 +8,8 @@ import { toast } from 'sonner'
 import { idleState } from '@/components/forms/action-state'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
-import { FormError } from '@/components/forms/form-error'
+import { FormStatus } from '@/components/forms/form-status'
+import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
@@ -93,7 +94,7 @@ export function AdjustmentForm({
 
       <Card>
         <CardContent className="grid gap-4 p-4 sm:grid-cols-3">
-          <FormError message={state.message} />
+          <FormStatus state={state} />
 
           <Field name="date" label="Date of the count" required error={state.fieldErrors?.date}>
             <DateField
@@ -282,9 +283,9 @@ export function AdjustmentForm({
         <Button type="button" variant="outline" onClick={() => router.push('/inventory')}>
           Cancel
         </Button>
-        <Button type="submit" disabled={filled.length === 0}>
+        <SubmitButton disabled={filled.length === 0} pendingLabel="Posting…">
           Post adjustment
-        </Button>
+        </SubmitButton>
       </div>
     </form>
   )

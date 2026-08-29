@@ -8,12 +8,15 @@ import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDateTime } from '@/lib/date'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { parseListQuery } from '@/lib/validation/common'
 import { requireOrgContext } from '@/server/auth/context'
 import { ASSIGNABLE_ROLES, ROLE_LABELS } from '@/lib/roles'
 import * as membershipService from '@/server/services/membership.service'
 import { InviteUserDialog } from './invite-user-dialog'
 import { MemberActions } from './member-actions'
+
+const SORTABLE = ['name', 'role', 'status', 'lastSeen'] as const
 
 export const metadata: Metadata = { title: 'Users' }
 
@@ -23,8 +26,30 @@ export default async function UsersPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
   const ctx = await requireOrgContext('user:read')
-  const query = parseListQuery(await searchParams)
-  const { rows, total, page, pageCount, pageSize } = await membershipService.list(ctx, query)
+  const params = await searchParams
+  const query = parseListQuery(params)
+  const sort = readSort(params, SORTABLE, { sort: 'name', dir: 'asc' })
+  const linkParams = { q: query.q, sort: sort.sort, dir: sort.dir }
+  const { rows: members, total, page, pageCount, pageSize } = await membershipService.list(ctx, query)
+
+  // A membership list is short and its columns come from two tables, so it is
+  // ordered here rather than in the query.
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const rows = [...members].sort((a, b) => {
+    switch (sort.sort) {
+      case 'role':
+        return direction * a.role.localeCompare(b.role) || a.user.name.localeCompare(b.user.name)
+      case 'status':
+        return direction * a.status.localeCompare(b.status) || a.user.name.localeCompare(b.user.name)
+      case 'lastSeen':
+        return (
+          direction *
+          ((a.user.lastLoginAt?.getTime() ?? 0) - (b.user.lastLoginAt?.getTime() ?? 0))
+        )
+      default:
+        return direction * a.user.name.localeCompare(b.user.name)
+    }
+  })
 
   const canInvite = ctx.permissions.has('user:invite')
   const canUpdate = ctx.permissions.has('user:update')
@@ -53,10 +78,10 @@ export default async function UsersPage({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Member</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last signed in</TableHead>
+                <SortableHeader column="name" label="Member" state={sort} basePath="/settings/users" params={linkParams} />
+                <SortableHeader column="role" label="Role" state={sort} basePath="/settings/users" params={linkParams} />
+                <SortableHeader column="status" label="Status" state={sort} basePath="/settings/users" params={linkParams} />
+                <SortableHeader column="lastSeen" label="Last signed in" state={sort} basePath="/settings/users" params={linkParams} defaultDirection="desc" />
                 <TableHead className="w-10" />
               </TableRow>
             </TableHeader>
@@ -117,7 +142,7 @@ export default async function UsersPage({
             total={total}
             pageSize={pageSize}
             basePath="/settings/users"
-            params={{ q: query.q }}
+            params={linkParams}
           />
         </Card>
       )}

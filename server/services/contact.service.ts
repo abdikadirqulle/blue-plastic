@@ -49,10 +49,26 @@ const VENDOR_SELECT = {
 
 /* --- Reading -------------------------------------------------------------- */
 
+/** Orderings the list screens offer. Sorting happens here, over every row. */
+const CONTACT_ORDER = <T extends { displayName?: unknown }>(sort: string | undefined, dir: 'asc' | 'desc') => {
+  switch (sort) {
+    case 'name':
+      return [{ displayName: dir }] as T[]
+    case 'email':
+      return [{ email: dir }, { displayName: 'asc' }] as T[]
+    case 'phone':
+      return [{ phone: dir }, { displayName: 'asc' }] as T[]
+    case 'company':
+      return [{ companyName: dir }, { displayName: 'asc' }] as T[]
+    default:
+      return undefined
+  }
+}
+
 export async function listCustomers(
   ctx: OrgContext,
   query: ListQuery,
-  options: { includeInactive?: boolean } = {},
+  options: { includeInactive?: boolean; sort?: string; dir?: 'asc' | 'desc' } = {},
 ) {
   const where: Prisma.CustomerWhereInput = {
     orgId: ctx.orgId,
@@ -64,7 +80,10 @@ export async function listCustomers(
     db.customer.findMany({
       where,
       select: CUSTOMER_SELECT,
-      orderBy: { displayName: 'asc' },
+      orderBy:
+        CONTACT_ORDER<Prisma.CustomerOrderByWithRelationInput>(options.sort, options.dir ?? 'asc') ?? [
+          { displayName: 'asc' },
+        ],
       ...paginate(query),
     }),
     db.customer.count({ where }),
@@ -86,7 +105,7 @@ export async function listCustomers(
 export async function listVendors(
   ctx: OrgContext,
   query: ListQuery,
-  options: { includeInactive?: boolean } = {},
+  options: { includeInactive?: boolean; sort?: string; dir?: 'asc' | 'desc' } = {},
 ) {
   const where: Prisma.VendorWhereInput = {
     orgId: ctx.orgId,
@@ -98,7 +117,10 @@ export async function listVendors(
     db.vendor.findMany({
       where,
       select: VENDOR_SELECT,
-      orderBy: { displayName: 'asc' },
+      orderBy:
+        CONTACT_ORDER<Prisma.VendorOrderByWithRelationInput>(options.sort, options.dir ?? 'asc') ?? [
+          { displayName: 'asc' },
+        ],
       ...paginate(query),
     }),
     db.vendor.count({ where }),

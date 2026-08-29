@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -8,12 +9,26 @@ import { requireOrgContext } from '@/server/auth/context'
 import * as taxService from '@/server/services/tax.service'
 import { PaymentTermButton } from './payment-term-form'
 
+const SORTABLE = ['name', 'due'] as const
+
 export const metadata: Metadata = { title: 'Payment terms' }
 
-export default async function PaymentTermsPage() {
+export default async function PaymentTermsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireOrgContext('org:read')
-  const terms = await taxService.listPaymentTerms(ctx, { includeInactive: true })
+  const sort = readSort(await searchParams, SORTABLE, { sort: 'name', dir: 'asc' })
+  const all = await taxService.listPaymentTerms(ctx, { includeInactive: true })
   const canManage = ctx.permissions.has('tax:manage')
+
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const terms = [...all].sort((a, b) =>
+    sort.sort === 'due'
+      ? direction * ((a.dueDays ?? 0) - (b.dueDays ?? 0))
+      : direction * a.name.localeCompare(b.name),
+  )
 
   return (
     <Card>
@@ -31,8 +46,8 @@ export default async function PaymentTermsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Due</TableHead>
+              <SortableHeader column="name" label="Name" state={sort} basePath="/settings/payment-terms" />
+              <SortableHeader column="due" label="Due" state={sort} basePath="/settings/payment-terms" />
               <TableHead>Early settlement</TableHead>
               <TableHead className="numeric w-24">In use</TableHead>
               <TableHead className="w-24" />

@@ -85,6 +85,18 @@ export function readSettings(
   }
 }
 
+/** The settings as plain params, for links that must keep the current period. */
+export function settingsToQueryObject(settings: ReportSettings): Record<string, string> {
+  return {
+    period: settings.period,
+    from: settings.range.from,
+    to: settings.range.to,
+    basis: settings.basis,
+    compare: settings.comparison,
+    asOf: settings.asOf,
+  }
+}
+
 /** The settings as a query string, for export links and comparison switches. */
 export function settingsToQuery(settings: ReportSettings, extra: Record<string, string> = {}) {
   const params = new URLSearchParams({

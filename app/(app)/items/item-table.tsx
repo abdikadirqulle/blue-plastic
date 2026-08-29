@@ -13,6 +13,7 @@ import {
 } from '@/components/master-data/item-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SortableHeader, type SortState } from '@/components/data/sortable-header'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatMoney } from '@/lib/money'
 import { setItemsActive } from './actions'
@@ -42,6 +43,8 @@ export function ItemTable({
   currency,
   canEdit,
   canArchive,
+  sort,
+  linkParams,
 }: {
   rows: ItemRow[]
   accounts: AccountOption[]
@@ -50,6 +53,9 @@ export function ItemTable({
   currency: string
   canEdit: boolean
   canArchive: boolean
+  /** Sorting is server-side, over every row — see SortableHeader. */
+  sort: SortState
+  linkParams: Record<string, string | undefined>
 }) {
   const router = useRouter()
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -103,11 +109,11 @@ export function ItemTable({
                 />
               </TableHead>
             ) : null}
-            <TableHead>Item</TableHead>
-            <TableHead className="w-32">Type</TableHead>
+            <SortableHeader column="name" label="Item" state={sort} basePath="/items" params={linkParams} />
+            <SortableHeader column="type" label="Type" state={sort} basePath="/items" params={linkParams} className="w-32" />
             <TableHead>Posts to</TableHead>
-            <TableHead className="numeric w-28">Price</TableHead>
-            <TableHead className="numeric w-28">Cost</TableHead>
+            <SortableHeader column="price" label="Price" state={sort} basePath="/items" params={linkParams} className="w-28" numeric defaultDirection="desc" />
+            <SortableHeader column="cost" label="Cost" state={sort} basePath="/items" params={linkParams} className="w-28" numeric defaultDirection="desc" />
             <TableHead className="w-10" />
           </TableRow>
         </TableHeader>

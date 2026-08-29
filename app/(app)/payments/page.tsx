@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
 import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -17,6 +18,8 @@ import { parseListQuery } from '@/lib/validation/common'
 import { requireOrgContext } from '@/server/auth/context'
 import * as paymentService from '@/server/services/payment.service'
 
+const SORTABLE = ['number', 'date', 'customer', 'method', 'amount'] as const
+
 export const metadata: Metadata = { title: 'Payments' }
 
 export default async function PaymentsPage({
@@ -25,8 +28,11 @@ export default async function PaymentsPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
   const ctx = await requireOrgContext('payment:read')
-  const query = parseListQuery(await searchParams)
-  const page = await paymentService.list(ctx, query)
+  const search = await searchParams
+  const query = parseListQuery(search)
+  const sort = readSort(search, SORTABLE, { sort: 'date', dir: 'desc' })
+  const linkParams = { q: query.q, sort: sort.sort, dir: sort.dir }
+  const page = await paymentService.list(ctx, query, sort)
   const currency = ctx.organization.baseCurrency
 
   const newButton = ctx.permissions.has('payment:create') ? (
@@ -59,12 +65,12 @@ export default async function PaymentsPage({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-32">Number</TableHead>
-                <TableHead className="w-28">Date</TableHead>
-                <TableHead>Customer</TableHead>
-                <TableHead>Method</TableHead>
+                <SortableHeader column="number" label="Number" state={sort} basePath="/payments" params={linkParams} className="w-32" />
+                <SortableHeader column="date" label="Date" state={sort} basePath="/payments" params={linkParams} className="w-28" defaultDirection="desc" />
+                <SortableHeader column="customer" label="Customer" state={sort} basePath="/payments" params={linkParams} />
+                <SortableHeader column="method" label="Method" state={sort} basePath="/payments" params={linkParams} />
                 <TableHead>Into</TableHead>
-                <TableHead className="numeric w-28">Amount</TableHead>
+                <SortableHeader column="amount" label="Amount" state={sort} basePath="/payments" params={linkParams} className="w-28" numeric defaultDirection="desc" />
                 <TableHead className="numeric w-28">Unapplied</TableHead>
                 <TableHead className="w-20">Status</TableHead>
               </TableRow>
@@ -106,7 +112,7 @@ export default async function PaymentsPage({
             total={page.total}
             pageSize={page.pageSize}
             basePath="/payments"
-            params={{ q: query.q }}
+            params={linkParams}
           />
         </Card>
       )}

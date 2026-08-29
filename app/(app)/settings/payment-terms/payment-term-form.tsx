@@ -7,7 +7,7 @@ import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { Field, fieldProps } from '@/components/forms/field'
-import { FormError } from '@/components/forms/form-error'
+import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -53,7 +53,7 @@ function PaymentTermDialog({ onClose }: { onClose: () => void }) {
         </DialogHeader>
 
         <form action={formAction} className="mt-4 space-y-4">
-          <FormError message={state.message} />
+          <FormStatus state={state} />
 
           <Field name="name" label="Name" required error={e?.name}>
             <Input {...fieldProps('name', e?.name)} placeholder="Net 45" autoFocus required />

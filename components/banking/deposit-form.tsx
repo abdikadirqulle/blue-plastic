@@ -8,7 +8,8 @@ import { toast } from 'sonner'
 import { idleState } from '@/components/forms/action-state'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
-import { FormError } from '@/components/forms/form-error'
+import { FormStatus } from '@/components/forms/form-status'
+import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
@@ -92,7 +93,7 @@ export function DepositForm({
 
       <Card>
         <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
-          <FormError message={state.message} />
+          <FormStatus state={state} />
 
           <Field name="bankAccountId" label="Deposit to" required error={state.fieldErrors?.bankAccountId}>
             <NativeSelect
@@ -272,9 +273,9 @@ export function DepositForm({
         <Button type="button" variant="outline" onClick={() => router.push('/banking')}>
           Cancel
         </Button>
-        <Button type="submit" disabled={!total.greaterThan(0) || bankAccountId === ''}>
+        <SubmitButton disabled={!total.greaterThan(0) || bankAccountId === ''} pendingLabel="Recording…">
           Record deposit
-        </Button>
+        </SubmitButton>
       </div>
     </form>
   )

@@ -22,7 +22,23 @@ const PAYMENT_SELECT = {
   paymentAccount: { select: { id: true, code: true, name: true } },
 } satisfies Prisma.BillPaymentSelect
 
-export async function list(ctx: OrgContext, query: ListQuery, options: { vendorId?: string } = {}) {
+/** Orderings the list screen offers. Sorting happens here, over every row. */
+const PAYMENT_ORDER: Record<
+  string,
+  (dir: 'asc' | 'desc') => Prisma.BillPaymentOrderByWithRelationInput[]
+> = {
+  number: (dir) => [{ number: dir }],
+  date: (dir) => [{ date: dir }, { number: dir }],
+  vendor: (dir) => [{ vendor: { displayName: dir } }, { date: 'desc' }],
+  amount: (dir) => [{ amount: dir }, { date: 'desc' }],
+  method: (dir) => [{ method: dir }, { date: 'desc' }],
+}
+
+export async function list(
+  ctx: OrgContext,
+  query: ListQuery,
+  options: { vendorId?: string; sort?: string; dir?: 'asc' | 'desc' } = {},
+) {
   const where: Prisma.BillPaymentWhereInput = {
     orgId: ctx.orgId,
     ...(options.vendorId ? { vendorId: options.vendorId } : {}),
@@ -41,7 +57,9 @@ export async function list(ctx: OrgContext, query: ListQuery, options: { vendorI
     db.billPayment.findMany({
       where,
       select: { ...PAYMENT_SELECT, applications: { select: { amount: true } } },
-      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      orderBy:
+        (options.sort ? PAYMENT_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
+        [{ date: 'desc' }, { number: 'desc' }],
       ...paginate(query),
     }),
     db.billPayment.count({ where }),

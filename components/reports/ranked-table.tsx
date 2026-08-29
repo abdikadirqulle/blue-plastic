@@ -1,6 +1,7 @@
 import Link from 'next/link'
 
 import { EmptyState } from '@/components/data/empty-state'
+import { SortableHeader, type SortState } from '@/components/data/sortable-header'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Decimal, formatMoney } from '@/lib/money'
 import type { RankedRow } from '@/server/reports/business'
@@ -20,6 +21,9 @@ export function RankedTable({
   linkTo,
   quantities,
   empty,
+  sort,
+  basePath,
+  linkParams,
 }: {
   rows: (RankedRow & { quantity?: Decimal })[]
   total: Decimal
@@ -29,10 +33,27 @@ export function RankedTable({
   linkTo?: (id: string) => string
   quantities?: boolean
   empty: string
+  sort: SortState
+  basePath: string
+  linkParams: Record<string, string | undefined>
 }) {
   if (rows.length === 0) {
     return <EmptyState title="Nothing to report" description={empty} />
   }
+
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const ordered = [...rows].sort((a, b) => {
+    switch (sort.sort) {
+      case 'name':
+        return direction * a.name.localeCompare(b.name)
+      case 'count':
+        return direction * (a.count - b.count)
+      case 'quantity':
+        return direction * (a.quantity ?? new Decimal(0)).comparedTo(b.quantity ?? new Decimal(0))
+      default:
+        return direction * a.amount.comparedTo(b.amount)
+    }
+  })
 
   const largest = rows.reduce((max, row) => (row.amount.abs().greaterThan(max) ? row.amount.abs() : max), new Decimal(0))
 
@@ -40,15 +61,17 @@ export function RankedTable({
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>{nameHeader}</TableHead>
-          <TableHead className="numeric w-24">{countHeader}</TableHead>
-          {quantities ? <TableHead className="numeric w-28">Quantity</TableHead> : null}
-          <TableHead className="numeric w-40">Amount</TableHead>
+          <SortableHeader column="name" label={nameHeader} state={sort} basePath={basePath} params={linkParams} />
+          <SortableHeader column="count" label={countHeader} state={sort} basePath={basePath} params={linkParams} className="w-24" numeric defaultDirection="desc" />
+          {quantities ? (
+            <SortableHeader column="quantity" label="Quantity" state={sort} basePath={basePath} params={linkParams} className="w-28" numeric defaultDirection="desc" />
+          ) : null}
+          <SortableHeader column="amount" label="Amount" state={sort} basePath={basePath} params={linkParams} className="w-40" numeric defaultDirection="desc" />
           <TableHead className="w-48">Share</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((row) => (
+        {ordered.map((row) => (
           <TableRow key={row.id}>
             <TableCell className="font-medium">
               {linkTo ? (

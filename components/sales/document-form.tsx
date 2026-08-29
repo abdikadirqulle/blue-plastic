@@ -8,7 +8,8 @@ import { toast } from 'sonner'
 import { idleState } from '@/components/forms/action-state'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
-import { FormError } from '@/components/forms/form-error'
+import { FormStatus } from '@/components/forms/form-status'
+import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
@@ -218,7 +219,7 @@ export function DocumentForm({
 
       <Card>
         <CardContent className="space-y-4 p-4">
-          <FormError message={state.message} />
+          <FormStatus state={state} />
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Field name="customerId" label="Customer" required error={state.fieldErrors?.customerId}>
@@ -458,13 +459,13 @@ export function DocumentForm({
           Cancel
         </Button>
         {config.posts ? (
-          <Button type="submit" variant="outline" disabled={!canSave} onClick={() => setSaveAsDraft(true)}>
+          <SubmitButton variant="outline" disabled={!canSave} onClick={() => setSaveAsDraft(true)}>
             Save as draft
-          </Button>
+          </SubmitButton>
         ) : null}
-        <Button type="submit" disabled={!canSave} onClick={() => setSaveAsDraft(false)}>
+        <SubmitButton disabled={!canSave} onClick={() => setSaveAsDraft(false)} pendingLabel="Saving…">
           {config.posts ? `Save and post` : `Save ${config.singular.toLowerCase()}`}
-        </Button>
+        </SubmitButton>
       </div>
 
       {config.posts ? (

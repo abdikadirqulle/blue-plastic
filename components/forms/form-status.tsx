@@ -3,6 +3,16 @@ import { CheckCircle2Icon } from 'lucide-react'
 import { FormError } from './form-error'
 import type { FormState } from './action-state'
 
+/**
+ * The banner at the top of a form: red when it failed, green when it saved,
+ * nothing while it is untouched.
+ *
+ * Every form uses this rather than `FormError` directly. Rendering
+ * `<FormError message={state.message} />` unconditionally — which is what the
+ * forms used to do — shows the *success* message in the error banner, because
+ * `state.message` carries both. Saving an invoice announced "INV-0001 saved" in
+ * red.
+ */
 export function FormStatus({ state }: { state: FormState }) {
   if (state.status === 'error') return <FormError message={state.message} />
 

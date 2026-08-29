@@ -8,6 +8,7 @@ import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SortableHeader, type SortState } from '@/components/data/sortable-header'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatMoney } from '@/lib/money'
 import {
@@ -38,6 +39,9 @@ export function ContactTable({
   today,
   canEdit,
   canArchive,
+  sort,
+  basePath,
+  linkParams,
 }: {
   side: ContactSide
   rows: ContactRow[]
@@ -47,6 +51,10 @@ export function ContactTable({
   today: string
   canEdit: boolean
   canArchive: boolean
+  /** Sorting is server-side, over every row — see SortableHeader. */
+  sort: SortState
+  basePath: string
+  linkParams: Record<string, string | undefined>
 }) {
   const router = useRouter()
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -115,8 +123,8 @@ export function ContactTable({
                 />
               </TableHead>
             ) : null}
-            <TableHead>Name</TableHead>
-            <TableHead>Contact</TableHead>
+            <SortableHeader column="name" label="Name" state={sort} basePath={basePath} params={linkParams} />
+            <SortableHeader column="email" label="Contact" state={sort} basePath={basePath} params={linkParams} />
             <TableHead>Terms</TableHead>
             <TableHead className="numeric w-32">{balanceLabel}</TableHead>
             <TableHead className="w-10" />

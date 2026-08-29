@@ -22,7 +22,23 @@ const PAYMENT_SELECT = {
   depositAccount: { select: { id: true, code: true, name: true } },
 } satisfies Prisma.CustomerPaymentSelect
 
-export async function list(ctx: OrgContext, query: ListQuery, options: { customerId?: string } = {}) {
+/** Orderings the list screen offers. Sorting happens here, over every row. */
+const PAYMENT_ORDER: Record<
+  string,
+  (dir: 'asc' | 'desc') => Prisma.CustomerPaymentOrderByWithRelationInput[]
+> = {
+  number: (dir) => [{ number: dir }],
+  date: (dir) => [{ date: dir }, { number: dir }],
+  customer: (dir) => [{ customer: { displayName: dir } }, { date: 'desc' }],
+  amount: (dir) => [{ amount: dir }, { date: 'desc' }],
+  method: (dir) => [{ method: dir }, { date: 'desc' }],
+}
+
+export async function list(
+  ctx: OrgContext,
+  query: ListQuery,
+  options: { customerId?: string; sort?: string; dir?: 'asc' | 'desc' } = {},
+) {
   const where: Prisma.CustomerPaymentWhereInput = {
     orgId: ctx.orgId,
     ...(options.customerId ? { customerId: options.customerId } : {}),
@@ -41,7 +57,9 @@ export async function list(ctx: OrgContext, query: ListQuery, options: { custome
     db.customerPayment.findMany({
       where,
       select: { ...PAYMENT_SELECT, applications: { select: { amount: true } } },
-      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      orderBy:
+        (options.sort ? PAYMENT_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
+        [{ date: 'desc' }, { number: 'desc' }],
       ...paginate(query),
     }),
     db.customerPayment.count({ where }),

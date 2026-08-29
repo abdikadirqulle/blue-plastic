@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDate } from '@/lib/date'
@@ -9,7 +10,9 @@ import { formatMoney } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
 import { taxSummary } from '@/server/reports/business'
 import { ReportControls } from '../report-controls'
-import { readSettings, type SearchParams } from '../params'
+import { readSettings, settingsToQueryObject, type SearchParams } from '../params'
+
+const SORTABLE = ['rate', 'agency', 'salesNet', 'salesTax', 'purchaseNet', 'purchaseTax', 'net'] as const
 
 export const metadata: Metadata = { title: 'Tax summary' }
 
@@ -20,6 +23,28 @@ export default async function TaxSummaryPage({ searchParams }: { searchParams: P
   const currency = ctx.organization.baseCurrency
 
   const report = await taxSummary(ctx.orgId, settings.range)
+
+  const sort = readSort(query, SORTABLE, { sort: 'agency', dir: 'asc' })
+  const linkParams = { ...settingsToQueryObject(settings), sort: sort.sort, dir: sort.dir }
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const rows = [...report.rows].sort((a, b) => {
+    switch (sort.sort) {
+      case 'rate':
+        return direction * a.rateName.localeCompare(b.rateName)
+      case 'salesNet':
+        return direction * a.salesNet.comparedTo(b.salesNet)
+      case 'salesTax':
+        return direction * a.salesTax.comparedTo(b.salesTax)
+      case 'purchaseNet':
+        return direction * a.purchaseNet.comparedTo(b.purchaseNet)
+      case 'purchaseTax':
+        return direction * a.purchaseTax.comparedTo(b.purchaseTax)
+      case 'net':
+        return direction * a.net.comparedTo(b.net)
+      default:
+        return direction * a.agencyName.localeCompare(b.agencyName) || a.rateName.localeCompare(b.rateName)
+    }
+  })
 
   return (
     <>
@@ -49,18 +74,18 @@ export default async function TaxSummaryPage({ searchParams }: { searchParams: P
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Rate</TableHead>
-                  <TableHead>Agency</TableHead>
+                  <SortableHeader column="rate" label="Rate" state={sort} basePath="/reports/tax-summary" params={linkParams} />
+                  <SortableHeader column="agency" label="Agency" state={sort} basePath="/reports/tax-summary" params={linkParams} />
                   <TableHead className="numeric w-20">Rate</TableHead>
-                  <TableHead className="numeric w-36">Taxable sales</TableHead>
-                  <TableHead className="numeric w-36">Tax on sales</TableHead>
-                  <TableHead className="numeric w-36">Taxable purchases</TableHead>
-                  <TableHead className="numeric w-36">Tax on purchases</TableHead>
-                  <TableHead className="numeric w-36">Net owed</TableHead>
+                  <SortableHeader column="salesNet" label="Taxable sales" state={sort} basePath="/reports/tax-summary" params={linkParams} className="w-36" numeric defaultDirection="desc" />
+                  <SortableHeader column="salesTax" label="Tax on sales" state={sort} basePath="/reports/tax-summary" params={linkParams} className="w-36" numeric defaultDirection="desc" />
+                  <SortableHeader column="purchaseNet" label="Taxable purchases" state={sort} basePath="/reports/tax-summary" params={linkParams} className="w-36" numeric defaultDirection="desc" />
+                  <SortableHeader column="purchaseTax" label="Tax on purchases" state={sort} basePath="/reports/tax-summary" params={linkParams} className="w-36" numeric defaultDirection="desc" />
+                  <SortableHeader column="net" label="Net owed" state={sort} basePath="/reports/tax-summary" params={linkParams} className="w-36" numeric defaultDirection="desc" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {report.rows.map((row) => (
+                {rows.map((row) => (
                   <TableRow key={row.rateId}>
                     <TableCell className="font-medium">{row.rateName}</TableCell>
                     <TableCell className="text-muted-foreground">{row.agencyName}</TableCell>

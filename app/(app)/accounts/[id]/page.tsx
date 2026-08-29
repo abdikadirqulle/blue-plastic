@@ -17,10 +17,13 @@ import {
 } from '@/lib/accounting-labels'
 import { fiscalYearOf, fiscalYearRange, formatDate, toCalendarDate, today } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { generalLedger } from '@/server/accounting/balances'
 import { requireOrgContext } from '@/server/auth/context'
 import * as accountService from '@/server/services/account.service'
 import type { JournalSourceType } from '@prisma/client'
+
+const SORTABLE = ['date', 'entry', 'description', 'debit', 'credit'] as const
 
 export const metadata: Metadata = { title: 'Account' }
 
@@ -53,6 +56,27 @@ export default async function AccountRegisterPage({
   const to = typeof query.to === 'string' ? query.to : defaults.end
 
   const ledger = await generalLedger(ctx.orgId, id, { from, to })
+
+  // The running balance column only means anything in date order, so it is shown
+  // as computed and never re-derived from a different ordering.
+  const sort = readSort(query, SORTABLE, { sort: 'date', dir: 'asc' })
+  const basePath = `/accounts/${id}`
+  const linkParams = { from, to, sort: sort.sort, dir: sort.dir }
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const entries = [...ledger.entries].sort((a, b) => {
+    switch (sort.sort) {
+      case 'entry':
+        return direction * a.journalNumber.localeCompare(b.journalNumber)
+      case 'description':
+        return direction * (a.description ?? '').localeCompare(b.description ?? '')
+      case 'debit':
+        return direction * a.debit.comparedTo(b.debit)
+      case 'credit':
+        return direction * a.credit.comparedTo(b.credit)
+      default:
+        return direction * (a.date.getTime() - b.date.getTime())
+    }
+  })
   const debitNormal = isDebitNormalType(account.type)
 
   return (
@@ -95,17 +119,19 @@ export default async function AccountRegisterPage({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-28">Date</TableHead>
-                <TableHead className="w-28">Entry</TableHead>
-                <TableHead>Description</TableHead>
+                <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" />
+                <SortableHeader column="entry" label="Entry" state={sort} basePath={basePath} params={linkParams} className="w-28" />
+                <SortableHeader column="description" label="Description" state={sort} basePath={basePath} params={linkParams} />
                 <TableHead>Contra account</TableHead>
-                <TableHead className="numeric w-32">Debit</TableHead>
-                <TableHead className="numeric w-32">Credit</TableHead>
-                <TableHead className="numeric w-36">Balance</TableHead>
+                <SortableHeader column="debit" label="Debit" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
+                <SortableHeader column="credit" label="Credit" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
+                <TableHead className="numeric w-36">
+                  {sort.sort === 'date' && sort.dir === 'asc' ? 'Balance' : 'Balance (in date order)'}
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {ledger.entries.map((entry) => (
+              {entries.map((entry) => (
                 <TableRow key={entry.lineId}>
                   <TableCell className="tabular whitespace-nowrap text-muted-foreground">
                     {formatDate(toCalendarDate(entry.date))}

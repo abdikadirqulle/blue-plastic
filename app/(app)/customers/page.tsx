@@ -8,6 +8,7 @@ import { Pagination } from '@/components/data/pagination'
 import { SearchInput } from '@/components/data/search-input'
 import { ImportDialog } from '@/components/master-data/import-dialog'
 import { NewContactButton } from '@/components/master-data/contact-dialog'
+import { readSort } from '@/components/data/sortable-header'
 import { ContactTable } from '@/components/master-data/contact-table'
 import { Card } from '@/components/ui/card'
 import { describeTerm } from '@/lib/payment-terms'
@@ -17,6 +18,8 @@ import { requireOrgContext } from '@/server/auth/context'
 import * as contactService from '@/server/services/contact.service'
 import * as taxService from '@/server/services/tax.service'
 import { IMPORT_COLUMNS } from '@/server/services/import.service'
+
+const SORTABLE = ['name', 'email', 'phone', 'company'] as const
 
 export const metadata: Metadata = { title: 'Customers' }
 
@@ -28,10 +31,18 @@ export default async function CustomersPage({
   const ctx = await requireOrgContext('customer:read')
   const params = await searchParams
   const query = parseListQuery(params)
+  const sort = readSort(params, SORTABLE, { sort: 'name', dir: 'asc' })
   const includeInactive = params.archived === '1'
+  const linkParams = {
+    q: query.q,
+    archived: includeInactive ? '1' : undefined,
+    sort: sort.sort,
+    dir: sort.dir,
+  }
+
 
   const [page, terms] = await Promise.all([
-    contactService.listCustomers(ctx, query, { includeInactive }),
+    contactService.listCustomers(ctx, query, { includeInactive, ...sort }),
     taxService.listPaymentTerms(ctx),
   ])
 
@@ -84,6 +95,9 @@ export default async function CustomersPage({
       ) : (
         <Card className="overflow-hidden p-0">
           <ContactTable
+            sort={sort}
+            basePath="/customers"
+            linkParams={linkParams}
             side="customer"
             rows={page.rows.map((row) => ({ ...row, companyName: row.companyName ?? null }))}
             terms={termOptions}
@@ -98,7 +112,7 @@ export default async function CustomersPage({
             total={page.total}
             pageSize={page.pageSize}
             basePath="/customers"
-            params={{ q: query.q, archived: includeInactive ? '1' : undefined }}
+            params={linkParams}
           />
         </Card>
       )}

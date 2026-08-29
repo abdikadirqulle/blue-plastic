@@ -3,12 +3,15 @@ import Link from 'next/link'
 import { AlertTriangleIcon, CheckCircle2Icon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
+import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Card } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Table, TableBody, TableCell, TableFooter, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDate, today } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
 import { AGING_BUCKETS, BUCKET_LABELS, aging } from '@/server/services/receivables.service'
+
+const SORTABLE = ['name', 'total', ...AGING_BUCKETS] as const
 
 export const metadata: Metadata = { title: 'Receivables aging' }
 
@@ -31,6 +34,18 @@ export default async function AgingPage({
   const report = await aging(ctx, asOf)
   const currency = ctx.organization.baseCurrency
 
+  // "Who owes the most" and "who is furthest overdue" are the two questions this
+  // report exists to answer, so every bucket is sortable, not only the total.
+  const sort = readSort(params, SORTABLE, { sort: 'total', dir: 'desc' })
+  const linkParams = { asOf, sort: sort.sort, dir: sort.dir }
+  const direction = sort.dir === 'asc' ? 1 : -1
+  const rows = [...report.rows].sort((a, b) => {
+    if (sort.sort === 'name') return direction * a.customerName.localeCompare(b.customerName)
+    if (sort.sort === 'total') return direction * a.total.comparedTo(b.total)
+    const bucket = sort.sort as (typeof AGING_BUCKETS)[number]
+    return direction * a.buckets[bucket].comparedTo(b.buckets[bucket])
+  })
+
   return (
     <>
       <PageHeader
@@ -42,24 +57,32 @@ export default async function AgingPage({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Customer</TableHead>
+              <SortableHeader column="name" label="Customer" state={sort} basePath="/reports/ar-aging" params={linkParams} />
               {AGING_BUCKETS.map((bucket) => (
-                <TableHead key={bucket} className="numeric w-32">
-                  {BUCKET_LABELS[bucket]}
-                </TableHead>
+                <SortableHeader
+                  key={bucket}
+                  column={bucket}
+                  label={BUCKET_LABELS[bucket]}
+                  state={sort}
+                  basePath="/reports/ar-aging"
+                  params={linkParams}
+                  className="w-32"
+                  numeric
+                  defaultDirection="desc"
+                />
               ))}
-              <TableHead className="numeric w-32">Total</TableHead>
+              <SortableHeader column="total" label="Total" state={sort} basePath="/reports/ar-aging" params={linkParams} className="w-32" numeric defaultDirection="desc" />
             </TableRow>
           </TableHeader>
           <TableBody>
-            {report.rows.length === 0 ? (
+            {rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
                   Nothing outstanding.
                 </TableCell>
               </TableRow>
             ) : (
-              report.rows.map((row) => (
+              rows.map((row) => (
                 <TableRow key={row.customerId}>
                   <TableCell>
                     <Link

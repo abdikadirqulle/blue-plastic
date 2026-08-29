@@ -193,11 +193,34 @@ more importantly, the sort happens **in the database over every row**, not in th
 browser over the page that happens to be loaded. Sorting only the visible page is
 the bug this design avoids.
 
-Applied to the chart of accounts, the sales and purchase document lists, journal
-entries and stock on hand. Where a column is computed rather than stored — a
-journal's total, an item's stock value, an account's balance — it is sorted after
-the rows are read, and the ones that cannot be sorted at all are left as plain
+Applied to every list in the application: the chart of accounts and the account
+register, sales and purchase documents, journals, customer and bill payments,
+customers, vendors, products, stock on hand, bank accounts, users, payment terms,
+the trial balance, both ageing reports, the four trade reports and the tax
+summary.
+
+Where a column is stored, the ordering is a `Prisma.orderBy` and the database
+does it over every row. Where it is computed — a journal's total, an item's stock
+value, an account's balance, an ageing bucket — the whole set is already in
+memory and it is sorted there. Columns that cannot be sorted are left as plain
 headers rather than offered and then ignored.
+
+**Four tables are deliberately not sortable**, and it is worth saying why:
+
+- **Financial statements** — profit and loss, balance sheet, cash flow. Their row
+  order *is* the statement. Sorting a balance sheet by amount produces something
+  that is no longer a balance sheet.
+- **Accounting periods** — chronological by definition; period 4 after period 3 is
+  not a preference.
+- **Document line tables** — an invoice's lines are in the order they were
+  entered, and that order is part of the document.
+- **The activity log** — an append-only audit trail, read newest first, loaded by
+  infinite scroll.
+
+The account register is sortable but its running-balance column is only
+meaningful in date order, so the header renames itself to "Balance (in date
+order)" when the register is sorted by anything else, rather than showing a
+number that no longer describes the row above it.
 
 The chart of accounts was one long ungrouped table; it is now one sortable,
 paginated table of 25. Its balances are coloured: positive bold green, negative

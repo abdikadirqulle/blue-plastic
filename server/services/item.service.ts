@@ -33,10 +33,19 @@ function serialise<T extends { salesPrice: unknown; purchaseCost: unknown; reord
   }
 }
 
+/** Orderings the list screen offers. Sorting happens here, over every row. */
+const ITEM_ORDER: Record<string, (dir: 'asc' | 'desc') => Prisma.ItemOrderByWithRelationInput[]> = {
+  name: (dir) => [{ name: dir }],
+  type: (dir) => [{ type: dir }, { name: 'asc' }],
+  price: (dir) => [{ salesPrice: dir }, { name: 'asc' }],
+  cost: (dir) => [{ purchaseCost: dir }, { name: 'asc' }],
+  sku: (dir) => [{ sku: dir }, { name: 'asc' }],
+}
+
 export async function list(
   ctx: OrgContext,
   query: ListQuery,
-  options: { includeInactive?: boolean; type?: string } = {},
+  options: { includeInactive?: boolean; type?: string; sort?: string; dir?: 'asc' | 'desc' } = {},
 ) {
   const where: Prisma.ItemWhereInput = {
     orgId: ctx.orgId,
@@ -54,7 +63,14 @@ export async function list(
   }
 
   const [rows, total] = await Promise.all([
-    db.item.findMany({ where, select: ITEM_SELECT, orderBy: { name: 'asc' }, ...paginate(query) }),
+    db.item.findMany({
+      where,
+      select: ITEM_SELECT,
+      orderBy: (options.sort ? ITEM_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ?? [
+        { name: 'asc' },
+      ],
+      ...paginate(query),
+    }),
     db.item.count({ where }),
   ])
 

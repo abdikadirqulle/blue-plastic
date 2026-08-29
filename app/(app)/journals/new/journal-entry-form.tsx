@@ -8,7 +8,8 @@ import { toast } from 'sonner'
 import { idleState } from '@/components/forms/action-state'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
-import { FormError } from '@/components/forms/form-error'
+import { FormStatus } from '@/components/forms/form-status'
+import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
@@ -102,7 +103,7 @@ export function JournalEntryForm({
 
       <Card>
         <CardContent className="space-y-4 p-4">
-          <FormError message={state.message} />
+          <FormStatus state={state} />
 
           <div className="grid gap-4 sm:grid-cols-[12rem_1fr]">
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -275,8 +276,8 @@ export function JournalEntryForm({
 
 function PostButton({ disabled }: { disabled: boolean }) {
   return (
-    <Button type="submit" disabled={disabled}>
+    <SubmitButton disabled={disabled} pendingLabel="Posting…">
       Post journal
-    </Button>
+    </SubmitButton>
   )
 }

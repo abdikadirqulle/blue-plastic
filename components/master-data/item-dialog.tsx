@@ -7,7 +7,7 @@ import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { Field, fieldProps } from '@/components/forms/field'
-import { FormError } from '@/components/forms/form-error'
+import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -128,7 +128,7 @@ export function ItemDialog({
         </DialogHeader>
 
         <form action={formAction} className="mt-4 space-y-5">
-          <FormError message={state.message} />
+          <FormStatus state={state} />
           {item?.id ? <input type="hidden" name="id" value={item.id} /> : null}
           {mode === 'edit' ? <input type="hidden" name="type" value={type} /> : null}
 
