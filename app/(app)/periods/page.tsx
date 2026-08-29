@@ -1,15 +1,19 @@
 import type { Metadata } from 'next'
 
+import { CloseChecklistCard } from '@/components/periods/close-checklist'
 import { PageHeader } from '@/components/data/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { PERIOD_STATUS_LABELS } from '@/lib/accounting-labels'
 import { MONTHS } from '@/lib/constants'
-import { formatDate, toCalendarDate } from '@/lib/date'
+import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { formatMoney } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
+import * as closeService from '@/server/services/close.service'
 import * as periodService from '@/server/services/period.service'
 import { PeriodToggle } from './period-actions'
+import { CloseYearButton, ReopenYearButton } from './year-end-actions'
 
 export const metadata: Metadata = { title: 'Accounting periods' }
 
@@ -24,12 +28,58 @@ export default async function PeriodsPage() {
   const canClose = ctx.permissions.has('period:close')
   const canReopen = ctx.permissions.has('period:reopen')
 
+  // The checklist is run for the period that is actually next in line, because
+  // periods close in order and any other one is not a decision the user can make.
+  const next = await closeService.nextPeriodToClose(ctx)
+  const checklist = next ? await closeService.closeChecklist(ctx, next) : null
+
+  // The earliest year that has finished and has not been closed. Years close in
+  // order, so no other one can be next.
+  const now = today(ctx.organization.timeZone)
+  const closable = [...years]
+    .reverse()
+    .find((year) => year.status !== 'LOCKED' && toCalendarDate(year.endDate) < now)
+  const closingPreview =
+    closable && canClose ? await closeService.previewClose(ctx, closable.id).catch(() => null) : null
+
   return (
     <>
       <PageHeader
         title="Accounting periods"
         description="Closing a period stops anything else being posted into it. Periods close in order and reopen in reverse, so a closed month cannot change through an open earlier one."
       />
+
+      {checklist && next ? (
+        <div className="mb-6">
+          <CloseChecklistCard
+            checklist={checklist}
+            label={next.label}
+            action={
+              closingPreview && closable ? (
+                <div className="border-t pt-3">
+                  <CloseYearButton
+                    fiscalYearId={closable.id}
+                    year={closable.year}
+                    netIncome={formatMoney(closingPreview.netIncome, ctx.organization.baseCurrency)}
+                    blocked={checklist.blocked}
+                  />
+                </div>
+              ) : null
+            }
+          />
+        </div>
+      ) : closingPreview && closable ? (
+        // Every month is closed, so there is no checklist to show — but the year
+        // itself still has to be swept to Retained Earnings.
+        <Card className="mb-6 p-4">
+          <CloseYearButton
+            fiscalYearId={closable.id}
+            year={closable.year}
+            netIncome={formatMoney(closingPreview.netIncome, ctx.organization.baseCurrency)}
+            blocked={false}
+          />
+        </Card>
+      ) : null}
 
       <div className="space-y-6">
         {years.map((year) => (
@@ -105,6 +155,12 @@ export default async function PeriodsPage() {
                 })}
               </TableBody>
             </Table>
+
+            {year.status === 'LOCKED' && canReopen ? (
+              <div className="border-t p-3">
+                <ReopenYearButton fiscalYearId={year.id} year={year.year} />
+              </div>
+            ) : null}
           </Card>
         ))}
       </div>

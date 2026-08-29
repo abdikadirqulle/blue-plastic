@@ -114,6 +114,17 @@ export const ensureFiscalYearSchema = z.object({
   year: z.coerce.number().int().min(1900).max(2200),
 })
 
+export const closeYearSchema = z.object({
+  fiscalYearId: cuid,
+})
+
+export const reopenYearSchema = z.object({
+  fiscalYearId: cuid,
+  // Reopening a reported year is the kind of act that has to leave a sentence
+  // behind explaining itself.
+  reason: requiredText('Reason', 300),
+})
+
 /* --- Reports -------------------------------------------------------------- */
 
 export const dateRangeSchema = z.object({

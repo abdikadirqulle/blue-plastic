@@ -2,8 +2,14 @@
 
 import { revalidatePath } from 'next/cache'
 
-import { ensureFiscalYearSchema, periodStatusSchema } from '@/lib/validation/accounting'
+import {
+  closeYearSchema,
+  ensureFiscalYearSchema,
+  periodStatusSchema,
+  reopenYearSchema,
+} from '@/lib/validation/accounting'
 import { action } from '@/server/action'
+import * as closeService from '@/server/services/close.service'
 import * as periodService from '@/server/services/period.service'
 
 export const setPeriodStatus = action
@@ -29,5 +35,31 @@ export const createFiscalYear = action
   .handler(async (ctx, input) => {
     const result = await periodService.createFiscalYear(ctx, input.year)
     revalidatePath('/periods')
+    return result
+  })
+
+/**
+ * The year-end close. Gated on `period:close` like a month, because it is the
+ * same authority applied to twelve of them at once.
+ */
+export const closeFiscalYear = action
+  .requires('period:close')
+  .input(closeYearSchema)
+  .handler(async (ctx, input) => {
+    const result = await closeService.closeFiscalYear(ctx, input.fiscalYearId)
+    revalidatePath('/periods')
+    revalidatePath('/journals')
+    revalidatePath('/reports/balance-sheet')
+    return result
+  })
+
+export const reopenFiscalYear = action
+  .requires('period:reopen')
+  .input(reopenYearSchema)
+  .handler(async (ctx, input) => {
+    const result = await closeService.reopenFiscalYear(ctx, input.fiscalYearId, input.reason)
+    revalidatePath('/periods')
+    revalidatePath('/journals')
+    revalidatePath('/reports/balance-sheet')
     return result
   })

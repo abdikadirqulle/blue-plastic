@@ -275,3 +275,9 @@ All statements are derived by SQL aggregation over posted journal lines:
 The balance sheet's self-check (assets - liabilities - equity = 0) runs on every
 render. If it is ever non-zero the report renders an explicit integrity error rather
 than a plausible-looking wrong number.
+
+The profit and loss and the cash flow exclude the year-end closing entry; the
+balance sheet, trial balance and general ledger include it. A closing entry is
+dated inside the year it closes, so counting it would report that year as having
+earned nothing — see
+[ADR-0011](./decisions/0011-closing-entries-excluded-from-the-profit-and-loss.md).

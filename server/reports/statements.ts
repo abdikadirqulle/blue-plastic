@@ -66,14 +66,19 @@ export async function profitAndLoss(
   range: ReportRange,
   options: { client?: Tx; comparison?: ReportRange } = {},
 ): Promise<ProfitAndLoss> {
-  const figures = await accountFigures(orgId, range, { client: options.client })
+  // The year-end closing entry is left out: it zeroes the nominal accounts at the
+  // year end, and counting it would report a closed year as having earned nothing.
+  const figures = await accountFigures(orgId, range, {
+    client: options.client,
+    excludeClosing: true,
+  })
   // The comparison inherits the basis unless it names its own, so a cash-basis
   // report cannot quietly compare itself against an accrual-basis period.
   const comparisonFigures = options.comparison
     ? await accountFigures(
         orgId,
         { ...options.comparison, basis: options.comparison.basis ?? range.basis },
-        { client: options.client },
+        { client: options.client, excludeClosing: true },
       )
     : null
 
@@ -343,7 +348,10 @@ export async function cashFlow(
   range: ReportRange,
   options: { client?: Tx } = {},
 ): Promise<CashFlow> {
-  const figures = await accountFigures(orgId, range, { client: options.client })
+  const figures = await accountFigures(orgId, range, {
+    client: options.client,
+    excludeClosing: true,
+  })
 
   const isCash = (row: AccountFigures) => CASH_SUBTYPES.includes(row.subtype)
   const cashAccounts = figures.filter(isCash)

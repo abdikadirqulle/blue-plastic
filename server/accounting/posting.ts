@@ -216,6 +216,8 @@ export async function reverseJournal(
       sourceType: true,
       sourceId: true,
       memo: true,
+      isAdjusting: true,
+      isClosingEntry: true,
       reversedBy: { select: { id: true, journalNumber: true } },
       lines: {
         orderBy: { lineNumber: 'asc' },
@@ -251,6 +253,12 @@ export async function reverseJournal(
     sourceId: original.id,
     reversalOfId: original.id,
     reversalReason: options.reason,
+    // A reversal inherits what the original was. Reversing an adjustment is an
+    // adjustment, and reversing a year-end closing entry is part of the close —
+    // if it were not, the profit and loss would leave out the sweep and count the
+    // sweep coming back, and a reopened year would report double its income.
+    isAdjusting: original.isAdjusting,
+    isClosingEntry: original.isClosingEntry,
     lines: original.lines.map((line) => ({
       accountId: line.accountId,
       // Swap the sides. That is the whole of a reversal.

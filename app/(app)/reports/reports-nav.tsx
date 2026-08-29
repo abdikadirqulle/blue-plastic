@@ -9,6 +9,7 @@ const TABS = [
   { href: '/reports/balance-sheet', label: 'Balance sheet' },
   { href: '/reports/cash-flow', label: 'Cash flow' },
   { href: '/reports/trial-balance', label: 'Trial balance' },
+  { href: '/reports/adjusting-entries', label: 'Adjusting entries' },
 ]
 
 /**

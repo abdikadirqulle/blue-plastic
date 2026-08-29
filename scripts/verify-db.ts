@@ -154,6 +154,18 @@ const EXPECTED_TRIGGERS: { name: string; table: string; rule: string; protects: 
     rule: '—',
     protects: 'every running total follows from the movement before it',
   },
+  {
+    name: 'trg_locked_year_periods',
+    table: 'accounting_periods',
+    rule: '—',
+    protects: 'a closed fiscal year contains no period still accepting postings',
+  },
+  {
+    name: 'trg_locked_year_self',
+    table: 'fiscal_years',
+    rule: '—',
+    protects: 'a year cannot be locked while one of its periods is open',
+  },
 ]
 
 const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protects: string }[] = [
@@ -162,6 +174,18 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
     table: 'journal_lines',
     rule: 'R1',
     protects: 'a line is a debit or a credit, never both, never negative',
+  },
+  {
+    name: 'journals_closing_entry_source',
+    table: 'journals',
+    rule: '—',
+    protects: 'a journal flagged as a closing entry is sourced as one',
+  },
+  {
+    name: 'fiscal_years_close_record',
+    table: 'fiscal_years',
+    rule: '—',
+    protects: 'an open year carries no record of having been closed',
   },
   {
     name: 'tax_rates_fraction',
@@ -268,6 +292,11 @@ const EXPECTED_CONSTRAINTS: { name: string; table: string; rule: string; protect
 ]
 
 const EXPECTED_FOREIGN_KEYS: { name: string; rule: string; protects: string }[] = [
+  {
+    name: 'fiscal_years_closing_journal_org_fkey',
+    rule: 'R9',
+    protects: 'a year\'s closing journal cannot belong to another organisation',
+  },
   {
     name: 'journal_lines_journal_org_fkey',
     rule: 'R9',

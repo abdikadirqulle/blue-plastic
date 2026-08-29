@@ -203,9 +203,9 @@ opening balance lands in AR and on the aging report.
 | --- | --- |
 | 9.1 | Adjusting journal entries flagged and reportable separately |
 | 9.2 | Month-end close checklist (unreconciled items, unapplied payments, out-of-balance checks) |
-| 9.3 | Year-end closing entry to Retained Earnings |
-| 9.4 | Period lock/unlock with audit and permission gate |
-| 9.5 | Prior-period comparatives after close |
+| 9.3 | Year-end closing entry to Retained Earnings, reversible |
+| 9.4 | Period lock/unlock with audit and permission gate — delivered in Phase 2, extended here with the year lock |
+| 9.5 | Prior-period comparatives after close — [ADR-0011](./decisions/0011-closing-entries-excluded-from-the-profit-and-loss.md) |
 
 ---
 

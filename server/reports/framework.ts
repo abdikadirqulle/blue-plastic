@@ -49,15 +49,29 @@ export type ReportRange = {
  *
  * This is a real cash basis, not a filter on document type: it asks whether the
  * journal touched money, which is the question the cash basis actually asks.
+ *
+ * `excludeClosing` leaves out the year-end closing entry.
+ *
+ * A closing entry takes every income and expense account to zero at the year end.
+ * It is a bookkeeping mechanism, not trading, and a profit and loss that counted
+ * it would report the closed year as having earned nothing — which would make
+ * every comparative against a closed year useless. So the profit and loss and the
+ * cash flow leave it out; the balance sheet, trial balance and general ledger keep
+ * it, because there the transfer to Retained Earnings is a real movement.
+ *
+ * Leaving it out is safe for the cash flow's identity: a closing entry balances
+ * and touches no cash account, so removing it from every account at once changes
+ * neither Σ(debit − credit) = 0 nor the movement in cash.
  */
 export async function accountFigures(
   orgId: string,
   range: ReportRange,
-  options: { client?: Tx } = {},
+  options: { client?: Tx; excludeClosing?: boolean } = {},
 ): Promise<AccountFigures[]> {
   const client = options.client ?? db
   const from = toDate(range.from)
   const to = toDate(range.to)
+  const excludeClosing = options.excludeClosing ?? false
 
   const rows =
     range.basis === 'cash'
@@ -75,6 +89,7 @@ export async function accountFigures(
               ON l."accountId" = a.id AND l."orgId" = a."orgId"
             LEFT JOIN journals j
               ON j.id = l."journalId" AND j.status <> 'DRAFT'
+             AND (${excludeClosing} = false OR j."isClosingEntry" = false)
              AND EXISTS (
                    SELECT 1 FROM journal_lines cl
                      JOIN ledger_accounts ca ON ca.id = cl."accountId"
@@ -100,6 +115,7 @@ export async function accountFigures(
               ON l."accountId" = a.id AND l."orgId" = a."orgId"
             LEFT JOIN journals j
               ON j.id = l."journalId" AND j.status <> 'DRAFT'
+             AND (${excludeClosing} = false OR j."isClosingEntry" = false)
            WHERE a."orgId" = ${orgId}
              AND (l.id IS NULL OR j.id IS NOT NULL)
            GROUP BY a.id, a.code, a.name, a.type, a.subtype, a."parentId"
