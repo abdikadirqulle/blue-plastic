@@ -37,7 +37,7 @@ export function Pagination({
   const to = Math.min(page * pageSize, total)
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-t px-3 py-2.5 text-sm">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/30 px-3 py-1.5 text-xs">
       <p className="text-muted-foreground">
         <span className="tabular">{from}</span>–<span className="tabular">{to}</span> of{' '}
         <span className="tabular">{total}</span>

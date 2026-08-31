@@ -1,7 +1,7 @@
 import 'server-only'
 import type { InventoryMovementType, JournalSourceType } from '@prisma/client'
 
-import { toDate, type CalendarDate } from '@/lib/date'
+import { toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
 import { Decimal, roundToCurrency, ZERO } from '@/lib/money'
 import type { OrgContext } from '@/server/auth/context'
 import type { Tx } from '@/server/db'
@@ -357,4 +357,108 @@ export async function stockAgreesWithLedger(tx: Tx, orgId: string) {
     difference: stock.totalValue.minus(ledgerBalance),
     agrees: stock.totalValue.equals(ledgerBalance),
   }
+}
+
+/**
+ * Take a document's stock movements back out.
+ *
+ * Voiding a bill reverses its journal, which removes the stock value from the
+ * Inventory Asset account. Without this, the stock ledger kept the goods — so
+ * the two records of what the business owns disagreed, which is precisely the
+ * failure `stockAgreesWithLedger` exists to catch. Editing had the same problem
+ * one step worse: the new movements were added on top of the old ones, and every
+ * edit inflated the stock.
+ *
+ * Each movement is undone by an exact opposite: the same quantity the other way
+ * at the same unit cost, so the value removed equals the value the journal
+ * reversal removes, to the cent. Nothing is deleted — the stock ledger is
+ * append-only for the same reason the general ledger is (R4), and the pair
+ * stays readable as "this happened, then it was undone".
+ *
+ * Reversing *every* movement of the document, including compensating ones from
+ * an earlier edit, is deliberate: the net contribution of the document to the
+ * stock ledger is then zero whatever its history, so this is safe to call twice.
+ *
+ * The negative-stock policy is deliberately **not** consulted. Un-receiving a
+ * bill whose goods have since been sold takes the item negative, and refusing
+ * the void on those grounds would trap a wrong bill in the books for ever. The
+ * ledger records what happened; the stock going briefly negative is the honest
+ * consequence, and the Inventory screen flags it.
+ */
+export async function reverseMovementsFor(
+  tx: Tx,
+  ctx: OrgContext,
+  source: { sourceId: string; date?: CalendarDate; journalId?: string | null },
+): Promise<{ reversed: number; value: Decimal }> {
+  const movements = await tx.inventoryTransaction.findMany({
+    where: { orgId: ctx.orgId, sourceId: source.sourceId },
+    orderBy: { sequence: 'asc' },
+    select: {
+      id: true, itemId: true, date: true, type: true, sourceType: true, sourceLineId: true,
+      quantity: true, unitCost: true, value: true,
+    },
+  })
+
+  if (movements.length === 0) return { reversed: 0, value: ZERO }
+
+  // Net per item first. Two movements of the same item on one document net to a
+  // single compensating row, which keeps the register readable.
+  const byItem = new Map<string, { quantity: Decimal; value: Decimal; unitCost: Decimal; type: InventoryMovementType; sourceType: JournalSourceType }>()
+
+  for (const movement of movements) {
+    const existing = byItem.get(movement.itemId)
+    const quantity = new Decimal(movement.quantity.toString())
+    const value = new Decimal(movement.value.toString())
+
+    if (existing) {
+      existing.quantity = existing.quantity.plus(quantity)
+      existing.value = existing.value.plus(value)
+    } else {
+      byItem.set(movement.itemId, {
+        quantity,
+        value,
+        unitCost: new Decimal(movement.unitCost.toString()),
+        type: movement.type,
+        sourceType: movement.sourceType,
+      })
+    }
+  }
+
+  let removed = ZERO
+  let reversed = 0
+
+  for (const [itemId, net] of byItem) {
+    if (net.quantity.isZero() && net.value.isZero()) continue
+
+    const before = await positionOf(tx, itemId)
+    const quantity = net.quantity.negated()
+    const value = net.value.negated()
+
+    await tx.inventoryTransaction.create({
+      data: {
+        orgId: ctx.orgId,
+        itemId,
+        date: toDate(source.date ?? toCalendarDate(movements[0].date)),
+        type: net.type,
+        sourceType: net.sourceType,
+        sourceId: source.sourceId,
+        sourceLineId: null,
+        quantity: quantity.toFixed(4),
+        unitCost: net.unitCost.toFixed(6),
+        value: value.toFixed(4),
+        runningQuantity: before.quantity.plus(quantity).toFixed(4),
+        runningValue: before.value.plus(value).toFixed(4),
+        sequence: before.sequence + 1,
+        // Tied to the reversing journal, so the stock register and the ledger
+        // tell the same story about the undo as they do about the original.
+        journalId: source.journalId ?? null,
+        createdById: ctx.userId,
+      },
+    })
+
+    removed = removed.plus(value)
+    reversed += 1
+  }
+
+  return { reversed, value: removed }
 }

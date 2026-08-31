@@ -1,6 +1,11 @@
 import { afterAll, describe, expect, it } from 'vitest'
 
-import { positionOf, recordMovement, stockAgreesWithLedger } from '@/server/accounting/inventory'
+import {
+  positionOf,
+  recordMovement,
+  reverseMovementsFor,
+  stockAgreesWithLedger,
+} from '@/server/accounting/inventory'
 import { postJournal } from '@/server/accounting/posting'
 import { db, type Tx } from '@/server/db'
 import { CODE, inRolledBackTransaction, makeOrg, type Fixture } from './ledger-helpers'
@@ -411,6 +416,133 @@ suite('linking a movement to its journal', () => {
            WHERE id = ${movement.id}
         `,
       ).rejects.toThrow(/cannot be changed/i)
+    })
+  })
+})
+
+/**
+ * Undoing a document.
+ *
+ * Voiding a bill reverses its journal, which takes the stock value back out of
+ * the Inventory Asset account. Before `reverseMovementsFor` existed the stock
+ * ledger kept the goods, so the two records of what the business owned
+ * disagreed — and editing was worse, because the new movements were added on top
+ * of the old ones and every edit inflated the stock.
+ */
+suite('reversing a document’s stock', () => {
+  it('takes the goods back out at the cost they went in at', async () => {
+    await inRolledBackTransaction(async (tx) => {
+      const fixture = await makeOrg(tx)
+      const item = await makeTrackedItem(tx, fixture)
+
+      await recordMovement(tx, fixture.ctx, {
+        itemId: item.id, date: '2026-03-01', type: 'PURCHASE', sourceType: 'BILL',
+        sourceId: 'bill-1', quantity: '100', unitCost: '10',
+      })
+      await recordMovement(tx, fixture.ctx, {
+        itemId: item.id, date: '2026-03-05', type: 'PURCHASE', sourceType: 'BILL',
+        sourceId: 'bill-2', quantity: '100', unitCost: '20',
+      })
+
+      const before = await positionOf(tx, item.id)
+      expect(before.value.toString()).toBe('3000')
+
+      const result = await reverseMovementsFor(tx, fixture.ctx, { sourceId: 'bill-2' })
+
+      // Exactly what the second bill put in, so the journal reversal and the
+      // stock reversal cancel to the same figure.
+      expect(result.reversed).toBe(1)
+      expect(result.value.toString()).toBe('-2000')
+
+      const after = await positionOf(tx, item.id)
+      expect(after.quantity.toString()).toBe('100')
+      expect(after.value.toString()).toBe('1000')
+      expect(after.averageCost.toString()).toBe('10')
+    })
+  })
+
+  it('nets a document that carries the same item twice into one row', async () => {
+    await inRolledBackTransaction(async (tx) => {
+      const fixture = await makeOrg(tx)
+      const item = await makeTrackedItem(tx, fixture)
+
+      for (const quantity of ['10', '5']) {
+        await recordMovement(tx, fixture.ctx, {
+          itemId: item.id, date: '2026-03-01', type: 'PURCHASE', sourceType: 'BILL',
+          sourceId: 'bill-1', quantity, unitCost: '4',
+        })
+      }
+
+      const result = await reverseMovementsFor(tx, fixture.ctx, { sourceId: 'bill-1' })
+
+      expect(result.reversed).toBe(1)
+      expect(result.value.toString()).toBe('-60')
+
+      const after = await positionOf(tx, item.id)
+      expect(after.quantity.toString()).toBe('0')
+      expect(after.value.toString()).toBe('0')
+    })
+  })
+
+  it('is safe to call twice — an edited document still nets to nothing', async () => {
+    await inRolledBackTransaction(async (tx) => {
+      const fixture = await makeOrg(tx)
+      const item = await makeTrackedItem(tx, fixture)
+
+      // Received, edited (reverse then re-record), then voided (reverse again).
+      await recordMovement(tx, fixture.ctx, {
+        itemId: item.id, date: '2026-03-01', type: 'PURCHASE', sourceType: 'BILL',
+        sourceId: 'bill-1', quantity: '10', unitCost: '4',
+      })
+      await reverseMovementsFor(tx, fixture.ctx, { sourceId: 'bill-1' })
+      await recordMovement(tx, fixture.ctx, {
+        itemId: item.id, date: '2026-03-02', type: 'PURCHASE', sourceType: 'BILL',
+        sourceId: 'bill-1', quantity: '12', unitCost: '5',
+      })
+
+      const edited = await positionOf(tx, item.id)
+      expect(edited.quantity.toString()).toBe('12')
+      expect(edited.value.toString()).toBe('60')
+
+      await reverseMovementsFor(tx, fixture.ctx, { sourceId: 'bill-1' })
+
+      const voided = await positionOf(tx, item.id)
+      expect(voided.quantity.toString()).toBe('0')
+      expect(voided.value.toString()).toBe('0')
+    })
+  })
+
+  it('lets stock go negative rather than trapping a wrong bill in the books', async () => {
+    await inRolledBackTransaction(async (tx) => {
+      const fixture = await makeOrg(tx)
+      const item = await makeTrackedItem(tx, fixture)
+
+      await recordMovement(tx, fixture.ctx, {
+        itemId: item.id, date: '2026-03-01', type: 'PURCHASE', sourceType: 'BILL',
+        sourceId: 'bill-1', quantity: '10', unitCost: '4',
+      })
+      await recordMovement(tx, fixture.ctx, {
+        itemId: item.id, date: '2026-03-02', type: 'SALE', sourceType: 'INVOICE',
+        sourceId: 'invoice-1', quantity: '-8',
+      })
+
+      // The goods have been sold. Voiding the bill anyway is allowed: the ledger
+      // records what happened, and the negative is the honest consequence.
+      await reverseMovementsFor(tx, fixture.ctx, { sourceId: 'bill-1' })
+
+      const after = await positionOf(tx, item.id)
+      expect(after.quantity.toString()).toBe('-8')
+    })
+  })
+
+  it('does nothing for a document that moved no stock', async () => {
+    await inRolledBackTransaction(async (tx) => {
+      const fixture = await makeOrg(tx)
+      await makeTrackedItem(tx, fixture)
+
+      const result = await reverseMovementsFor(tx, fixture.ctx, { sourceId: 'nothing-here' })
+      expect(result.reversed).toBe(0)
+      expect(result.value.toString()).toBe('0')
     })
   })
 })

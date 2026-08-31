@@ -20,7 +20,7 @@ function DropdownMenuContent({
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
         className={cn(
-          'z-50 min-w-[10rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md',
+          'z-50 min-w-[10rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg',
           'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
           className,
         )}
@@ -40,10 +40,10 @@ function DropdownMenuItem({
       data-slot="dropdown-menu-item"
       data-variant={variant}
       className={cn(
-        "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors",
+        "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-[0.8125rem] outline-none transition-colors",
         'focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
         "data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10",
-        "[&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
+        "[&_svg:not([class*='size-'])]:size-3.5 [&_svg]:shrink-0",
         className,
       )}
       {...props}
@@ -55,7 +55,7 @@ function DropdownMenuLabel({ className, ...props }: React.ComponentProps<typeof 
   return (
     <DropdownMenuPrimitive.Label
       data-slot="dropdown-menu-label"
-      className={cn('px-2 py-1.5 text-xs font-medium text-muted-foreground', className)}
+      className={cn('px-2 py-1 text-[0.6875rem] font-semibold uppercase tracking-wider text-muted-foreground', className)}
       {...props}
     />
   )

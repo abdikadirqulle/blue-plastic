@@ -56,7 +56,7 @@ function DialogContent({
           'fixed left-1/2 top-4 z-50 w-[calc(100%-2rem)] -translate-x-1/2 sm:top-1/2 sm:-translate-y-1/2',
           // A tall form scrolls inside the dialog rather than pushing the page,
           // so the header and the footer buttons stay where the user left them.
-          'max-h-[calc(100svh-2rem)] overflow-y-auto rounded-lg border bg-background p-5 shadow-lg',
+          'max-h-[calc(100svh-2rem)] overflow-y-auto rounded-md border bg-card p-5 shadow-xl',
           'data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95',
           'data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95',
           width,
@@ -68,7 +68,7 @@ function DialogContent({
         <DialogPrimitive.Close
           className={cn(
             'absolute right-4 top-4 rounded-sm text-muted-foreground opacity-70 transition-opacity',
-            'hover:opacity-100 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30',
+            'hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25',
           )}
         >
           <XIcon className="size-4" />

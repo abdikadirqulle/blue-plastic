@@ -3,13 +3,14 @@ import type { DocumentType, Prisma, PurchaseDocumentType } from '@prisma/client'
 
 import { toCalendarDate, toDate, today, type CalendarDate } from '@/lib/date'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
+import { dispositionOf } from '@/lib/document-disposition'
 import { dueDateFor } from '@/lib/payment-terms'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { PurchaseDocumentInput } from '@/lib/validation/purchases'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
-import { recordMovement } from '@/server/accounting/inventory'
+import { recordMovement, reverseMovementsFor } from '@/server/accounting/inventory'
 import {
   buildBillJournal,
   buildExpenseJournal,
@@ -104,7 +105,13 @@ export async function list(
       subtotal: row.subtotal.toString(),
       taxTotal: row.taxTotal.toString(),
       total: row.total.toString(),
-      balance: toMoneyString(balances.get(row.id) ?? new Decimal(row.total.toString()), 2),
+      // Only a bill can be owed. An expense was paid on the spot and a purchase
+      // order is not a transaction, so both are shown as nothing outstanding
+      // rather than as the whole document being due.
+      balance:
+        row.type === 'BILL'
+          ? toMoneyString(balances.get(row.id) ?? new Decimal(row.total.toString()), 2)
+          : '0.00',
     })),
     total,
     query,
@@ -156,7 +163,7 @@ export async function get(ctx: OrgContext, id: string) {
     })),
     applications: document.applications.map((a) => ({ ...a, amount: a.amount.toString() })),
     amountApplied: toMoneyString(applied, 2),
-    balance: toMoneyString(total.minus(applied), 2),
+    balance: document.type === 'BILL' ? toMoneyString(total.minus(applied), 2) : '0.00',
   }
 }
 
@@ -202,8 +209,15 @@ export async function create(
         })
       : vendor.paymentTerm
 
-    const number = await nextDocumentNumber(tx, ctx.orgId, SEQUENCE_FOR[type])
     const isDraft = input.saveAsDraft === true
+
+    // An expense is paid at once, so it has to say from where — checked before
+    // anything is written rather than by the journal builder throwing later.
+    if (type === 'EXPENSE' && !isDraft) {
+      await requirePaymentAccount(tx, ctx, input.paymentAccountId)
+    }
+
+    const number = await nextDocumentNumber(tx, ctx.orgId, SEQUENCE_FOR[type])
 
     const document = await tx.purchaseDocument.create({
       data: {
@@ -287,6 +301,10 @@ export async function update(ctx: OrgContext, id: string, input: PurchaseDocumen
       )
     }
 
+    if (existing.type === 'EXPENSE' && !input.saveAsDraft) {
+      await requirePaymentAccount(tx, ctx, input.paymentAccountId)
+    }
+
     const vendor = await requireVendor(tx, ctx, input.vendorId)
     const lines = await resolveLines(tx, ctx, input.lines, vendor.defaultExpenseAccountId)
     const taxCodes = await loadTaxCodes(tx, ctx, lines)
@@ -299,8 +317,14 @@ export async function update(ctx: OrgContext, id: string, input: PurchaseDocumen
         })
       : vendor.paymentTerm
 
+    // The old journal comes out before the new one goes in — and so does the
+    // stock it received. Reversing only the journal would leave the stock
+    // ledger holding goods the general ledger no longer values.
     if (existing.journalId) {
-      await reverseJournal(tx, ctx, existing.journalId, { reason: `${existing.number} edited` })
+      const reversal = await reverseJournal(tx, ctx, existing.journalId, {
+        reason: `${existing.number} edited`,
+      })
+      await reverseMovementsFor(tx, ctx, { sourceId: id, date: input.date, journalId: reversal.id })
     }
 
     await tx.purchaseDocumentLine.deleteMany({ where: { documentId: id } })
@@ -311,6 +335,10 @@ export async function update(ctx: OrgContext, id: string, input: PurchaseDocumen
         vendorId: vendor.id,
         date: toDate(input.date),
         dueDate: existing.type === 'BILL' ? toDate(dueDateFor(input.date, term ?? null)) : null,
+        // A purchase order's expiry survives an edit. It used to be silently
+        // dropped, so editing an order threw away the date it was good until.
+        expiryDate:
+          existing.type === 'PURCHASE_ORDER' && input.expiryDate ? toDate(input.expiryDate) : null,
         paymentTermId: term?.id ?? null,
         reference: input.reference ?? null,
         memo: input.memo ?? null,
@@ -426,14 +454,19 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
   if (receivesStock || returnsStock) {
     const stock = new Map<string, Decimal>()
 
-    for (const line of document.lines) {
+    for (const [index, line] of document.lines.entries()) {
       if (line.item?.type !== 'INVENTORY') continue
       if (!line.item.inventoryAccountId) {
         throw precondition(`"${line.item.name}" has no inventory account.`)
       }
 
       const quantity = new Decimal(line.quantity.toString())
-      const priceForLine = priced.lines.find((p) => p.source.itemId === line.item!.id)
+      // Matched by position, not by item. `priceDocument` returns its lines in
+      // the order it was given them, and a document may legitimately carry the
+      // same item twice — at two costs, or on two delivery dates. Looking the
+      // price up by item id costed both of those lines at the first one's
+      // amount, so the second was received into stock at the wrong value.
+      const priceForLine = priced.lines[index]
       const netAmount = priceForLine?.amount ?? new Decimal(line.amount.toString())
       const unitCost = quantity.isZero() ? new Decimal(0) : netAmount.dividedBy(quantity)
 
@@ -502,9 +535,11 @@ export async function voidDocument(ctx: OrgContext, id: string, reason: string) 
     }
 
     if (document.journalId) {
-      await reverseJournal(tx, ctx, document.journalId, {
+      const reversal = await reverseJournal(tx, ctx, document.journalId, {
         reason: `${document.number} voided — ${reason}`,
       })
+      // The goods go back with the money. A voided bill received nothing.
+      await reverseMovementsFor(tx, ctx, { sourceId: id, journalId: reversal.id })
     }
 
     await tx.purchaseDocument.update({
@@ -516,6 +551,61 @@ export async function voidDocument(ctx: OrgContext, id: string, reason: string) 
       tx,
       ctx,
       { entity: 'PurchaseDocument', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
+      meta,
+    )
+
+    return { id, number: document.number }
+  })
+}
+
+/**
+ * Delete a purchase document that never reached the ledger.
+ *
+ * The mirror of the sales side, and the same rule: a draft or a purchase order
+ * has told the ledger nothing, so it can go. A posted bill, expense or vendor
+ * credit is voided instead — its journal reversed, its stock returned, the
+ * document kept. `dispositionOf` says which applies before anything is clicked.
+ */
+export async function remove(ctx: OrgContext, id: string) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const document = await tx.purchaseDocument.findFirst({
+      where: { id, orgId: ctx.orgId },
+      select: {
+        id: true, type: true, number: true, status: true, journalId: true, total: true,
+        convertedTo: { select: { id: true, number: true } },
+        _count: { select: { applications: true, creditsApplied: true } },
+      },
+    })
+    if (!document) throw notFound('Document')
+
+    const disposition = dispositionOf({
+      status: document.status,
+      journalId: document.journalId,
+      convertedToId: document.convertedTo?.id ?? null,
+      appliedCount: document._count.applications + document._count.creditsApplied,
+    })
+
+    if (disposition.action !== 'delete') {
+      throw precondition(
+        `${document.number} cannot be deleted. ${disposition.reason}` +
+          (disposition.action === 'void' ? ' Void it instead — the entry is reversed and both stay on the record.' : ''),
+      )
+    }
+
+    await reverseMovementsFor(tx, ctx, { sourceId: id })
+    await tx.purchaseDocument.delete({ where: { id } })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'PurchaseDocument',
+        entityId: id,
+        action: 'DELETE',
+        before: { type: document.type, number: document.number, total: document.total.toString() },
+      },
       meta,
     )
 
@@ -581,13 +671,31 @@ export async function convertOrder(ctx: OrgContext, orderId: string, date: Calen
   })
 }
 
+/**
+ * Recompute a document's status from what has actually settled it.
+ *
+ * A bill runs OPEN -> PARTIAL -> PAID as payments and credits are applied. An
+ * **expense** never becomes a payable at all: the money left the account the
+ * moment it was entered, so it is PAID as soon as it is posted. Leaving it OPEN
+ * — which is what it used to do — put a settled purchase on every "unpaid" list
+ * and made the expense screen read as if the business owed money it had already
+ * handed over.
+ */
 export async function refreshStatus(tx: Tx, documentId: string) {
   const document = await tx.purchaseDocument.findUnique({
     where: { id: documentId },
-    select: { id: true, type: true, total: true, status: true },
+    select: { id: true, type: true, total: true, status: true, journalId: true },
   })
   if (!document) return
   if (document.status === 'VOID' || document.status === 'DRAFT') return
+
+  if (document.type === 'EXPENSE') {
+    if (document.journalId && document.status !== 'PAID') {
+      await tx.purchaseDocument.update({ where: { id: documentId }, data: { status: 'PAID' } })
+    }
+    return
+  }
+
   if (document.type !== 'BILL') return
 
   const applied = await appliedTotal(tx, documentId)
@@ -612,6 +720,45 @@ async function appliedTotal(tx: Tx, documentId: string): Promise<Decimal> {
     _sum: { amount: true },
   })
   return new Decimal(result._sum.amount?.toString() ?? '0')
+}
+
+/**
+ * The account an expense was paid from.
+ *
+ * Required, because an expense that does not say where the money came from
+ * cannot be posted — and the failure used to surface as a bare `Error` from the
+ * journal builder, with no field to point at. Any balance-sheet account is
+ * allowed: a business pays for things out of petty cash and director's loans as
+ * well as out of the bank. Income and expense accounts are refused, since money
+ * cannot leave one.
+ */
+async function requirePaymentAccount(tx: Tx, ctx: OrgContext, accountId: string | null | undefined) {
+  if (!accountId) {
+    throw validation('Say which account this was paid from.', {
+      paymentAccountId: ['Choose the account the money left'],
+    })
+  }
+
+  const account = await tx.ledgerAccount.findFirst({
+    where: { id: accountId, orgId: ctx.orgId },
+    select: { id: true, name: true, type: true, isActive: true },
+  })
+  if (!account) throw notFound('Payment account')
+
+  if (!account.isActive) {
+    throw validation(`"${account.name}" is archived, so money cannot be paid out of it.`, {
+      paymentAccountId: ['Choose an active account'],
+    })
+  }
+
+  if (account.type !== 'ASSET' && account.type !== 'LIABILITY') {
+    throw validation(
+      `"${account.name}" is an ${account.type.toLowerCase()} account, so money cannot be paid out of it.`,
+      { paymentAccountId: ['Choose a bank, cash, credit card or other balance-sheet account'] },
+    )
+  }
+
+  return account
 }
 
 async function requireVendor(tx: Tx, ctx: OrgContext, vendorId: string) {

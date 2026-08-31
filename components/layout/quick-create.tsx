@@ -8,6 +8,8 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { contactDialogOptions, itemDialogOptions } from '@/app/(app)/quick-create/actions'
+import type { AccountOption } from '@/components/master-data/item-dialog'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { cn } from '@/lib/utils'
 import { startNavigationProgress } from './navigation-progress'
 
@@ -70,13 +72,14 @@ type DialogData =
   | {
       kind: 'customer' | 'vendor'
       terms: { id: string; label: string }[]
-      expenseAccounts: { id: string; label: string }[]
+      expenseAccounts: AccountPickerOption[]
       today: string
       currency: string
     }
   | {
       kind: 'item'
-      accounts: { id: string; label: string; type: string; subtype: string }[]
+      accounts: AccountOption[]
+      today: string
       taxCodes: { id: string; label: string }[]
       categories: { id: string; label: string }[]
     }
@@ -174,6 +177,7 @@ export function QuickCreate({ permissions, currency }: { permissions: string[]; 
               taxCodes={dialog.taxCodes}
               categories={dialog.categories}
               currency={currency}
+              today={dialog.today}
               onClose={() => setDialog(null)}
             />
           ) : (

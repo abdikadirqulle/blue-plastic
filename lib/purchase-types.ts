@@ -3,6 +3,15 @@ import type { PurchaseDocumentType } from '@prisma/client'
 export type PurchaseTypeConfig = {
   type: PurchaseDocumentType
   slug: string
+  /**
+   * Other URLs that mean the same document.
+   *
+   * An expense paid on the spot is what most people call a *purchase receipt* —
+   * it is the mirror of a sales receipt, and half the world's accounting
+   * software names it that way. Rather than pick a winner and make the other
+   * name a dead link, both reach the same screen.
+   */
+  aliases?: string[]
   singular: string
   plural: string
   effect: string
@@ -24,9 +33,11 @@ export const PURCHASE_TYPES: PurchaseTypeConfig[] = [
   {
     type: 'EXPENSE',
     slug: 'expenses',
+    aliases: ['purchase-receipts'],
     singular: 'Expense',
     plural: 'Expenses',
-    effect: 'Bought and paid at once. The money leaves an account and never becomes a payable.',
+    effect:
+      'A purchase receipt: bought and paid at once. The money leaves the account you name, the cost is recognised, and any tracked stock on it is received — it never becomes a payable, so it is settled the moment it is entered.',
     needsPaymentAccount: true,
     posts: true,
   },
@@ -50,6 +61,7 @@ export const PURCHASE_TYPES: PurchaseTypeConfig[] = [
   },
 ]
 
-export const purchaseBySlug = (slug: string) => PURCHASE_TYPES.find((c) => c.slug === slug)
+export const purchaseBySlug = (slug: string) =>
+  PURCHASE_TYPES.find((c) => c.slug === slug || c.aliases?.includes(slug))
 export const purchaseByType = (type: PurchaseDocumentType) =>
   PURCHASE_TYPES.find((c) => c.type === type)!

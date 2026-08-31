@@ -1,11 +1,12 @@
 'use client'
 
-import { useActionState, useEffect, useRef, useState } from 'react'
+import { useActionState, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { AlertTriangleIcon, PackageIcon, PlusIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -13,7 +14,9 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
+import { DateField } from '@/components/ui/date-field'
 import { Separator } from '@/components/ui/separator'
+import { accountOptions, type AccountChoice } from '@/lib/account-options'
 import { createItemForm, updateItemForm } from '@/app/(app)/items/actions'
 import type { ItemType } from '@prisma/client'
 
@@ -38,7 +41,8 @@ export type ItemValues = {
   categoryId?: string | null
 }
 
-export type AccountOption = { id: string; label: string; type: string; subtype: string }
+/** The raw chart. Every account selector orders it rather than filtering it. */
+export type AccountOption = AccountChoice
 export type SimpleOption = { id: string; label: string }
 
 const TYPE_HELP: Record<ItemType, string> = {
@@ -61,6 +65,7 @@ export function NewItemButton(props: {
   taxCodes: SimpleOption[]
   categories: SimpleOption[]
   currency: string
+  today?: string
 }) {
   const [open, setOpen] = useState(false)
   return (
@@ -80,6 +85,7 @@ export function ItemDialog({
   taxCodes,
   categories,
   currency,
+  today,
   onClose,
   defaultName,
   onCreated,
@@ -90,6 +96,8 @@ export function ItemDialog({
   taxCodes: SimpleOption[]
   categories: SimpleOption[]
   currency: string
+  /** Default date for opening stock. */
+  today?: string
   onClose: () => void
   /** Pre-fills the name, when the dialog was opened by typing one into a picker. */
   defaultName?: string
@@ -115,9 +123,57 @@ export function ItemDialog({
     if (state.status !== 'success') handled.current = false
   }, [state, router, onClose, onCreated])
 
-  const income = accounts.filter((a) => a.type === 'REVENUE')
-  const expense = accounts.filter((a) => a.type === 'EXPENSE')
-  const inventory = accounts.filter((a) => a.subtype === 'INVENTORY')
+  /**
+   * Four views of the *same* chart. Each puts the accounts the field normally
+   * wants at the top and keeps everything else selectable underneath — a
+   * business that posts its sales to an "Other income" account should not have
+   * to rename it before it can pick it.
+   */
+  const income = useMemo(
+    () => accountOptions(accounts, { prefer: ['INCOME', 'OTHER_INCOME', 'SALES_DISCOUNTS'], preferTypes: ['REVENUE'] }),
+    [accounts],
+  )
+  const expense = useMemo(
+    () => accountOptions(accounts, { prefer: ['OPERATING_EXPENSE', 'COST_OF_GOODS_SOLD', 'OTHER_EXPENSE'], preferTypes: ['EXPENSE'] }),
+    [accounts],
+  )
+  const cogs = useMemo(
+    () => accountOptions(accounts, { prefer: ['COST_OF_GOODS_SOLD'], preferTypes: ['EXPENSE'] }),
+    [accounts],
+  )
+  const inventory = useMemo(
+    () => accountOptions(accounts, { prefer: ['INVENTORY', 'OTHER_CURRENT_ASSET'], preferTypes: ['ASSET'] }),
+    [accounts],
+  )
+
+  // Controlled, because they are comboboxes rather than <select>s and because
+  // switching to Inventory pre-selects the usual stock and cost accounts.
+  const [incomeAccountId, setIncomeAccountId] = useState(item?.incomeAccountId ?? '')
+  const [expenseAccountId, setExpenseAccountId] = useState(item?.expenseAccountId ?? '')
+  const [cogsAccountId, setCogsAccountId] = useState(item?.cogsAccountId ?? '')
+  const [inventoryAccountId, setInventoryAccountId] = useState(item?.inventoryAccountId ?? '')
+  const [openingQuantity, setOpeningQuantity] = useState('')
+  const [openingUnitCost, setOpeningUnitCost] = useState(item?.purchaseCost ?? '')
+  const [openingDate, setOpeningDate] = useState(today ?? '')
+
+  const chooseType = (next: ItemType) => {
+    setType(next)
+    if (next !== 'INVENTORY') {
+      setInventoryAccountId('')
+      setCogsAccountId('')
+      setOpeningQuantity('')
+      return
+    }
+    // The accounts a tracked item cannot do without, filled in from the chart's
+    // own stock and cost-of-sales accounts so the common case needs no thought.
+    if (!inventoryAccountId) {
+      setInventoryAccountId(accounts.find((a) => a.subtype === 'INVENTORY')?.id ?? '')
+    }
+    if (!cogsAccountId) {
+      setCogsAccountId(accounts.find((a) => a.subtype === 'COST_OF_GOODS_SOLD')?.id ?? '')
+    }
+  }
+
   const e = state.fieldErrors
 
   return (
@@ -151,7 +207,7 @@ export function ItemDialog({
               <NativeSelect
                 {...fieldProps('type', e?.type, true)}
                 value={type}
-                onChange={(event) => setType(event.target.value as ItemType)}
+                onChange={(event) => chooseType(event.target.value as ItemType)}
               >
                 <option value="SERVICE">Service</option>
                 <option value="NON_INVENTORY">Non-inventory product</option>
@@ -181,10 +237,10 @@ export function ItemDialog({
             <p className="-mt-2 flex gap-2 rounded-md border bg-muted/40 p-2.5 text-xs text-muted-foreground">
               <PackageIcon className="mt-0.5 size-3.5 shrink-0" />
               <span>
-                This item starts at <strong>zero on hand</strong>. There is no opening-quantity box on
-                purpose: stock only exists where the ledger says it does. Put stock in by entering the bill
-                or expense you bought it on, or — if you are setting up books that already have stock — by
-                recording a stock adjustment for the count and its cost.
+                Stock is part of this item, not a separate system. Anything entered under{' '}
+                <strong>Stock setup</strong> below posts as a real opening movement — into the inventory
+                account, against Opening Balance Equity — so the item is countable and sellable the moment
+                it is created. After that, stock moves through bills, invoices and adjustments.
               </span>
             </p>
           ) : null}
@@ -233,17 +289,15 @@ export function ItemDialog({
                 required
                 error={e?.incomeAccountId}
               >
-                <NativeSelect
-                  {...fieldProps('incomeAccountId', e?.incomeAccountId, true)}
-                  defaultValue={item?.incomeAccountId ?? ''}
-                >
-                  <option value="">— choose —</option>
-                  {income.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.label}
-                    </option>
-                  ))}
-                </NativeSelect>
+                <AccountPicker
+                  id="incomeAccountId"
+                  name="incomeAccountId"
+                  options={income}
+                  value={incomeAccountId || null}
+                  onChange={(next) => setIncomeAccountId(next ?? '')}
+                  required
+                  error={e?.incomeAccountId}
+                />
               </Field>
             </div>
 
@@ -285,31 +339,27 @@ export function ItemDialog({
                   required
                   error={e?.cogsAccountId}
                 >
-                  <NativeSelect
-                    {...fieldProps('cogsAccountId', e?.cogsAccountId, true)}
-                    defaultValue={item?.cogsAccountId ?? ''}
-                  >
-                    <option value="">— choose —</option>
-                    {expense.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.label}
-                      </option>
-                    ))}
-                  </NativeSelect>
+                  <AccountPicker
+                    id="cogsAccountId"
+                    name="cogsAccountId"
+                    options={cogs}
+                    value={cogsAccountId || null}
+                    onChange={(next) => setCogsAccountId(next ?? '')}
+                    required
+                    error={e?.cogsAccountId}
+                  />
                 </Field>
               ) : (
                 <Field name="expenseAccountId" label="Expense account" error={e?.expenseAccountId}>
-                  <NativeSelect
-                    {...fieldProps('expenseAccountId', e?.expenseAccountId)}
-                    defaultValue={item?.expenseAccountId ?? ''}
-                  >
-                    <option value="">— none —</option>
-                    {expense.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.label}
-                      </option>
-                    ))}
-                  </NativeSelect>
+                  <AccountPicker
+                    id="expenseAccountId"
+                    name="expenseAccountId"
+                    options={expense}
+                    value={expenseAccountId || null}
+                    onChange={(next) => setExpenseAccountId(next ?? '')}
+                    clearable
+                    error={e?.expenseAccountId}
+                  />
                 </Field>
               )}
             </div>
@@ -323,17 +373,15 @@ export function ItemDialog({
                   required
                   error={e?.inventoryAccountId}
                 >
-                  <NativeSelect
-                    {...fieldProps('inventoryAccountId', e?.inventoryAccountId, true)}
-                    defaultValue={item?.inventoryAccountId ?? ''}
-                  >
-                    <option value="">— choose —</option>
-                    {inventory.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {account.label}
-                      </option>
-                    ))}
-                  </NativeSelect>
+                  <AccountPicker
+                    id="inventoryAccountId"
+                    name="inventoryAccountId"
+                    options={inventory}
+                    value={inventoryAccountId || null}
+                    onChange={(next) => setInventoryAccountId(next ?? '')}
+                    required
+                    error={e?.inventoryAccountId}
+                  />
                 </Field>
                 <Field name="reorderPoint" label="Reorder at" error={e?.reorderPoint}>
                   <Input
@@ -346,6 +394,58 @@ export function ItemDialog({
               </div>
             ) : null}
           </div>
+
+          {type === 'INVENTORY' && mode === 'create' ? (
+            <>
+              <Separator />
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Stock setup
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    What is on the shelf today, and what it cost. Leave the quantity blank for an item you
+                    have not received yet — it can be received on a bill or counted in later.
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <Field name="openingQuantity" label="Quantity on hand" error={e?.openingQuantity}>
+                    <Input
+                      {...fieldProps('openingQuantity', e?.openingQuantity)}
+                      inputMode="decimal"
+                      className="tabular"
+                      placeholder="0"
+                      value={openingQuantity}
+                      onChange={(event) => setOpeningQuantity(event.target.value)}
+                    />
+                  </Field>
+                  <Field
+                    name="openingUnitCost"
+                    label={`Cost each (${currency})`}
+                    error={e?.openingUnitCost}
+                  >
+                    <Input
+                      {...fieldProps('openingUnitCost', e?.openingUnitCost)}
+                      inputMode="decimal"
+                      className="tabular"
+                      value={openingUnitCost ?? ''}
+                      onChange={(event) => setOpeningUnitCost(event.target.value)}
+                    />
+                  </Field>
+                  <Field name="openingDate" label="As at" error={e?.openingDate}>
+                    <DateField
+                      id="openingDate"
+                      name="openingDate"
+                      value={openingDate}
+                      onChange={setOpeningDate}
+                      today={today}
+                    />
+                  </Field>
+                </div>
+              </div>
+            </>
+          ) : null}
 
           <Field name="description" label="Description" error={e?.description}>
             <Input {...fieldProps('description', e?.description)} defaultValue={item?.description ?? ''} />

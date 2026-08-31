@@ -12,7 +12,9 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { DisposeButton } from '@/components/data/document-disposal'
 import { formatDate, toCalendarDate } from '@/lib/date'
+import { dispositionOf } from '@/lib/document-disposition'
 import { formatMoney } from '@/lib/money'
 import { PAYMENT_METHOD_LABELS, STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
 import { parseListQuery } from '@/lib/validation/common'
@@ -35,6 +37,7 @@ export default async function PaymentsPage({
   const linkParams = { q: query.q, sort: sort.sort, dir: sort.dir }
   const page = await paymentService.list(ctx, query, sort)
   const currency = ctx.organization.baseCurrency
+  const canVoid = ctx.permissions.has('payment:void')
 
   const newButton = ctx.permissions.has('payment:create') ? (
     <Link href="/payments/new" className={buttonVariants({ size: 'sm' })}>
@@ -79,6 +82,7 @@ export default async function PaymentsPage({
                 <SortableHeader column="amount" label="Amount" state={sort} basePath="/payments" params={linkParams} className="w-28" numeric defaultDirection="desc" />
                 <TableHead className="numeric w-28">Unapplied</TableHead>
                 <TableHead className="w-20">Status</TableHead>
+                <TableHead className="w-24 print:hidden" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -107,6 +111,21 @@ export default async function PaymentsPage({
                     <Badge variant={STATUS_VARIANTS[payment.status] ?? 'secondary'}>
                       {STATUS_LABELS[payment.status] ?? payment.status}
                     </Badge>
+                  </TableCell>
+                  <TableCell className="print:hidden">
+                    {canVoid ? (
+                      <DisposeButton
+                        kind="customer-payment"
+                        id={payment.id}
+                        number={payment.number}
+                        variant="ghost"
+                        disposition={dispositionOf({
+                          status: payment.status,
+                          // A payment is always posted, so this is always a void.
+                          journalId: payment.journalId,
+                        })}
+                      />
+                    ) : null}
                   </TableCell>
                 </TableRow>
               ))}

@@ -6,7 +6,7 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
-import { EntityPicker } from '@/components/forms/entity-picker'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
-import { NativeSelect } from '@/components/ui/native-select'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import { saveDepositForm } from '@/app/(app)/banking/actions'
@@ -27,7 +27,6 @@ type Payment = {
   customer: string
   reference: string | null
 }
-type Option = { id: string; label: string }
 type OtherLine = { key: number; accountId: string; description: string; amount: string }
 
 export function DepositForm({
@@ -37,8 +36,8 @@ export function DepositForm({
   today,
   currency,
 }: {
-  bankAccounts: Option[]
-  otherAccounts: Option[]
+  bankAccounts: AccountPickerOption[]
+  otherAccounts: AccountPickerOption[]
   payments: Payment[]
   today: string
   currency: string
@@ -96,18 +95,15 @@ export function DepositForm({
           <FormStatus state={state} />
 
           <Field name="bankAccountId" label="Deposit to" required error={state.fieldErrors?.bankAccountId}>
-            <NativeSelect
-              {...fieldProps('bankAccountId', state.fieldErrors?.bankAccountId)}
-              value={bankAccountId}
-              onChange={(event) => setBankAccountId(event.target.value)}
+            <AccountPicker
+              id="bankAccountId"
+              name="bankAccountId"
+              options={bankAccounts}
+              value={bankAccountId || null}
+              onChange={(next) => setBankAccountId(next ?? '')}
               required
-            >
-              {bankAccounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                </option>
-              ))}
-            </NativeSelect>
+              error={state.fieldErrors?.bankAccountId}
+            />
           </Field>
 
           <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -141,7 +137,7 @@ export function DepositForm({
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">
+        <div className="panel-head text-sm font-semibold">
           Payments waiting to be banked
         </div>
         {payments.length === 0 ? (
@@ -188,7 +184,7 @@ export function DepositForm({
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">
+        <div className="panel-head text-sm font-semibold">
           Anything else on the slip
         </div>
         {otherLines.length > 0 ? (
@@ -197,7 +193,7 @@ export function DepositForm({
               {otherLines.map((line) => (
                 <tr key={line.key} className="border-b last:border-0">
                   <td className="w-64 px-2 py-1.5">
-                    <EntityPicker
+                    <AccountPicker
                       options={otherAccounts}
                       value={line.accountId || null}
                       onChange={(next) =>
@@ -205,7 +201,6 @@ export function DepositForm({
                           current.map((l) => (l.key === line.key ? { ...l, accountId: next ?? '' } : l)),
                         )
                       }
-                      placeholder="Search accounts"
                     />
                   </td>
                   <td className="px-2 py-1.5">

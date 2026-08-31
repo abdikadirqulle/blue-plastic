@@ -45,7 +45,7 @@ export function ActivityList({ timeZone }: { timeZone: string }) {
 
   if (isPending) {
     return (
-      <div className="flex items-center justify-center gap-2 rounded-lg border py-16 text-sm text-muted-foreground">
+      <div className="flex items-center justify-center gap-2 rounded-md border py-16 text-sm text-muted-foreground">
         <Loader2Icon className="size-4 animate-spin" /> Loading activity…
       </div>
     )

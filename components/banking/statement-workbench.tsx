@@ -219,7 +219,7 @@ export function StatementWorkbench({
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">
+        <div className="panel-head text-sm font-semibold">
           To deal with ({pending.length})
         </div>
         {pending.length === 0 ? (
@@ -317,7 +317,7 @@ export function StatementWorkbench({
 
       {done.length > 0 ? (
         <Card className="overflow-hidden p-0">
-          <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">Dealt with ({done.length})</div>
+          <div className="panel-head text-sm font-semibold">Dealt with ({done.length})</div>
           <ul className="divide-y">
             {done.map((transaction) => (
               <li key={transaction.id} className="flex flex-wrap items-center gap-3 px-3 py-2">

@@ -1,7 +1,7 @@
 import 'server-only'
 import type { Prisma } from '@prisma/client'
 
-import { toDate } from '@/lib/date'
+import { toDate, today } from '@/lib/date'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { BillPaymentInput } from '@/lib/validation/purchases'
@@ -81,23 +81,82 @@ export async function list(
   )
 }
 
-/** The bills a payment could still be put against, oldest first. */
+/**
+ * The bills a payment could still be put against, oldest first.
+ *
+ * Oldest first is not a cosmetic ordering: it is the order bills are settled in,
+ * so the list is already in the order somebody works down it on pay day. Each
+ * row carries what the bill was for as well as what is left, because "pay 400 of
+ * 1,200" and "pay 400 of 400" are different decisions.
+ */
 export async function openBillsFor(ctx: OrgContext, vendorId: string) {
   const bills = await db.purchaseDocument.findMany({
     where: { orgId: ctx.orgId, vendorId, type: 'BILL', status: { in: ['OPEN', 'PARTIAL'] } },
     select: { id: true, number: true, date: true, dueDate: true, total: true, reference: true },
-    orderBy: { date: 'asc' },
+    orderBy: [{ dueDate: 'asc' }, { date: 'asc' }],
   })
 
   const balances = await outstandingBalances(db, bills.map((bill) => bill.id))
+  const now = toDate(today(ctx.organization.timeZone))
 
   return bills
-    .map((bill) => ({
-      ...bill,
-      total: bill.total.toString(),
-      balance: toMoneyString(balances.get(bill.id) ?? ZERO, 2),
-    }))
+    .map((bill) => {
+      const balance = balances.get(bill.id) ?? ZERO
+      const total = new Decimal(bill.total.toString())
+      return {
+        ...bill,
+        total: total.toString(),
+        paid: toMoneyString(total.minus(balance), 2),
+        balance: toMoneyString(balance, 2),
+        daysOverdue: bill.dueDate
+          ? Math.floor((now.getTime() - bill.dueDate.getTime()) / 86_400_000)
+          : 0,
+      }
+    })
     .filter((bill) => Number(bill.balance) > 0)
+}
+
+/**
+ * Vendor credits with something left on them.
+ *
+ * Shown beside the bills on the payment screen because they are the other way of
+ * settling one, and a credit nobody can see is a credit nobody uses. Applying a
+ * credit posts nothing — the ledger already carries it — so it is a separate
+ * action from the payment itself.
+ */
+export async function openCreditsFor(ctx: OrgContext, vendorId: string) {
+  const credits = await db.purchaseDocument.findMany({
+    where: {
+      orgId: ctx.orgId,
+      vendorId,
+      type: 'VENDOR_CREDIT',
+      status: { in: ['OPEN', 'PARTIAL'] },
+    },
+    select: { id: true, number: true, date: true, total: true, reference: true },
+    orderBy: { date: 'asc' },
+  })
+
+  const rows = await Promise.all(
+    credits.map(async (credit) => {
+      const applied = await db.purchaseApplication.aggregate({
+        where: { creditDocumentId: credit.id },
+        _sum: { amount: true },
+      })
+      const remaining = new Decimal(credit.total.toString()).minus(
+        applied._sum.amount?.toString() ?? '0',
+      )
+      return {
+        id: credit.id,
+        number: credit.number,
+        date: credit.date,
+        reference: credit.reference,
+        total: credit.total.toString(),
+        remaining: toMoneyString(remaining, 2),
+      }
+    }),
+  )
+
+  return rows.filter((credit) => Number(credit.remaining) > 0)
 }
 
 /**
@@ -120,13 +179,17 @@ export async function create(ctx: OrgContext, input: BillPaymentInput) {
 
     const account = await tx.ledgerAccount.findFirst({
       where: { id: input.paymentAccountId, orgId: ctx.orgId, isActive: true },
-      select: { id: true, name: true, subtype: true },
+      select: { id: true, name: true, subtype: true, type: true },
     })
     if (!account) throw notFound('Payment account')
-    if (account.subtype !== 'BANK' && account.subtype !== 'CREDIT_CARD') {
+    // Any balance-sheet account can pay a bill: petty cash, a mobile-money
+    // float, a director's loan. What cannot is an income or expense account —
+    // money does not leave one, and recording it that way would post the
+    // settlement as if it were a fresh cost.
+    if (account.type !== 'ASSET' && account.type !== 'LIABILITY') {
       throw validation(
-        `"${account.name}" is not a bank or credit card account, so money cannot be paid out of it.`,
-        { paymentAccountId: ['Choose a bank or credit card account'] },
+        `"${account.name}" is an ${account.type.toLowerCase()} account, so money cannot be paid out of it.`,
+        { paymentAccountId: ['Choose a bank, cash, credit card or other balance-sheet account'] },
       )
     }
 

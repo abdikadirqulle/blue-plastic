@@ -6,6 +6,7 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
@@ -15,6 +16,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import type { PurchaseTypeConfig } from '@/lib/purchase-types'
 import { savePurchaseForm } from '@/app/(app)/purchases/actions'
@@ -27,6 +29,11 @@ export type PurchaseItemOption = {
   description: string | null
   taxCodeId: string | null
   expenseAccountId: string | null
+  /** SERVICE | NON_INVENTORY | INVENTORY — decides the picker heading. */
+  type?: string
+  group?: string
+  /** Stock on hand, for tracked items. */
+  onHand?: string | null
 }
 export type Option = { id: string; label: string }
 export type TaxOption = Option & { rate: number; isInclusive: boolean }
@@ -88,8 +95,8 @@ export function BillForm({
   vendors: VendorOption[]
   items: PurchaseItemOption[]
   taxCodes: TaxOption[]
-  paymentAccounts: Option[]
-  expenseAccounts: Option[]
+  paymentAccounts: AccountPickerOption[]
+  expenseAccounts: AccountPickerOption[]
   terms: Option[]
   today: string
   currency: string
@@ -164,6 +171,18 @@ export function BillForm({
   const addItemLine = () => setLines((current) => [...current, empty(nextKey.current++, '', 'item')])
 
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
+
+  /** Grouped by kind, with stock on hand beside anything tracked. */
+  const itemOptions = useMemo(
+    () =>
+      items.map((item) => ({
+        id: item.id,
+        label: item.label,
+        group: item.group,
+        hint: item.onHand != null ? `${item.onHand} on hand` : undefined,
+      })),
+    [items],
+  )
   const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
 
   /**
@@ -319,18 +338,14 @@ export function BillForm({
                 required
                 error={state.fieldErrors?.paymentAccountId}
               >
-                <NativeSelect
-                  {...fieldProps('paymentAccountId', state.fieldErrors?.paymentAccountId)}
-                  value={paymentAccountId}
-                  onChange={(event) => setPaymentAccountId(event.target.value)}
+                <AccountPicker
+                  id="paymentAccountId"
+                  options={paymentAccounts}
+                  value={paymentAccountId || null}
+                  onChange={(next) => setPaymentAccountId(next ?? '')}
                   required
-                >
-                  {paymentAccounts.map((account) => (
-                    <option key={account.id} value={account.id}>
-                      {account.label}
-                    </option>
-                  ))}
-                </NativeSelect>
+                  error={state.fieldErrors?.paymentAccountId}
+                />
               </Field>
             ) : null}
 
@@ -365,7 +380,7 @@ export function BillForm({
         invented a product called rent.
       */}
       <Card className="overflow-hidden p-0">
-        <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+        <div className="panel-head">
           <h2 className="text-sm font-semibold">Category details</h2>
           <span className="text-xs text-muted-foreground">
             Costs posted straight to an account. No quantity, nothing counted.
@@ -398,11 +413,10 @@ export function BillForm({
               {categoryLines.map((line) => (
                 <tr key={line.key} className="border-b last:border-0">
                   <td className="px-2 py-1.5">
-                    <EntityPicker
+                    <AccountPicker
                       options={expenseAccounts}
                       value={line.expenseAccountId || null}
                       onChange={(next) => update(line.key, { expenseAccountId: next ?? '' })}
-                      placeholder="Search accounts"
                       clearable
                     />
                   </td>
@@ -463,7 +477,7 @@ export function BillForm({
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+        <div className="panel-head">
           <h2 className="text-sm font-semibold">Item details</h2>
           <span className="text-xs text-muted-foreground">
             Products bought. A tracked item moves stock and holds its cost until it is sold.
@@ -505,7 +519,7 @@ export function BillForm({
                     <td className="px-2 py-1.5">
                       <EntityPicker
                         kind="item"
-                        options={items}
+                        options={itemOptions}
                         value={line.itemId || null}
                         onChange={(next) => chooseItem(line.key, next ?? '')}
                         placeholder="Search or add an item"

@@ -6,11 +6,12 @@ import type { InventoryAdjustmentInput } from '@/lib/validation/inventory'
 import {
   positionsOf,
   recordMovement,
+  reverseMovementsFor,
   stockAgreesWithLedger,
   valuation,
 } from '@/server/accounting/inventory'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
-import { postJournal } from '@/server/accounting/posting'
+import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import type { DraftLine } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
@@ -59,6 +60,7 @@ export async function listAdjustments(ctx: OrgContext) {
       take: 100,
       select: {
         id: true, number: true, date: true, memo: true, reason: true, status: true,
+        journalId: true, voidedAt: true, voidReason: true,
         account: { select: { code: true, name: true } },
         journal: { select: { id: true, journalNumber: true } },
         lines: { select: { value: true, quantityChange: true } },
@@ -269,6 +271,57 @@ export async function createAdjustment(ctx: OrgContext, input: InventoryAdjustme
     )
 
     return { id: adjustment.id, number: adjustment.number }
+  })
+}
+
+/**
+ * Void a stock adjustment.
+ *
+ * A count entered against the wrong item is the commonest mistake in stock
+ * keeping, and until now there was no way back from it. Voiding reverses the
+ * journal and puts the stock back exactly as it was — the movements are undone
+ * by their opposites rather than deleted, so the register still reads as "this
+ * was counted, then it was undone", which is what an auditor needs to see.
+ */
+export async function voidAdjustment(ctx: OrgContext, id: string, reason: string) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const adjustment = await tx.inventoryAdjustment.findFirst({
+      where: { id, orgId: ctx.orgId },
+      select: { id: true, number: true, status: true, journalId: true },
+    })
+    if (!adjustment) throw notFound('Adjustment')
+    if (adjustment.status === 'VOID') {
+      throw precondition(`${adjustment.number} is already void.`)
+    }
+
+    const reversal = adjustment.journalId
+      ? await reverseJournal(tx, ctx, adjustment.journalId, {
+          reason: `${adjustment.number} voided — ${reason}`,
+        })
+      : null
+
+    await reverseMovementsFor(tx, ctx, { sourceId: id, journalId: reversal?.id ?? null })
+
+    await tx.inventoryAdjustment.update({
+      where: { id },
+      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'InventoryAdjustment',
+        entityId: id,
+        action: 'REVERSE',
+        after: { status: 'VOID', reason },
+      },
+      meta,
+    )
+
+    return { id, number: adjustment.number }
   })
 }
 

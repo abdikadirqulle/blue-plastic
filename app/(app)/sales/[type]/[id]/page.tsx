@@ -4,7 +4,9 @@ import { notFound } from 'next/navigation'
 import { ArrowLeftIcon, PencilIcon, PrinterIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
-import { ConvertEstimateButton, VoidDocumentButton } from '@/components/sales/document-actions'
+import { ConvertEstimateButton } from '@/components/sales/document-actions'
+import { DisposeButton } from '@/components/data/document-disposal'
+import { dispositionOf } from '@/lib/document-disposition'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -31,7 +33,9 @@ export default async function SalesDocumentPage({
   if (!document) notFound()
 
   const currency = ctx.organization.baseCurrency
-  const canVoid = ctx.permissions.has('invoice:void') && document.status !== 'VOID' && document.status !== 'DRAFT'
+  // A draft can now be deleted, so the control shows for it too — what it does
+  // is decided by `disposition` below.
+  const canVoid = ctx.permissions.has('invoice:void') && document.status !== 'VOID'
 
   // The same rule the service enforces: a voided document cannot be edited, and
   // neither can one with money already applied to it — the payment would have to
@@ -43,6 +47,14 @@ export default async function SalesDocumentPage({
     ctx.permissions.has('invoice:create') &&
     !document.convertedTo &&
     document.status !== 'VOID'
+
+  // Delete or void — the record decides, not the screen.
+  const disposition = dispositionOf({
+    status: document.status,
+    journalId: document.journalId,
+    convertedToId: document.convertedTo?.id ?? null,
+    appliedCount: document.applications.length,
+  })
 
   return (
     <>
@@ -79,7 +91,15 @@ export default async function SalesDocumentPage({
                 <PencilIcon /> Edit
               </Link>
             ) : null}
-            {canVoid ? <VoidDocumentButton id={id} number={document.number} /> : null}
+            {canVoid ? (
+              <DisposeButton
+                kind="sales"
+                id={id}
+                number={document.number}
+                disposition={disposition}
+                redirectTo={disposition.action === 'delete' ? `/sales/${config.slug}` : undefined}
+              />
+            ) : null}
           </>
         }
       />
@@ -171,7 +191,7 @@ export default async function SalesDocumentPage({
 
       {document.applications.length > 0 ? (
         <Card className="mt-4 overflow-hidden p-0">
-          <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">Settled by</div>
+          <div className="panel-head text-sm font-semibold">Settled by</div>
           <Table>
             <TableBody>
               {document.applications.map((application) => (

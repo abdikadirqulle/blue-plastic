@@ -35,7 +35,7 @@ export function SearchInput({ placeholder = 'Search…' }: { placeholder?: strin
 
   return (
     <div className="relative w-full max-w-xs">
-      <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+      <SearchIcon className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
       <Input
         type="search"
         value={value}
@@ -43,7 +43,7 @@ export function SearchInput({ placeholder = 'Search…' }: { placeholder?: strin
         placeholder={placeholder}
         aria-label={placeholder}
         aria-busy={isPending}
-        className="pl-8"
+        className="pl-7"
       />
     </div>
   )

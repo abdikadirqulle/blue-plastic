@@ -8,6 +8,7 @@ import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import type { OrgContext } from '@/server/auth/context'
 import { db } from '@/server/db'
 import { forbidden, notFound, validation } from '@/server/errors'
+import { resolveSources, sourceFor, type JournalSource } from '@/server/services/journal-sources'
 
 export type JournalRow = {
   id: string
@@ -19,6 +20,8 @@ export type JournalRow = {
   isAdjusting: boolean
   total: string
   lineCount: number
+  /** The document that produced it, and who it was with. */
+  source: JournalSource
 }
 
 /** Orderings the list screen offers. Sorting happens here, over every row. */
@@ -42,6 +45,18 @@ export async function list(
           OR: [
             { journalNumber: { contains: query.q, mode: 'insensitive' } },
             { memo: { contains: query.q, mode: 'insensitive' } },
+            // A journal is normally looked for by the customer or vendor it was
+            // with, which lives on its lines rather than on the header.
+            {
+              lines: {
+                some: { customer: { displayName: { contains: query.q, mode: 'insensitive' } } },
+              },
+            },
+            {
+              lines: {
+                some: { vendor: { displayName: { contains: query.q, mode: 'insensitive' } } },
+              },
+            },
           ],
         }
       : {}),
@@ -56,6 +71,7 @@ export async function list(
         date: true,
         memo: true,
         sourceType: true,
+        sourceId: true,
         status: true,
         isAdjusting: true,
         lines: { select: { debit: true } },
@@ -67,6 +83,13 @@ export async function list(
     }),
     db.journal.count({ where }),
   ])
+
+  // Which document each journal came from, and who it was with — resolved in
+  // one batch per family rather than one query per row.
+  const sources = await resolveSources(
+    ctx.orgId,
+    journals.map((journal) => ({ sourceType: journal.sourceType, sourceId: journal.sourceId })),
+  )
 
   const rows: JournalRow[] = journals.map((journal) => ({
     id: journal.id,
@@ -83,6 +106,7 @@ export async function list(
       2,
     ),
     lineCount: journal.lines.length,
+    source: sourceFor(sources, { sourceType: journal.sourceType, sourceId: journal.sourceId }),
   }))
 
   return paged(rows, total, query)
@@ -118,12 +142,21 @@ export async function get(ctx: OrgContext, id: string) {
           credit: true,
           description: true,
           account: { select: { id: true, code: true, name: true, type: true } },
+          // A line against a control account carries its counterparty (R7).
+          // Showing it is what turns "Accounts receivable 1,200" into
+          // "Accounts receivable 1,200 — Ahmed Trading".
+          customer: { select: { id: true, displayName: true } },
+          vendor: { select: { id: true, displayName: true } },
         },
       },
     },
   })
 
   if (!journal) throw notFound('Journal')
+
+  const sources = await resolveSources(ctx.orgId, [
+    { sourceType: journal.sourceType, sourceId: journal.sourceId },
+  ])
 
   const totalDebit = journal.lines.reduce(
     (sum, line) => sum.plus(new Decimal(line.debit.toString())),
@@ -136,6 +169,7 @@ export async function get(ctx: OrgContext, id: string) {
 
   return {
     ...journal,
+    source: sourceFor(sources, { sourceType: journal.sourceType, sourceId: journal.sourceId }),
     lines: journal.lines.map((line) => ({
       ...line,
       debit: line.debit.toString(),

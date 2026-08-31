@@ -3,7 +3,11 @@
 import { revalidatePath } from 'next/cache'
 
 import { toFormState, type FormState } from '@/components/forms/action-state'
-import { inventoryAdjustmentSchema, negativeStockSchema } from '@/lib/validation/inventory'
+import {
+  inventoryAdjustmentSchema,
+  negativeStockSchema,
+  voidAdjustmentSchema,
+} from '@/lib/validation/inventory'
 import { action } from '@/server/action'
 import { requestMeta, writeAudit } from '@/server/audit'
 import { db } from '@/server/db'
@@ -18,6 +22,23 @@ export const createAdjustment = action
     revalidatePath('/accounts')
     revalidatePath('/reports/trial-balance')
     return adjustment
+  })
+
+/**
+ * Void a stock adjustment: reverse the journal and put the stock back.
+ *
+ * A count entered against the wrong item had no way back before this.
+ */
+export const voidAdjustment = action
+  .requires('inventory:adjust')
+  .input(voidAdjustmentSchema)
+  .handler(async (ctx, input) => {
+    const result = await inventoryService.voidAdjustment(ctx, input.id, input.reason)
+    revalidatePath('/inventory')
+    revalidatePath('/accounts')
+    revalidatePath('/journals')
+    revalidatePath('/reports/trial-balance')
+    return result
   })
 
 export const setNegativeStockPolicy = action

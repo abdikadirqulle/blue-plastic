@@ -13,6 +13,7 @@ import { readSort } from '@/components/data/sortable-header'
 import { ContactTable } from '@/components/master-data/contact-table'
 import { Card } from '@/components/ui/card'
 import { describeTerm } from '@/lib/payment-terms'
+import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { parseListQuery } from '@/lib/validation/common'
 import { requireOrgContext } from '@/server/auth/context'
@@ -46,14 +47,17 @@ export default async function VendorsPage({
   const [page, terms, accounts] = await Promise.all([
     contactService.listVendors(ctx, query, { includeInactive, ...sort }),
     taxService.listPaymentTerms(ctx),
-    accountService.postableAccounts(ctx),
+    accountService.selectableAccounts(ctx),
   ])
 
   const canCreate = ctx.permissions.has('vendor:create')
   const termOptions = terms.map((term) => ({ id: term.id, label: `${term.name} — ${describeTerm(term)}` }))
-  const expenseOptions = accounts
-    .filter((account) => account.type === 'EXPENSE' || account.type === 'ASSET')
-    .map((account) => ({ id: account.id, label: `${account.code} ${account.name}` }))
+  // The whole chart, expenses first. A vendor's usual category is normally a
+  // cost, but not always — and an account the business made should be pickable.
+  const expenseOptions = accountOptions(accounts, {
+    prefer: ['OPERATING_EXPENSE', 'COST_OF_GOODS_SOLD', 'OTHER_EXPENSE'],
+    preferTypes: ['EXPENSE'],
+  })
 
   const newButton = canCreate ? (
     <NewContactButton

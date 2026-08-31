@@ -4,89 +4,123 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * A restrained, high-contrast palette. Accounting screens are dense with numbers;
- * the interface earns nothing by competing with them for attention.
+ * The visual system.
+ *
+ * Odoo is the reference, and what is worth taking from it is not the purple —
+ * it is the discipline. A business application is looked at for seven hours a
+ * day by somebody who is not looking at *it*; they are looking at a number in
+ * it. So:
+ *
+ *   **The page recedes.** Content sits on white panels against a soft grey
+ *   ground. Nothing has a drop shadow competing for depth, because there is no
+ *   depth to communicate — one panel is not in front of another.
+ *
+ *   **Small corners.** 4px, not 12px. A rounded rectangle reads as a card, a
+ *   card reads as an object, and a table of two hundred rows is not two hundred
+ *   objects. Radii shrink as the element gets bigger.
+ *
+ *   **Density is the feature.** Rows, inputs and buttons are 32px, not 36–40.
+ *   A person entering forty bills sees more of them at once, and the difference
+ *   between eighteen visible rows and twenty-six is the difference between
+ *   scrolling and not.
+ *
+ *   **One accent, used sparingly.** A deep plum for the primary action and for
+ *   anything selected. Everything else is grey. When only one thing on screen is
+ *   coloured, it does not need to be loud to be found.
+ *
+ * What is deliberately *not* Odoo: the typography stays on the system stack,
+ * amounts stay tabular, and the palette keeps its own colour rather than copying
+ * a brand that belongs to someone else.
  */
 :root {
-  --radius: 0.5rem;
+  /* 4px. Panels get it; controls get a touch less; pills get all the way. */
+  --radius: 0.25rem;
 
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.22 0.01 250);
+  /* The ground the application sits on, and the panels that sit on it. */
+  --background: oklch(0.975 0.002 285);
+  --foreground: oklch(0.28 0.008 285);
 
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.22 0.01 250);
+  --card-foreground: oklch(0.28 0.008 285);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.22 0.01 250);
+  --popover-foreground: oklch(0.28 0.008 285);
 
-  --primary: oklch(0.48 0.13 250);
+  /* The one accent. Deep plum: present enough to find, quiet enough to live with. */
+  --primary: oklch(0.44 0.068 340);
   --primary-foreground: oklch(0.99 0 0);
 
-  --secondary: oklch(0.968 0.005 250);
-  --secondary-foreground: oklch(0.28 0.02 250);
+  --secondary: oklch(0.965 0.003 285);
+  --secondary-foreground: oklch(0.33 0.01 285);
 
-  --muted: oklch(0.968 0.005 250);
-  --muted-foreground: oklch(0.53 0.015 250);
+  --muted: oklch(0.965 0.003 285);
+  --muted-foreground: oklch(0.55 0.012 285);
 
-  --accent: oklch(0.955 0.012 250);
-  --accent-foreground: oklch(0.28 0.02 250);
+  --accent: oklch(0.955 0.008 340);
+  --accent-foreground: oklch(0.34 0.045 340);
 
-  --destructive: oklch(0.58 0.21 27);
+  --destructive: oklch(0.55 0.19 27);
   --destructive-foreground: oklch(0.99 0 0);
 
-  --success: oklch(0.55 0.13 155);
+  /* Money is right or wrong, so success and warning are readable rather than bright. */
+  --success: oklch(0.5 0.11 160);
   --success-foreground: oklch(0.99 0 0);
-  --warning: oklch(0.72 0.15 75);
-  --warning-foreground: oklch(0.22 0.02 75);
+  --warning: oklch(0.68 0.13 70);
+  --warning-foreground: oklch(0.26 0.03 70);
 
-  --border: oklch(0.918 0.006 250);
-  --input: oklch(0.918 0.006 250);
-  --ring: oklch(0.48 0.13 250);
+  --border: oklch(0.905 0.004 285);
+  --input: oklch(0.885 0.005 285);
+  --ring: oklch(0.44 0.068 340);
 
-  --sidebar: oklch(0.985 0.003 250);
-  --sidebar-foreground: oklch(0.28 0.01 250);
-  --sidebar-accent: oklch(0.945 0.012 250);
-  --sidebar-accent-foreground: oklch(0.25 0.03 250);
-  --sidebar-border: oklch(0.912 0.006 250);
+  /*
+   * The sidebar is a panel, not a wall. Odoo's own is white in the web client
+   * and dark only in the app switcher; a dark rail beside a white page is a
+   * strong statement about which half matters, and here the page matters.
+   */
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.34 0.008 285);
+  --sidebar-accent: oklch(0.955 0.01 340);
+  --sidebar-accent-foreground: oklch(0.38 0.06 340);
+  --sidebar-border: oklch(0.9 0.004 285);
 }
 
 .dark {
-  --background: oklch(0.17 0.012 250);
-  --foreground: oklch(0.96 0.003 250);
+  --background: oklch(0.19 0.006 285);
+  --foreground: oklch(0.94 0.003 285);
 
-  --card: oklch(0.21 0.013 250);
-  --card-foreground: oklch(0.96 0.003 250);
-  --popover: oklch(0.21 0.013 250);
-  --popover-foreground: oklch(0.96 0.003 250);
+  --card: oklch(0.235 0.007 285);
+  --card-foreground: oklch(0.94 0.003 285);
+  --popover: oklch(0.235 0.007 285);
+  --popover-foreground: oklch(0.94 0.003 285);
 
-  --primary: oklch(0.68 0.13 250);
-  --primary-foreground: oklch(0.17 0.02 250);
+  --primary: oklch(0.68 0.1 340);
+  --primary-foreground: oklch(0.18 0.02 340);
 
-  --secondary: oklch(0.27 0.015 250);
-  --secondary-foreground: oklch(0.96 0.003 250);
+  --secondary: oklch(0.29 0.008 285);
+  --secondary-foreground: oklch(0.94 0.003 285);
 
-  --muted: oklch(0.27 0.015 250);
-  --muted-foreground: oklch(0.70 0.015 250);
+  --muted: oklch(0.29 0.008 285);
+  --muted-foreground: oklch(0.7 0.01 285);
 
-  --accent: oklch(0.30 0.02 250);
-  --accent-foreground: oklch(0.96 0.003 250);
+  --accent: oklch(0.32 0.03 340);
+  --accent-foreground: oklch(0.95 0.01 340);
 
-  --destructive: oklch(0.65 0.19 25);
-  --destructive-foreground: oklch(0.17 0.02 250);
+  --destructive: oklch(0.63 0.18 25);
+  --destructive-foreground: oklch(0.18 0.02 25);
 
-  --success: oklch(0.68 0.14 155);
-  --success-foreground: oklch(0.17 0.02 250);
-  --warning: oklch(0.78 0.14 75);
-  --warning-foreground: oklch(0.17 0.02 250);
+  --success: oklch(0.65 0.12 160);
+  --success-foreground: oklch(0.18 0.02 160);
+  --warning: oklch(0.76 0.13 70);
+  --warning-foreground: oklch(0.19 0.02 70);
 
-  --border: oklch(1 0 0 / 12%);
-  --input: oklch(1 0 0 / 16%);
-  --ring: oklch(0.62 0.12 250);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.62 0.09 340);
 
-  --sidebar: oklch(0.20 0.013 250);
-  --sidebar-foreground: oklch(0.93 0.004 250);
-  --sidebar-accent: oklch(0.28 0.02 250);
-  --sidebar-accent-foreground: oklch(0.97 0.003 250);
-  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar: oklch(0.215 0.007 285);
+  --sidebar-foreground: oklch(0.9 0.004 285);
+  --sidebar-accent: oklch(0.3 0.03 340);
+  --sidebar-accent-foreground: oklch(0.95 0.01 340);
+  --sidebar-border: oklch(1 0 0 / 9%);
 }
 
 @theme inline {
@@ -119,9 +153,10 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
 
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
+  /* Radii shrink as the element grows: a pill is round, a panel is barely. */
+  --radius-sm: calc(var(--radius) - 1px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
   --radius-xl: calc(var(--radius) + 4px);
 
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
@@ -132,9 +167,13 @@
   * {
     @apply border-border outline-ring/50;
   }
+
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "cv11", "ss01";
+    /* 13px base. Business software is read, not admired. */
+    font-size: 0.8125rem;
+    line-height: 1.45;
   }
 
   /*
@@ -145,6 +184,29 @@
   .tabular {
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum";
+  }
+
+  /* Headings carry their weight from size and colour, not from bold-and-big. */
+  h1 {
+    @apply tracking-tight;
+  }
+}
+
+@layer components {
+  /*
+   * A section label: the small grey capitals above a group of fields or a block
+   * of rows. Used often enough to be worth naming once.
+   */
+  .section-label {
+    @apply text-[0.6875rem] font-semibold uppercase tracking-wider text-muted-foreground;
+  }
+
+  /*
+   * The strip at the top of a panel — a table's title bar, a form section's
+   * heading. Slightly tinted so the panel reads as having a head and a body.
+   */
+  .panel-head {
+    @apply flex flex-wrap items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2;
   }
 }
 
@@ -194,6 +256,12 @@
   body {
     background: #fff;
     color: #000;
+  }
+
+  /* Panels print as plain rules, not as boxes with a tint. */
+  [data-slot='card'] {
+    border: 0 !important;
+    box-shadow: none !important;
   }
 
   a[href]::after {

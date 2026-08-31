@@ -9,6 +9,7 @@ import { SearchInput } from '@/components/data/search-input'
 import { TableToolbar } from '@/components/data/table-toolbar'
 import { NewItemButton } from '@/components/master-data/item-dialog'
 import { Card } from '@/components/ui/card'
+import { today } from '@/lib/date'
 import { cn } from '@/lib/utils'
 import { readSort } from '@/components/data/sortable-header'
 import { parseListQuery } from '@/lib/validation/common'
@@ -50,27 +51,22 @@ export default async function ItemsPage({
 
   const [page, accounts, taxCodes, categories] = await Promise.all([
     itemService.list(ctx, query, { type, includeInactive, ...sort }),
-    accountService.postableAccounts(ctx),
+    accountService.selectableAccounts(ctx),
     taxService.listCodes(ctx),
     itemService.listCategories(ctx),
   ])
 
   const canCreate = ctx.permissions.has('item:create')
-  const accountOptions = accounts.map((account) => ({
-    id: account.id,
-    label: `${account.code} ${account.name}`,
-    type: account.type,
-    subtype: account.subtype,
-  }))
   const taxOptions = taxCodes.filter((c) => c.isActive).map((c) => ({ id: c.id, label: c.name }))
   const categoryOptions = categories.map((c) => ({ id: c.id, label: c.name }))
 
   const newButton = canCreate ? (
     <NewItemButton
-      accounts={accountOptions}
+      accounts={accounts}
       taxCodes={taxOptions}
       categories={categoryOptions}
       currency={ctx.organization.baseCurrency}
+      today={today(ctx.organization.timeZone)}
     />
   ) : undefined
 
@@ -78,7 +74,7 @@ export default async function ItemsPage({
     <>
       <PageHeader
         title="Products and services"
-        description="What the business sells. Each item carries the accounts it posts to, so an invoice is categorised by the item rather than by whoever is typing."
+        description="Everything the business sells, with what is on hand beside it. An item carries the accounts it posts to and — when it is tracked — its stock, so there is one record to keep rather than two."
         actions={newButton}
       />
 
@@ -132,7 +128,7 @@ export default async function ItemsPage({
             sort={sort}
             linkParams={linkParams}
             rows={page.rows}
-            accounts={accountOptions}
+            accounts={accounts}
             taxCodes={taxOptions}
             categories={categoryOptions}
             currency={ctx.organization.baseCurrency}

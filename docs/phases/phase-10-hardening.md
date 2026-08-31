@@ -25,6 +25,17 @@ nothing that makes them wait without saying so.
 | 10.9 | Calendar date picker in place of the browser's date input | `components/ui/calendar.tsx`, `date-field.tsx` | ✅ |
 | 10.10 | Sortable column headers and pagination on the list screens | `components/data/sortable-header.tsx` | ✅ |
 | 10.11 | Default accounts: which account each system role posts to | `app/(app)/settings/accounts/` | ✅ |
+| 10.12 | One answer to "delete this", for every transaction type | `lib/document-disposition.ts`, `components/data/document-disposal.tsx` | ✅ |
+| 10.13 | Voiding and editing now reverse the **stock** as well as the journal | `server/accounting/inventory.ts` | ✅ |
+| 10.14 | Every account selector offers the whole chart, ordered by relevance | `lib/account-options.ts`, `components/forms/account-picker.tsx` | ✅ |
+| 10.15 | Inventory items are selectable on sales and purchase documents again | `server/services/sales-options.ts`, `purchase-options.ts` | ✅ |
+| 10.16 | Inventory and stock unified: an item is created with its stock | `components/master-data/item-dialog.tsx`, `server/services/item.service.ts` | ✅ |
+| 10.17 | Journals name their document and their counterparty, and link back | `server/services/journal-sources.ts` | ✅ |
+| 10.18 | Expenses (purchase receipts) settle on entry and stop showing a balance | `server/services/purchase.service.ts` | ✅ |
+| 10.19 | Pay Bills rebuilt: tick bills, see what is left, see the account balance | `components/purchases/bill-payment-form.tsx` | ✅ |
+| 10.20 | Fifteen new reports on one framework, and QuickBooks-style periods | `server/reports/catalogue.ts`, `lib/report-periods.ts` | ✅ |
+| 10.21 | Statements — customer, vendor and account | `app/(app)/reports/statements/[kind]/` | ✅ |
+| 10.22 | Visual system rebuilt on an Odoo-like footing | `app/globals.css`, `components/ui/` | ✅ |
 
 ## 10.1 — Nine modules, with their screens underneath
 
@@ -363,16 +374,269 @@ The purchase detail screen distinguishes them too — an item line shows its
 product and its quantity, a category line shows its account and leaves quantity
 and unit cost blank, because 1 × the amount is arithmetic nobody entered.
 
+## 10.12 — What "delete this" means
+
+Nothing could be deleted. Sales and purchase documents could be *voided* from
+their own pages; a bank transfer entered twice, a stock count against the wrong
+item, a payment to the wrong vendor — none of those had a way back at all. And a
+draft invoice raised by mistake stayed in the list for ever, because the rule
+"posted entries are immutable" had been applied to documents that were never
+posted.
+
+There are two honest answers, and which one applies is a property of the record
+rather than of the screen. `lib/document-disposition.ts` decides it in one place:
+
+| Situation | Answer | Why |
+| --- | --- | --- |
+| No journal — a draft, an estimate, a purchase order | **Delete** | The ledger has never seen it and nobody holds the number |
+| Posted | **Void** | The journal is reversed, stock comes back, the document is kept |
+| Payments or credits applied | **Blocked**, with the reason | Removing them first is a decision, not a side effect |
+| Already converted, or already void | **Blocked**, with the reason | Something else points at it |
+
+`components/data/document-disposal.tsx` is the one control, and it reads that
+function — so a screen cannot offer something the server will refuse. It is wired
+into sales documents, purchase documents, customer payments, bill payments, bank
+transfers, deposits and inventory adjustments. The last four had no disposal
+control of any kind before; transfers and deposits had no list page to put one
+on, so `/banking` now lists them.
+
+`server/services/{sales,purchase}.service.ts` gained `remove()`, which refuses
+anything the disposition says is not deletable rather than trusting the caller.
+
+## 10.13 — Voiding reversed the money but not the goods
+
+A real integrity bug, and the worst kind: silent, and it moves in one direction.
+
+Voiding a bill reversed its journal, which took the stock value back out of the
+Inventory Asset account — but the stock ledger kept the goods. The two records of
+what the business owns then disagreed, which is precisely the condition
+`stockAgreesWithLedger` exists to detect. **Editing** was the same bug one step
+worse: the new movements were added on top of the old ones, so every edit of a
+bill inflated the stock and its value.
+
+`reverseMovementsFor` undoes a document's movements with exact opposites: the
+same quantity the other way at the same unit cost, so the value removed equals
+the value the journal reversal removes, to the cent. Nothing is deleted — the
+stock ledger is append-only for the same reason the general ledger is — and the
+compensating row carries the reversing journal's id, so both ledgers tell the
+same story about the undo. Reversing *every* movement of a document, including
+compensating ones from an earlier edit, makes the document's net contribution
+zero whatever its history, which is what makes this safe to call twice.
+
+Two smaller costing bugs went with it:
+
+- A bill carrying the same item on two lines costed both at the **first** line's
+  amount, because the priced line was looked up by item id. It is matched by
+  position now.
+- An inventory adjustment could not be voided at all. It can, and doing so puts
+  the stock back exactly as it was.
+
+## 10.14 — Account selectors show the chart, not a slice of it
+
+Every account selector filtered the chart to the subtypes its screen expected. A
+business that keeps petty cash in an "Other current asset" could not pay a bill
+out of it; a business whose sales land in "Other income" could not point an item
+at it. The chart of accounts is the business's own, and a form that hides two
+thirds of it forces the wrong answer.
+
+The rule now, everywhere: **relevance is ordering, never filtering.** The
+expected accounts come first under a *Suggested* heading, the rest of the chart
+follows grouped by statement type, and every row names the kind of account it is
+— which is also searched, so typing "bank" finds the bank accounts whatever they
+happen to be called. `lib/account-options.ts` builds it; `AccountPicker` renders
+it; the payment screens add the account's balance beside the name.
+
+Three narrowings survive, all because they are accounting rules rather than
+convenience:
+
+- A **manual journal** cannot touch receivables, payables or inventory. They are
+  control accounts whose balances are the sum of a subledger, and the posting
+  engine refuses it (R7/R8) — leaving them out of the picker is kinder than
+  letting somebody choose one and be refused on submit.
+- A **transfer or deposit** is between balance-sheet accounts. Moving money to
+  "Sales" is not a transfer, it is a sale. That check moved from a list of three
+  subtype names to the statement type, which is the thing that actually matters
+  — so petty cash, mobile-money floats and director's loans all work now.
+- A **system account role** (Settings → Default accounts) still takes only
+  accounts of the right detail type. The receivables control account has to be a
+  receivables account or the ageing report cannot find it; that constraint is
+  structural, was already as loose as it can safely be, and the service enforces
+  the same rule the picker shows.
+
+## 10.15 — Inventory items had been made unsellable
+
+`sales-options.ts` and `purchase-options.ts` both carried
+`type: { not: 'INVENTORY' }` in their item query — a Phase 4 measure from before
+stock existed, never removed when Phase 7 landed. The effect was that the only
+items offered on an invoice or a bill were services and non-inventory goods, so
+a tracked product could not be sold or received through the interface at all.
+
+Both now load every active item, grouped by kind, with stock on hand shown beside
+anything tracked.
+
+## 10.16 — Inventory and stock are one thing
+
+They were two: a *Products & services* screen that created items, and an
+*Inventory* screen that valued them, with no way to get stock into a new item
+except by finding a third screen. The item dialog even said so, in a note
+explaining that there was deliberately no opening-quantity box.
+
+That was the wrong call. Stock is a property of an item, not a register kept
+beside it. Creating an inventory product now asks for its stock accounts, its
+reorder point and **what is on the shelf today** — and the opening quantity posts
+as a real movement into the inventory account against Opening Balance Equity, so
+the item is countable and sellable the moment it exists. The products list shows
+on-hand and stock value; the Inventory screen is the valuation view of the same
+records, and the module opens on the products list.
+
+## 10.17 — A journal that says what it came from
+
+A journal knew its `sourceType` and `sourceId`, so the list could say "Invoice"
+and nothing more — not which invoice, not who it was for. That is the wrong way
+round: nobody looks up a journal for its own sake. They are looking at a figure
+on a report and want to know what caused it, and the two questions they are
+actually asking are *which document* and *who*.
+
+`server/services/journal-sources.ts` resolves both, in one batch per document
+family rather than one query per row, for every source type in the system —
+including an opening balance, which now names the account or the item it opened.
+The list gained Document and Customer/vendor columns, both linked; the detail
+page names the party on every line that carries one (which is R7 paying off); and
+the search box matches a customer or vendor name as well as a journal number.
+
+## 10.18 — Expenses, or purchase receipts
+
+An expense is the purchase-side mirror of a sales receipt: bought and paid at
+once, never a payable. It was not behaving like one.
+
+- Its status stayed `OPEN` for ever, because `refreshStatus` only handled bills.
+  A settled purchase therefore appeared on every unpaid list.
+- Its outstanding balance was computed as `total − applications` — and nothing is
+  ever applied to an expense, so it read as if the whole amount were still owed.
+- The account it was paid from was never validated. A missing one surfaced as a
+  bare `Error` from the journal builder with no field to point at.
+
+All three are fixed: an expense is `PAID` the moment it posts, only a bill
+reports an outstanding balance, and the payment account is checked before
+anything is written. `/purchases/purchase-receipts` reaches the same screen,
+because half the world's accounting software uses that name for this document.
+
+## 10.19 — Pay Bills
+
+The screen now follows the order the work is actually done in — vendor, what is
+owed, tick what is being settled, say where the money comes from — and shows the
+two things somebody is actually deciding on:
+
+- **What is left after this payment**, per bill, updating as the amount is typed.
+  Paying part of a bill is normal and the next question is always "and then how
+  much is still owed?".
+- **What is in the account.** The balance sits beside the account name, so "pay
+  all" against an account that cannot cover it is a decision made before the
+  button rather than after the bounce.
+
+Bills carry their age, their original total and what has already been paid;
+ticking one fills in its balance; over-applying is refused with a reason rather
+than a silent server error. Vendor credits are listed alongside and can be
+applied to the oldest bills in one action — a credit nobody can see is a credit
+nobody uses.
+
+## 10.20 — Reports
+
+Twelve reports became twenty-seven, and the period control became the one people
+expect: Today, This week, Last week, This month, Last month, This quarter, Last
+quarter, This year, Last year, Year to date, All dates, Custom — with the year
+meaning the *fiscal* year, said in the label rather than in a footnote.
+
+The three financial statements keep their own pages, because each has a shape of
+its own. Everything else is the same object — a title, some columns, some rows, a
+total — so `server/reports/catalogue.ts` declares them as data and one page
+renders them. That is what keeps the period handling, the export link, the
+drill-down and the empty state identical across all of them, and identical when
+the next one is added. The CSV route runs the same builder, so the file cannot
+disagree with the screen.
+
+One correctness fix came with the period work: **"as at" no longer runs ahead of
+today** unless a date is typed. A period's end and the date a position is stated
+at are not the same thing — choosing "This year" in August and getting an ageing
+report as at 31 December marked every invoice not yet due as overdue, because the
+comparison was against a date four months away. The default is now the earlier of
+the period end and today, and a period wholly in the past still states its own
+end, which is what "Last year" is asked for.
+
+New: customer balances, open invoices, payments received, vendor balances,
+unpaid bills, payments made, expenses by vendor, purchases by item, product
+profitability, stock valuation, stock movements, reorder list, general ledger,
+journal report, account balances. The ageing reports gained the period control
+and a CSV export they did not have.
+
+*Product profitability* is worth a note: its cost comes from the stock ledger —
+what was actually issued, at the average it was issued at — not from the item's
+purchase price. Costing it from master data would report a margin nobody earned.
+
+## 10.21 — Statements
+
+Three kinds, one page, because they are the same document about three different
+things: a subject, a period, an opening balance, every movement in date order, a
+closing balance. Splitting them into three pages would mean three places for the
+running balance to be computed differently.
+
+- **Customer** — what they owe and what they were sent. This is the document
+  posted or emailed when somebody asks "what do I owe you?".
+- **Vendor** — the mirror, and new: `payables.vendorStatement`.
+- **Account** — every posted line on one ledger account with a running balance.
+
+Each line links to the document behind it, and the page prints as paper — the
+existing `@media print` rules strip the shell, which is also how a PDF is
+produced. A customer statement existed in `receivables.service` since Phase 4 and
+had never been rendered anywhere.
+
+## 10.22 — The visual system
+
+Odoo as the reference, and what is worth taking is not the purple — it is the
+discipline. A business application is looked at for seven hours a day by somebody
+who is not looking at *it*; they are looking at a number in it.
+
+- **The page recedes.** White panels on a soft grey ground, no drop shadows.
+  One panel is not in front of another, so there is no depth to communicate.
+- **Small corners.** 4px, not 12px. A rounded rectangle reads as an object, and a
+  table of two hundred rows is not two hundred objects.
+- **Density is the feature.** Rows, inputs and buttons at 32px rather than 36–40,
+  and a 13px base. The difference between eighteen visible rows and twenty-six is
+  the difference between scrolling and not.
+- **One accent, sparingly.** A deep plum for the primary action and for anything
+  selected; everything else grey. When one thing on screen is coloured, it does
+  not need to be loud.
+
+Applied at the token and primitive level — `globals.css`, `button`, `card`,
+`table`, `input`, `native-select`, `badge`, `combobox`, `date-field`, `dialog`,
+`dropdown-menu` — plus the shell, the sidebar, the page header and the empty and
+loading states, so it propagates rather than being re-applied screen by screen.
+Two utility classes, `.section-label` and `.panel-head`, replace a string that
+fifteen files were each declaring.
+
+What is deliberately *not* Odoo: the typography stays on the system stack,
+amounts stay tabular, and the palette keeps its own colour rather than copying a
+brand that belongs to somebody else.
+
 ## Verification
 
-`pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` — all clean. The test
-suite is unchanged by this phase: it covers the ledger, and this phase did not
-touch the ledger.
+`pnpm lint`, `pnpm typecheck`, `pnpm build` clean; `pnpm test` 292 passed in 27
+files (was 272 in 25). New tests:
 
-**Not verified:** none of this has been clicked through in a browser. The
-conversions were mechanical and are typechecked, but a keyboard trap, a clipped
-dropdown or a tab that reads as inactive on the wrong route would not show up in
-any check that has been run.
+- `lib/account-options.test.ts` — a selector never drops an account; relevance is
+  ordering; the kind is always named.
+- `lib/document-disposition.test.ts` — which of delete, void and blocked applies.
+- `tests/report-presentation.test.ts` — the new period presets, including that a
+  business week runs Monday to Sunday.
+- `tests/inventory-costing.test.ts` — reversing a document's stock: it comes out
+  at the cost it went in at, two lines of one item net to one row, calling it
+  twice still leaves nothing behind, and it lets stock go negative rather than
+  trapping a wrong bill in the books.
+
+**Not verified:** none of this has been clicked through in a browser. The stock
+reversal is covered at the level of `reverseMovementsFor`; there is still no test
+that drives `voidDocument` end to end on a bill carrying stock and then asserts
+`stockAgreesWithLedger`. That is the next test worth writing.
 
 ## What Phase 10 does not do
 

@@ -250,8 +250,8 @@ export function Combobox({
       <div
         data-invalid={aria['aria-invalid'] ? 'true' : undefined}
         className={cn(
-          'flex h-9 w-full items-center rounded-md border border-input bg-transparent shadow-xs transition-[color,box-shadow]',
-          'focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/30',
+          'flex h-8 w-full items-center rounded-md border border-input bg-card transition-[color,box-shadow]',
+          'focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25',
           'data-[invalid=true]:border-destructive data-[invalid=true]:ring-destructive/20',
           disabled && 'cursor-not-allowed opacity-50',
         )}
@@ -277,7 +277,7 @@ export function Combobox({
           onFocus={openList}
           onClick={openList}
           onKeyDown={onKeyDown}
-          className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground"
+          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[0.8125rem] outline-none placeholder:text-muted-foreground"
         />
 
         <button
@@ -286,7 +286,7 @@ export function Combobox({
           disabled={disabled}
           aria-label={open ? 'Close the list' : 'Open the list'}
           onClick={() => (open ? close() : openList())}
-          className="grid h-full w-9 shrink-0 place-items-center border-l text-muted-foreground"
+          className="grid h-full w-8 shrink-0 place-items-center border-l text-muted-foreground"
         >
           <ChevronDownIcon className={cn('size-4 transition-transform', open && 'rotate-180')} />
         </button>
@@ -304,7 +304,7 @@ export function Combobox({
                 width: Math.max(anchor.width, 224),
               }}
               className={cn(
-                'z-[60] overflow-hidden rounded-md border bg-popover shadow-md',
+                'z-[60] overflow-hidden rounded-md border bg-popover shadow-lg',
                 'animate-in fade-in-0 zoom-in-95',
               )}
             >

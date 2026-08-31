@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 import { readSettings, type SearchParams } from '@/app/(app)/reports/params'
 import { formatDate } from '@/lib/date'
 import { PERIOD_LABELS } from '@/lib/report-periods'
-import { requireOrgContext } from '@/server/auth/context'
+import { requireOrgContext, type OrgContext } from '@/server/auth/context'
 import { isAppError } from '@/server/errors'
 import { csvResponse, type CsvCell } from '@/server/reports/csv'
 import {
@@ -13,6 +13,9 @@ import {
   salesByItem,
   taxSummary,
 } from '@/server/reports/business'
+import { tableReport } from '@/server/reports/catalogue'
+import { AGING_BUCKETS, BUCKET_LABELS, aging as receivablesAging } from '@/server/services/receivables.service'
+import { aging as payablesAging } from '@/server/services/payables.service'
 import { balanceSheet, cashFlow, profitAndLoss } from '@/server/reports/statements'
 
 export const dynamic = 'force-dynamic'
@@ -26,6 +29,8 @@ const REPORTS = [
   'purchases-by-vendor',
   'expenses-by-category',
   'tax-summary',
+  'ar-aging',
+  'ap-aging',
 ] as const
 
 type ReportKey = (typeof REPORTS)[number]
@@ -40,13 +45,48 @@ type ReportKey = (typeof REPORTS)[number]
 export async function GET(request: Request, { params }: { params: Promise<{ report: string }> }) {
   try {
     const { report } = await params
-    if (!REPORTS.includes(report as ReportKey)) {
+    const fromCatalogue = tableReport(report)
+
+    if (!fromCatalogue && !REPORTS.includes(report as ReportKey)) {
       return NextResponse.json({ error: { code: 'NOT_FOUND', message: 'Unknown report.' } }, { status: 404 })
     }
 
     const ctx = await requireOrgContext('report:read')
     const query = Object.fromEntries(new URL(request.url).searchParams) as SearchParams
     const settings = readSettings(query, ctx.organization)
+
+    // A table report is the same builder the page used, flattened. One
+    // implementation, so the file and the screen cannot disagree.
+    if (fromCatalogue) {
+      const table = await fromCatalogue.build({
+        ctx,
+        range: settings.range,
+        asOf: settings.asOf,
+      })
+
+      const rows: CsvCell[][] = [
+        [ctx.organization.name],
+        [fromCatalogue.title],
+        [
+          fromCatalogue.mode === 'asOf'
+            ? `As at ${formatDate(settings.asOf)}`
+            : `${formatDate(settings.range.from)} to ${formatDate(settings.range.to)}${
+                settings.period === 'custom' ? '' : ` (${PERIOD_LABELS[settings.period]})`
+              }`,
+        ],
+        [`Currency: ${ctx.organization.baseCurrency}`],
+        [],
+        table.columns.map((column) => column.label),
+        ...table.rows.map((row) => table.columns.map((column) => row.cells[column.key] ?? '')),
+      ]
+
+      if (table.totals) {
+        rows.push([])
+        rows.push(table.columns.map((column) => table.totals?.[column.key] ?? ''))
+      }
+
+      return csvResponse(`${report}-${settings.range.to}.csv`, rows)
+    }
 
     const heading = (title: string): CsvCell[][] => [
       [ctx.organization.name],
@@ -62,7 +102,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ repo
       [],
     ]
 
-    const rows = await build(report as ReportKey, ctx.orgId, settings, heading)
+    const rows = await build(report as ReportKey, ctx.orgId, settings, heading, ctx)
     return csvResponse(`${report}-${settings.range.to}.csv`, rows)
   } catch (error) {
     if (isAppError(error)) {
@@ -78,6 +118,7 @@ async function build(
   orgId: string,
   settings: ReturnType<typeof readSettings>,
   heading: (title: string) => CsvCell[][],
+  ctx: OrgContext,
 ): Promise<CsvCell[][]> {
   switch (report) {
     case 'profit-loss': {
@@ -150,6 +191,37 @@ async function build(
       rows.push(['', 'Net change in cash', data.netChange])
       rows.push(['', 'Cash at the start of the period', data.openingCash])
       rows.push(['', 'Cash at the end of the period', data.closingCash])
+      return rows
+    }
+
+    case 'ar-aging':
+    case 'ap-aging': {
+      const receivable = report === 'ar-aging'
+      const data = receivable
+        ? await receivablesAging(ctx, settings.asOf)
+        : await payablesAging(ctx, settings.asOf)
+
+      const rows: CsvCell[][] = heading(
+        receivable ? 'Accounts receivable ageing' : 'Accounts payable ageing',
+      )
+      rows.push([receivable ? 'Customer' : 'Vendor', ...AGING_BUCKETS.map((b) => BUCKET_LABELS[b]), 'Total'])
+
+      for (const row of data.rows) {
+        rows.push([
+          'customerName' in row ? row.customerName : row.vendorName,
+          ...AGING_BUCKETS.map((bucket) => row.buckets[bucket]),
+          row.total,
+        ])
+      }
+
+      rows.push([])
+      rows.push(['Total', ...AGING_BUCKETS.map((bucket) => data.totals[bucket]), data.grandTotal])
+      rows.push([])
+      rows.push([
+        data.agrees
+          ? 'Agrees with the control account.'
+          : `Does NOT agree with the control account (${data.controlBalance.toFixed(2)}).`,
+      ])
       return rows
     }
 

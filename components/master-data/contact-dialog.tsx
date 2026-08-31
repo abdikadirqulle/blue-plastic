@@ -6,6 +6,7 @@ import { PlusIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -15,6 +16,7 @@ import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import { Separator } from '@/components/ui/separator'
+import type { AccountPickerOption } from '@/lib/account-options'
 import {
   createCustomerForm,
   createVendorForm,
@@ -54,7 +56,7 @@ export type Option = { id: string; label: string }
 export function NewContactButton(props: {
   side: ContactSide
   terms: Option[]
-  expenseAccounts?: Option[]
+  expenseAccounts?: AccountPickerOption[]
   today: string
   currency: string
 }) {
@@ -87,7 +89,7 @@ export function ContactDialog({
   mode: 'create' | 'edit'
   contact?: ContactValues
   terms: Option[]
-  expenseAccounts?: Option[]
+  expenseAccounts?: AccountPickerOption[]
   today: string
   currency: string
   onClose: () => void
@@ -108,6 +110,9 @@ export function ContactDialog({
 
   const [state, submit] = useActionState(formAction, idleState)
   const [openingBalanceDate, setOpeningBalanceDate] = useState(today)
+  const [defaultExpenseAccountId, setDefaultExpenseAccountId] = useState(
+    contact?.defaultExpenseAccountId ?? '',
+  )
   const handled = useRef(false)
 
   useEffect(() => {
@@ -286,17 +291,16 @@ export function ContactDialog({
               hint="Pre-selected on a bill, so routine spending is categorised the same way every time."
               error={e?.defaultExpenseAccountId}
             >
-              <NativeSelect
-                {...fieldProps('defaultExpenseAccountId', e?.defaultExpenseAccountId, true)}
-                defaultValue={contact?.defaultExpenseAccountId ?? ''}
-              >
-                <option value="">— none —</option>
-                {expenseAccounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.label}
-                  </option>
-                ))}
-              </NativeSelect>
+              <AccountPicker
+                id="defaultExpenseAccountId"
+                name="defaultExpenseAccountId"
+                options={expenseAccounts}
+                value={defaultExpenseAccountId || null}
+                onChange={(next) => setDefaultExpenseAccountId(next ?? '')}
+                placeholder="— none —"
+                clearable
+                error={e?.defaultExpenseAccountId}
+              />
             </Field>
           )}
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { Decimal } from '@/lib/money'
-import { priorPeriod, priorYear, resolvePeriod } from '@/lib/report-periods'
+import { EARLIEST_DATE, priorPeriod, priorYear, resolvePeriod } from '@/lib/report-periods'
 import { toCsv } from '@/server/reports/csv'
 
 /**
@@ -18,6 +18,18 @@ describe('report periods', () => {
     expect(resolvePeriod('this-fiscal-year', today, 1)).toEqual({ from: '2026-01-01', to: '2026-12-31' })
     expect(resolvePeriod('last-fiscal-year', today, 1)).toEqual({ from: '2025-01-01', to: '2025-12-31' })
     expect(resolvePeriod('year-to-date', today, 1)).toEqual({ from: '2026-01-01', to: '2026-08-29' })
+  })
+
+  it('resolves the short presets', () => {
+    // 2026-08-29 is a Saturday, so the business week it belongs to is
+    // Monday 24 August to Sunday 30 August.
+    expect(resolvePeriod('today', today, 1)).toEqual({ from: '2026-08-29', to: '2026-08-29' })
+    expect(resolvePeriod('this-week', today, 1)).toEqual({ from: '2026-08-24', to: '2026-08-30' })
+    expect(resolvePeriod('last-week', today, 1)).toEqual({ from: '2026-08-17', to: '2026-08-23' })
+  })
+
+  it('takes "all dates" back further than any set of books reaches', () => {
+    expect(resolvePeriod('all-dates', today, 1)).toEqual({ from: EARLIEST_DATE, to: today })
   })
 
   it('runs quarters from the start of the fiscal year, not from January', () => {

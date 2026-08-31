@@ -96,13 +96,24 @@ export async function GET(request: Request, { params }: { params: Promise<{ list
       case 'journals': {
         const page = await journalService.list(ctx, { ...ALL, q }, { sort, dir })
         const rows: CsvCell[][] = heading('Journal entries')
-        rows.push(['Entry', 'Date', 'Description', 'Source', 'Status', 'Amount'])
+        rows.push([
+          'Entry',
+          'Date',
+          'Description',
+          'Source',
+          'Document',
+          'Customer / vendor',
+          'Status',
+          'Amount',
+        ])
         for (const row of page.rows) {
           rows.push([
             row.journalNumber,
             toCalendarDate(row.date),
             row.memo ?? '',
             row.sourceType,
+            row.source.number ?? '',
+            row.source.partyName ?? '',
             row.status,
             row.total,
           ])

@@ -131,8 +131,8 @@ export function DateField({
       <div
         data-invalid={invalid ? 'true' : undefined}
         className={cn(
-          'flex h-9 w-full items-center rounded-md border border-input bg-transparent shadow-xs transition-[color,box-shadow]',
-          'focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/30',
+          'flex h-8 w-full items-center rounded-md border border-input bg-card transition-[color,box-shadow]',
+          'focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25',
           'data-[invalid=true]:border-destructive data-[invalid=true]:ring-destructive/20',
           disabled && 'cursor-not-allowed opacity-50',
         )}
@@ -157,7 +157,7 @@ export function DateField({
               setOpen(false)
             }
           }}
-          className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm outline-none placeholder:text-muted-foreground"
+          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[0.8125rem] outline-none placeholder:text-muted-foreground"
           placeholder="Choose a date"
         />
 
@@ -167,9 +167,9 @@ export function DateField({
           disabled={disabled}
           aria-label={open ? 'Close the calendar' : 'Open the calendar'}
           onClick={() => setOpen((wasOpen) => !wasOpen)}
-          className="grid h-full w-9 shrink-0 place-items-center border-l text-muted-foreground"
+          className="grid h-full w-8 shrink-0 place-items-center border-l text-muted-foreground"
         >
-          <CalendarIcon className="size-4" />
+          <CalendarIcon className="size-3.5" />
         </button>
       </div>
 

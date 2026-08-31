@@ -8,7 +8,7 @@ import { buttonVariants } from '@/components/ui/button'
 import { today } from '@/lib/date'
 import { requireOrgContext } from '@/server/auth/context'
 import { loadPurchaseOptions } from '@/server/services/purchase-options'
-import { openBillsForVendor } from '@/app/(app)/purchases/actions'
+import { vendorPayables } from '@/app/(app)/purchases/actions'
 
 export const metadata: Metadata = { title: 'Pay bills' }
 
@@ -24,7 +24,7 @@ export default async function NewBillPaymentPage() {
 
       <PageHeader
         title="Pay bills"
-        description="Money out, payables down. Tick what you are settling — one payment can cover several bills."
+        description="Money out, payables down. Tick what you are settling — one payment can cover several bills — and the account you are paying from shows what it holds."
       />
 
       <BillPaymentForm
@@ -32,7 +32,7 @@ export default async function NewBillPaymentPage() {
         paymentAccounts={options.paymentAccounts}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
-        loadOpenBills={openBillsForVendor}
+        loadPayables={vendorPayables}
       />
     </>
   )

@@ -80,7 +80,12 @@ export const MODULES: NavModule[] = [
     owns: ['/purchases', '/bill-payments', '/vendors'],
     tabs: [
       { label: 'Bills', href: '/purchases/bills', permission: 'bill:read' },
-      { label: 'Expenses', href: '/purchases/expenses', permission: 'expense:read' },
+      {
+        label: 'Expenses & receipts',
+        href: '/purchases/expenses',
+        permission: 'expense:read',
+        also: ['/purchases/purchase-receipts'],
+      },
       { label: 'Vendor credits', href: '/purchases/vendor-credits', permission: 'bill:read' },
       { label: 'Purchase orders', href: '/purchases/purchase-orders', permission: 'bill:read' },
       { label: 'Bill payments', href: '/bill-payments', permission: 'expense:read' },
@@ -107,18 +112,19 @@ export const MODULES: NavModule[] = [
   {
     key: 'inventory',
     label: 'Inventory',
-    href: '/inventory',
+    // The products list is the front door. Stock is a *property of an item*, not
+    // a separate register kept beside it: an inventory product is created with
+    // its opening quantity, its accounts and its reorder point in one dialog,
+    // and the list shows what is on hand. "Stock on hand" is then the valuation
+    // view of the same records — not a different system with its own vocabulary.
+    href: '/items',
     icon: PackageIcon,
-    permission: 'inventory:read',
+    permission: 'item:read',
     owns: ['/inventory', '/items'],
     tabs: [
-      { label: 'Stock on hand', href: '/inventory', permission: 'inventory:read' },
-      // Items are what is sold, so Sales has a claim on them — but they are also
-      // what is counted, valued and reordered, which is more of the work. One
-      // module has to own the route, or the tab row changes under the user when
-      // they click it.
       { label: 'Products & services', href: '/items', permission: 'item:read' },
-      { label: 'New adjustment', href: '/inventory/adjustments/new', permission: 'inventory:adjust' },
+      { label: 'Stock on hand', href: '/inventory', permission: 'inventory:read' },
+      { label: 'Adjust stock', href: '/inventory/adjustments/new', permission: 'inventory:adjust' },
     ],
   },
   {
@@ -142,13 +148,17 @@ export const MODULES: NavModule[] = [
     permission: 'report:read',
     owns: ['/reports'],
     preserveQuery: true,
+    // The sidebar lists the handful people open daily. Everything else — and
+    // there are now thirty of them — lives on the index, grouped by the question
+    // it answers, which is a better way to find one than a list of names.
     tabs: [
       { label: 'All reports', href: '/reports' },
       { label: 'Profit & loss', href: '/reports/profit-loss' },
       { label: 'Balance sheet', href: '/reports/balance-sheet' },
       { label: 'Cash flow', href: '/reports/cash-flow' },
       { label: 'Trial balance', href: '/reports/trial-balance' },
-      { label: 'Adjusting entries', href: '/reports/adjusting-entries' },
+      { label: 'Statements', href: '/reports/statements/customer', also: ['/reports/statements'] },
+      { label: 'General ledger', href: '/reports/general-ledger' },
     ],
   },
   {

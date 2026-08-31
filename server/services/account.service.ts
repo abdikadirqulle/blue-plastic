@@ -1,6 +1,7 @@
 import 'server-only'
 import type { AccountType, Prisma } from '@prisma/client'
 
+import type { AccountChoice } from '@/lib/account-options'
 import { Decimal, toMoneyString } from '@/lib/money'
 import { today } from '@/lib/date'
 import type { AccountCreateInput, AccountUpdateInput } from '@/lib/validation/accounting'
@@ -365,3 +366,32 @@ async function assertParentIsUsable(
 }
 
 const isDebitNormal = (type: AccountType) => type === 'ASSET' || type === 'EXPENSE'
+
+/**
+ * The chart as a picker offers it: every postable account, with its kind and —
+ * when asked — its balance as at today.
+ *
+ * One loader for every account selector in the application. Screens say which
+ * accounts they *expect* by ordering (`lib/account-options.ts`); none of them
+ * filters the chart down, because an account the business created and cannot
+ * choose is worse than no account at all.
+ */
+export async function selectableAccounts(
+  ctx: OrgContext,
+  options: { withBalances?: boolean } = {},
+): Promise<AccountChoice[]> {
+  const accounts = await postableAccounts(ctx)
+
+  const balances = options.withBalances
+    ? await balancesAsOf(ctx.orgId, today(ctx.organization.timeZone))
+    : null
+
+  return accounts.map((account) => ({
+    id: account.id,
+    code: account.code,
+    name: account.name,
+    type: account.type,
+    subtype: account.subtype,
+    balance: balances ? toMoneyString(balances.get(account.id)?.natural ?? 0, 2) : null,
+  }))
+}

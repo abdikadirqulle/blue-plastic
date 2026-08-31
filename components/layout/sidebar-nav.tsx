@@ -45,7 +45,7 @@ export function SidebarNav({
   }
 
   return (
-    <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-4">
+    <nav className="flex flex-1 flex-col gap-px overflow-y-auto px-2 py-2.5">
       {MODULES.filter((entry) => allowedModules.has(entry.key)).map((entry) => {
         const active = current?.key === entry.key
         const Icon = entry.icon
@@ -62,7 +62,7 @@ export function SidebarNav({
                 'flex items-center rounded-md transition-colors',
                 active
                   ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                  : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/60',
+                  : 'text-sidebar-foreground/85 hover:bg-sidebar-accent/50',
               )}
             >
               <Link
@@ -74,9 +74,12 @@ export function SidebarNav({
                   onNavigate?.()
                 }}
                 aria-current={active && !activeTab ? 'page' : undefined}
-                className={cn('flex min-w-0 flex-1 items-center gap-2.5 px-2 py-2 text-sm', active && 'font-medium')}
+                className={cn(
+                  'flex min-w-0 flex-1 items-center gap-2.5 px-2 py-1.5 text-[0.8125rem]',
+                  active && 'font-semibold',
+                )}
               >
-                <Icon className="size-4 shrink-0" />
+                <Icon className="size-4 shrink-0 opacity-80" />
                 <span className="truncate">{entry.label}</span>
               </Link>
 
@@ -88,7 +91,7 @@ export function SidebarNav({
                   // The chevron only opens and closes. It never navigates, which
                   // is what makes it worth having next to a link that does.
                   onClick={() => setOpened(expanded ? '' : entry.key)}
-                  className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground hover:text-foreground"
+                  className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground hover:text-foreground"
                 >
                   <ChevronRightIcon
                     className={cn('size-3.5 transition-transform', expanded && 'rotate-90')}
@@ -100,7 +103,7 @@ export function SidebarNav({
             {expanded ? (
               // Indented against a rule, so the list reads as belonging to the
               // module above it rather than as more top-level entries.
-              <ul className="my-0.5 ml-[1.4rem] space-y-0.5 border-l pl-2">
+              <ul className="my-px ml-[1.4rem] space-y-px border-l pl-2">
                 {children.map((tab) => {
                   const isActive = activeTab?.href === tab.href
                   return (
@@ -110,10 +113,10 @@ export function SidebarNav({
                         onClick={onNavigate}
                         aria-current={isActive ? 'page' : undefined}
                         className={cn(
-                          'block truncate rounded-md px-2 py-1.5 text-sm transition-colors',
+                          'block truncate rounded-md px-2 py-1 text-[0.8125rem] transition-colors',
                           isActive
-                            ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground'
-                            : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-accent-foreground',
+                            ? 'bg-sidebar-accent font-semibold text-sidebar-accent-foreground'
+                            : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/40 hover:text-sidebar-accent-foreground',
                         )}
                       >
                         {tab.label}

@@ -75,6 +75,7 @@ export async function listTransfers(ctx: OrgContext, query: ListQuery) {
       where,
       select: {
         id: true, number: true, date: true, amount: true, memo: true, reference: true, status: true,
+        journalId: true,
         fromAccount: { select: { id: true, code: true, name: true } },
         toAccount: { select: { id: true, code: true, name: true } },
       },
@@ -182,6 +183,7 @@ export async function listDeposits(ctx: OrgContext, query: ListQuery) {
       where,
       select: {
         id: true, number: true, date: true, total: true, memo: true, status: true,
+        journalId: true,
         bankAccount: { select: { id: true, code: true, name: true } },
         _count: { select: { lines: true } },
       },
@@ -198,7 +200,7 @@ export async function createDeposit(ctx: OrgContext, input: DepositInput) {
   const meta = await requestMeta()
 
   return db.$transaction(async (tx) => {
-    const bank = await requireMoneyAccount(tx, ctx, input.bankAccountId, ['BANK'])
+    const bank = await requireMoneyAccount(tx, ctx, input.bankAccountId)
     const undeposited = await systemAccountId(tx, ctx.orgId, 'UNDEPOSITED_FUNDS')
 
     const payments = input.paymentIds.length
@@ -387,22 +389,34 @@ async function voidBankDocument(
   })
 }
 
-async function requireMoneyAccount(
-  tx: Tx,
-  ctx: OrgContext,
-  accountId: string,
-  allowed: string[] = ['BANK', 'CREDIT_CARD', 'UNDEPOSITED_FUNDS'],
-) {
+/**
+ * Which accounts a transfer or a deposit may touch.
+ *
+ * Any account the business holds money in — not just the three subtypes the
+ * chart happens to call BANK, CREDIT_CARD and UNDEPOSITED_FUNDS. Petty cash kept
+ * in an "Other current asset", a director's loan repaid out of the bank, a
+ * mobile-money float: all of these are real, and a form that refuses them forces
+ * the entry to be made as a journal instead, where nothing checks it.
+ *
+ * What is still refused is income, expense and equity. Moving money to "Sales"
+ * is not a transfer — it is a sale, and recording it as a transfer would leave
+ * the profit and loss wrong. So the rule is stated by *statement type*, which is
+ * the thing that actually matters, rather than by a list of subtype names.
+ */
+async function requireMoneyAccount(tx: Tx, ctx: OrgContext, accountId: string) {
   const account = await tx.ledgerAccount.findFirst({
     where: { id: accountId, orgId: ctx.orgId, isActive: true },
-    select: { id: true, name: true, code: true, subtype: true },
+    select: { id: true, name: true, code: true, subtype: true, type: true },
   })
   if (!account) throw notFound('Account')
-  if (!allowed.includes(account.subtype)) {
+
+  if (account.type !== 'ASSET' && account.type !== 'LIABILITY') {
     throw validation(
-      `"${account.name}" is not a ${allowed.includes('CREDIT_CARD') ? 'bank, credit card or undeposited funds' : 'bank'} account.`,
+      `"${account.name}" is an ${account.type.toLowerCase()} account. Money cannot be transferred into or out of one — ` +
+        `that would be income or a cost, not a movement between the business's own accounts.`,
     )
   }
+
   return account
 }
 

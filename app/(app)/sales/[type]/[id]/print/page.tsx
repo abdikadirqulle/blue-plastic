@@ -43,7 +43,7 @@ export default async function PrintDocumentPage({
         <PrintButton />
       </div>
 
-      <article className="rounded-lg border bg-card p-8 print:border-0 print:p-0 print:shadow-none">
+      <article className="rounded-md border bg-card p-8 print:border-0 print:p-0 print:shadow-none">
         <header className="flex flex-wrap items-start justify-between gap-6 border-b pb-6">
           <div>
             <h1 className="text-lg font-semibold">{organization.legalName ?? organization.name}</h1>

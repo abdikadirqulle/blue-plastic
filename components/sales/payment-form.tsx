@@ -6,6 +6,7 @@ import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { EntityPicker } from '@/components/forms/entity-picker'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -13,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { NativeSelect } from '@/components/ui/native-select'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
@@ -38,7 +40,7 @@ export function PaymentForm({
   loadOpenInvoices,
 }: {
   customers: Option[]
-  depositAccounts: Option[]
+  depositAccounts: AccountPickerOption[]
   today: string
   currency: string
   loadOpenInvoices: (customerId: string) => Promise<OpenInvoice[]>
@@ -188,18 +190,15 @@ export function PaymentForm({
               required
               error={state.fieldErrors?.depositAccountId}
             >
-              <NativeSelect
-                {...fieldProps('depositAccountId', state.fieldErrors?.depositAccountId, true)}
-                value={depositAccountId}
-                onChange={(event) => setDepositAccountId(event.target.value)}
+              <AccountPicker
+                id="depositAccountId"
+                name="depositAccountId"
+                options={depositAccounts}
+                value={depositAccountId || null}
+                onChange={(next) => setDepositAccountId(next ?? '')}
                 required
-              >
-                {depositAccounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.label}
-                  </option>
-                ))}
-              </NativeSelect>
+                error={state.fieldErrors?.depositAccountId}
+              />
             </Field>
 
             <Field name="reference" label="Reference" error={state.fieldErrors?.reference}>
@@ -224,7 +223,7 @@ export function PaymentForm({
 
       {customerId ? (
         <Card className="overflow-hidden p-0">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-3 py-2">
+          <div className="panel-head">
             <span className="text-sm font-semibold">Outstanding invoices</span>
             <Button type="button" variant="outline" size="sm" onClick={autoApply} disabled={invoices.length === 0}>
               Apply oldest first

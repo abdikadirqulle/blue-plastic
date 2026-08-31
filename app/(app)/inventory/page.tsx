@@ -9,7 +9,9 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { DisposeButton } from '@/components/data/document-disposal'
 import { formatDate, toCalendarDate } from '@/lib/date'
+import { dispositionOf } from '@/lib/document-disposition'
 import { formatMoney, ZERO } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
 import * as inventoryService from '@/server/services/inventory.service'
@@ -58,7 +60,7 @@ export default async function InventoryPage({
     <>
       <PageHeader
         title="Inventory"
-        description="Stock on hand at weighted-average cost. Selling a tracked item moves the stock and posts its cost in the same entry as the sale."
+        description="The valuation view of the tracked products. Same records as Products &amp; services — this is what they are worth, at weighted-average cost, and whether the stock ledger agrees with the Inventory Asset account."
         actions={
           canAdjust ? (
             <Link href="/inventory/adjustments/new" className={buttonVariants({ size: 'sm' })}>
@@ -72,7 +74,7 @@ export default async function InventoryPage({
         <EmptyState
           icon={PackageIcon}
           title="No tracked items yet"
-          description="Create a product with the Inventory type, giving it an inventory account and a cost of goods sold account. It will appear here as soon as some is received."
+          description="Create a product with the Inventory type. The dialog asks for its stock accounts, its reorder point and what is on the shelf today, so it lands here already counted."
           action={
             <Link href="/items" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
               Products and services
@@ -111,15 +113,18 @@ export default async function InventoryPage({
               <CardContent className="flex items-start gap-2.5 p-4 text-sm">
                 <PackageIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                 <span className="text-muted-foreground">
-                  <strong className="text-foreground">Nothing has been received yet.</strong> A tracked item
-                  starts at zero and there is no opening-quantity box: stock only exists where the ledger
-                  says it does. Put stock in by{' '}
-                  <Link href="/purchases/bills/new" className="underline underline-offset-4">
-                    entering the bill
+                  <strong className="text-foreground">Nothing has been received yet.</strong> Stock only
+                  exists where the ledger says it does, so it arrives one of three ways: the{' '}
+                  <Link href="/items" className="underline underline-offset-4">
+                    opening quantity
                   </Link>{' '}
-                  you bought it on, or — for books that already have stock —{' '}
+                  entered when the product was created,{' '}
+                  <Link href="/purchases/bills/new" className="underline underline-offset-4">
+                    the bill
+                  </Link>{' '}
+                  you bought it on, or{' '}
                   <Link href="/inventory/adjustments/new" className="underline underline-offset-4">
-                    recording the count as an adjustment
+                    a count recorded as an adjustment
                   </Link>
                   .
                 </span>
@@ -245,12 +250,20 @@ export default async function InventoryPage({
                 <TableHead className="numeric w-20">Items</TableHead>
                 <TableHead className="numeric w-32">Value change</TableHead>
                 <TableHead className="w-28">Entry</TableHead>
+                <TableHead className="w-24 print:hidden" />
               </TableRow>
             </TableHeader>
             <TableBody>
               {adjustments.map((adjustment) => (
                 <TableRow key={adjustment.id}>
-                  <TableCell className="tabular font-medium">{adjustment.number}</TableCell>
+                  <TableCell className="tabular font-medium">
+                    {adjustment.number}
+                    {adjustment.status === 'VOID' ? (
+                      <Badge variant="destructive" className="ml-2">
+                        void
+                      </Badge>
+                    ) : null}
+                  </TableCell>
                   <TableCell className="tabular whitespace-nowrap text-muted-foreground">
                     {formatDate(toCalendarDate(adjustment.date))}
                   </TableCell>
@@ -270,6 +283,20 @@ export default async function InventoryPage({
                     ) : (
                       '—'
                     )}
+                  </TableCell>
+                  <TableCell className="print:hidden">
+                    {canAdjust ? (
+                      <DisposeButton
+                        kind="inventory-adjustment"
+                        id={adjustment.id}
+                        number={adjustment.number}
+                        variant="ghost"
+                        disposition={dispositionOf({
+                          status: adjustment.status,
+                          journalId: adjustment.journalId,
+                        })}
+                      />
+                    ) : null}
                   </TableCell>
                 </TableRow>
               ))}

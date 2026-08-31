@@ -60,6 +60,16 @@ export const voidPurchase = action
     return document
   })
 
+/** Delete a draft or a purchase order. Anything posted is voided instead. */
+export const deletePurchase = action
+  .requires('bill:void')
+  .input(z.object({ id: cuid }))
+  .handler(async (ctx, input) => {
+    const document = await purchaseService.remove(ctx, input.id)
+    revalidatePurchases()
+    return document
+  })
+
 export const convertOrder = action
   .requires('bill:create')
   .input(convertOrderSchema)
@@ -96,21 +106,43 @@ export const voidBillPayment = action
     return payment
   })
 
-/** Which bills a vendor still has open, for the payment screen. */
-export async function openBillsForVendor(vendorId: string) {
+/**
+ * What a vendor has outstanding, for the payment screen.
+ *
+ * Bills and credits come back together in one round trip: they are the two ways
+ * a bill gets settled, and fetching them separately would show the bills first
+ * and the credits a moment later, which is exactly when somebody pays cash for
+ * something a credit already covers.
+ */
+export async function vendorPayables(vendorId: string) {
   const ctx = await requireOrgContext('expense:create')
   const parsed = z.object({ vendorId: cuid }).safeParse({ vendorId })
-  if (!parsed.success) return []
+  if (!parsed.success) return { bills: [], credits: [] }
 
-  const bills = await billPaymentService.openBillsFor(ctx, parsed.data.vendorId)
-  return bills.map((bill) => ({
-    id: bill.id,
-    number: bill.number,
-    reference: bill.reference,
-    date: bill.date.toISOString(),
-    dueDate: bill.dueDate?.toISOString() ?? null,
-    balance: bill.balance,
-  }))
+  const [bills, credits] = await Promise.all([
+    billPaymentService.openBillsFor(ctx, parsed.data.vendorId),
+    billPaymentService.openCreditsFor(ctx, parsed.data.vendorId),
+  ])
+
+  return {
+    bills: bills.map((bill) => ({
+      id: bill.id,
+      number: bill.number,
+      reference: bill.reference,
+      date: bill.date.toISOString(),
+      dueDate: bill.dueDate?.toISOString() ?? null,
+      total: bill.total,
+      paid: bill.paid,
+      balance: bill.balance,
+      daysOverdue: bill.daysOverdue,
+    })),
+    credits: credits.map((credit) => ({
+      id: credit.id,
+      number: credit.number,
+      date: credit.date.toISOString(),
+      remaining: credit.remaining,
+    })),
+  }
 }
 
 /* --- Form adapters -------------------------------------------------------- */

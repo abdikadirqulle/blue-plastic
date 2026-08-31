@@ -6,14 +6,22 @@ import { PageHeader } from '@/components/data/page-header'
 import { TransferForm } from '@/components/banking/transfer-form'
 import { buttonVariants } from '@/components/ui/button'
 import { today } from '@/lib/date'
+import { accountOptions } from '@/lib/account-options'
 import { requireOrgContext } from '@/server/auth/context'
-import * as bankingService from '@/server/services/banking.service'
+import * as accountService from '@/server/services/account.service'
 
 export const metadata: Metadata = { title: 'Transfer' }
 
 export default async function NewTransferPage() {
   const ctx = await requireOrgContext('bank:transact')
-  const accounts = await bankingService.bankAccounts(ctx)
+  // Every balance-sheet account, money accounts first. A transfer is a movement
+  // between the business's own accounts, and which of them count as "money" is
+  // the business's decision, not a fixed list of three subtypes.
+  const chart = await accountService.selectableAccounts(ctx, { withBalances: true })
+  const accounts = accountOptions(
+    chart.filter((account) => account.type === 'ASSET' || account.type === 'LIABILITY'),
+    { prefer: ['BANK', 'CREDIT_CARD', 'UNDEPOSITED_FUNDS', 'OTHER_CURRENT_ASSET'], showBalance: true },
+  )
 
   return (
     <>
@@ -27,7 +35,7 @@ export default async function NewTransferPage() {
       />
 
       <TransferForm
-        accounts={accounts.map((a) => ({ id: a.id, label: `${a.code} ${a.name}` }))}
+        accounts={accounts}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
       />

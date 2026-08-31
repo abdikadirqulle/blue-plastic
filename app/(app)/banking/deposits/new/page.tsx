@@ -5,6 +5,7 @@ import { ArrowLeftIcon } from 'lucide-react'
 import { PageHeader } from '@/components/data/page-header'
 import { DepositForm } from '@/components/banking/deposit-form'
 import { buttonVariants } from '@/components/ui/button'
+import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { requireOrgContext } from '@/server/auth/context'
 import * as accountService from '@/server/services/account.service'
@@ -15,11 +16,21 @@ export const metadata: Metadata = { title: 'Make a deposit' }
 export default async function NewDepositPage() {
   const ctx = await requireOrgContext('bank:transact')
 
-  const [accounts, payments, allAccounts] = await Promise.all([
-    bankingService.bankAccounts(ctx),
+  const [payments, chart] = await Promise.all([
     bankingService.undepositedPayments(ctx),
-    accountService.postableAccounts(ctx),
+    accountService.selectableAccounts(ctx, { withBalances: true }),
   ])
+
+  // Deposit *to* any account the business banks into; the rest of the chart is
+  // still there. The other side of the slip — interest, a refund, an owner's
+  // injection — can come from anywhere at all.
+  const bankAccounts = accountOptions(
+    chart.filter((account) => account.type === 'ASSET' || account.type === 'LIABILITY'),
+    { prefer: ['BANK', 'UNDEPOSITED_FUNDS', 'OTHER_CURRENT_ASSET'], showBalance: true },
+  )
+  const otherAccounts = accountOptions(chart, {
+    preferTypes: ['REVENUE', 'EQUITY'],
+  })
 
   return (
     <>
@@ -33,10 +44,8 @@ export default async function NewDepositPage() {
       />
 
       <DepositForm
-        bankAccounts={accounts
-          .filter((a) => a.subtype === 'BANK')
-          .map((a) => ({ id: a.id, label: `${a.code} ${a.name}` }))}
-        otherAccounts={allAccounts.map((a) => ({ id: a.id, label: `${a.code} ${a.name}` }))}
+        bankAccounts={bankAccounts}
+        otherAccounts={otherAccounts}
         payments={payments.map((payment) => ({
           id: payment.id,
           number: payment.number,

@@ -16,6 +16,9 @@ import {
  * controls need to agree on what "last quarter" means.
  */
 export type PeriodKey =
+  | 'today'
+  | 'this-week'
+  | 'last-week'
   | 'this-month'
   | 'last-month'
   | 'this-quarter'
@@ -23,17 +26,46 @@ export type PeriodKey =
   | 'this-fiscal-year'
   | 'last-fiscal-year'
   | 'year-to-date'
+  | 'all-dates'
   | 'custom'
 
+/**
+ * Listed in the order somebody looks for them: the short periods first, then
+ * the long ones, then everything, then a date range of their own.
+ *
+ * "This year" means the *fiscal* year, because that is the year the business's
+ * accounts are drawn up for. Saying so in the label rather than in a footnote
+ * avoids the January surprise for a business whose year starts in April.
+ */
 export const PERIOD_LABELS: Record<PeriodKey, string> = {
+  today: 'Today',
+  'this-week': 'This week',
+  'last-week': 'Last week',
   'this-month': 'This month',
   'last-month': 'Last month',
   'this-quarter': 'This quarter',
   'last-quarter': 'Last quarter',
-  'this-fiscal-year': 'This fiscal year',
-  'last-fiscal-year': 'Last fiscal year',
-  'year-to-date': 'Fiscal year to date',
+  'this-fiscal-year': 'This year (fiscal)',
+  'last-fiscal-year': 'Last year (fiscal)',
+  'year-to-date': 'Year to date',
+  'all-dates': 'All dates',
   custom: 'Custom',
+}
+
+/**
+ * Where "all dates" starts.
+ *
+ * Far enough back that no set of books reaches it, and a real date rather than
+ * an open-ended query so every report keeps the same shape — one range, two
+ * ends, comparable against any other.
+ */
+export const EARLIEST_DATE: CalendarDate = '1900-01-01'
+
+/** Monday-first, which is how a business week is read nearly everywhere. */
+function startOfWeek(date: CalendarDate): CalendarDate {
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay()
+  // getUTCDay is 0 for Sunday; shift so Monday is 0.
+  return addDays(date, -((day + 6) % 7))
 }
 
 export type Period = { from: CalendarDate; to: CalendarDate }
@@ -56,6 +88,18 @@ export function resolvePeriod(
   const thisYear = fiscalYearRange(fiscalYearOf(today, fiscalYearStartMonth), fiscalYearStartMonth)
 
   switch (key) {
+    case 'today':
+      return { from: today, to: today }
+    case 'this-week': {
+      const start = startOfWeek(today)
+      return { from: start, to: addDays(start, 6) }
+    }
+    case 'last-week': {
+      const start = addDays(startOfWeek(today), -7)
+      return { from: start, to: addDays(start, 6) }
+    }
+    case 'all-dates':
+      return { from: EARLIEST_DATE, to: today }
     case 'this-month':
       return { from: startOfMonth(today), to: endOfMonth(today) }
     case 'last-month': {

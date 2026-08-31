@@ -8,6 +8,7 @@ import { Combobox, type ComboboxOption } from '@/components/ui/combobox'
 import { contactDialogOptions, itemDialogOptions } from '@/app/(app)/quick-create/actions'
 import type { AccountOption, SimpleOption } from '@/components/master-data/item-dialog'
 import type { Option } from '@/components/master-data/contact-dialog'
+import type { AccountPickerOption } from '@/lib/account-options'
 
 // Loaded on demand: a form that never opens the create dialog should not pay for
 // the dialog's code, and these two are among the largest components in the app.
@@ -23,8 +24,20 @@ export type PickerOption = { id: string; label: string; hint?: string; group?: s
 export type CreatableKind = 'customer' | 'vendor' | 'item'
 
 type DialogData =
-  | { kind: 'customer' | 'vendor'; terms: Option[]; expenseAccounts: Option[]; today: string; currency: string }
-  | { kind: 'item'; accounts: AccountOption[]; taxCodes: SimpleOption[]; categories: SimpleOption[] }
+  | {
+      kind: 'customer' | 'vendor'
+      terms: Option[]
+      expenseAccounts: AccountPickerOption[]
+      today: string
+      currency: string
+    }
+  | {
+      kind: 'item'
+      accounts: AccountOption[]
+      taxCodes: SimpleOption[]
+      categories: SimpleOption[]
+      today: string
+    }
 
 /**
  * A searchable picker for a list of records.
@@ -161,6 +174,7 @@ export function EntityPicker({
               taxCodes={dialog.taxCodes}
               categories={dialog.categories}
               currency={currency}
+              today={dialog.today}
               defaultName={pendingName ?? ''}
               onCreated={created}
               onClose={closeDialog}

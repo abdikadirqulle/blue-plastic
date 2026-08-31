@@ -6,7 +6,7 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
-import { EntityPicker } from '@/components/forms/entity-picker'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -14,15 +14,10 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { Decimal, formatMoney, parseMoneyInput } from '@/lib/money'
 import { cn } from '@/lib/utils'
 import { postManualJournalForm } from '../actions'
-
-export type PostableAccount = {
-  id: string
-  code: string
-  name: string
-}
 
 type Line = {
   key: number
@@ -45,7 +40,7 @@ export function JournalEntryForm({
   today,
   currency,
 }: {
-  accounts: PostableAccount[]
+  accounts: AccountPickerOption[]
   today: string
   currency: string
 }) {
@@ -167,16 +162,10 @@ export function JournalEntryForm({
               {lines.map((line) => (
                 <tr key={line.key} className="border-b last:border-0">
                   <td className="px-2 py-1.5">
-                    <EntityPicker
-                      options={accounts.map((account) => ({
-                        id: account.id,
-                        label: account.name,
-                        hint: account.code,
-                      }))}
+                    <AccountPicker
+                      options={accounts}
                       value={line.accountId || null}
                       onChange={(next) => update(line.key, { accountId: next ?? '' })}
-                      placeholder="Search accounts"
-                      emptyMessage="No account matches. Search by code or by name."
                     />
                   </td>
                   <td className="px-2 py-1.5">

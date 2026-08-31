@@ -5,6 +5,7 @@ import { ArrowLeftIcon } from 'lucide-react'
 import { PageHeader } from '@/components/data/page-header'
 import { AdjustmentForm } from '@/components/inventory/adjustment-form'
 import { buttonVariants } from '@/components/ui/button'
+import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { requireOrgContext } from '@/server/auth/context'
 import * as accountService from '@/server/services/account.service'
@@ -17,7 +18,7 @@ export default async function NewAdjustmentPage() {
 
   const [stock, accounts] = await Promise.all([
     inventoryService.stockOnHand(ctx),
-    accountService.postableAccounts(ctx),
+    accountService.selectableAccounts(ctx),
   ])
 
   return (
@@ -38,9 +39,10 @@ export default async function NewAdjustmentPage() {
           onHand: item.quantity.toFixed(2),
           averageCost: item.averageCost.toFixed(6),
         }))}
-        accounts={accounts
-          .filter((account) => account.type === 'EXPENSE' || account.type === 'REVENUE')
-          .map((account) => ({ id: account.id, label: `${account.code} ${account.name}` }))}
+        accounts={accountOptions(accounts, {
+          prefer: ['OPERATING_EXPENSE', 'COST_OF_GOODS_SOLD', 'OTHER_EXPENSE'],
+          preferTypes: ['EXPENSE', 'REVENUE'],
+        })}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
       />

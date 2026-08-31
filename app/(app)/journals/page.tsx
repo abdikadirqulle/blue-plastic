@@ -52,12 +52,12 @@ export default async function JournalsPage({
     <>
       <PageHeader
         title="Journal entries"
-        description="Every posting in the ledger, whatever produced it. Entries are never edited — a correction is a reversal, and both stay on the record."
+        description="Every posting in the ledger, whatever produced it, with the document and the party it came from. Entries are never edited — a correction is a reversal, and both stay on the record."
         actions={newEntry}
       />
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <SearchInput placeholder="Search by number or description" />
+        <SearchInput placeholder="Search by number, description, customer or vendor" />
         <div className="ml-auto">
           <TableToolbar exportHref={`/api/exports/journals?${new URLSearchParams(
             Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
@@ -85,6 +85,8 @@ export default async function JournalsPage({
                 <SortableHeader column="date" label="Date" state={sort} basePath="/journals" params={linkParams} className="w-28" defaultDirection="desc" />
                 <SortableHeader column="memo" label="Description" state={sort} basePath="/journals" params={linkParams} />
                 <SortableHeader column="source" label="Source" state={sort} basePath="/journals" params={linkParams} />
+                <TableHead className="w-36">Document</TableHead>
+                <TableHead className="w-48">Customer / vendor</TableHead>
                 <TableHead className="numeric w-32">Amount</TableHead>
                 <SortableHeader column="status" label="Status" state={sort} basePath="/journals" params={linkParams} className="w-24" />
                 <TableHead className="w-10 print:hidden" />
@@ -114,6 +116,38 @@ export default async function JournalsPage({
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {JOURNAL_SOURCE_LABELS[journal.sourceType as JournalSourceType] ?? journal.sourceType}
+                  </TableCell>
+                  <TableCell className="tabular">
+                    {journal.source.number ? (
+                      journal.source.href ? (
+                        <Link
+                          href={journal.source.href}
+                          className="underline-offset-4 hover:underline"
+                        >
+                          {journal.source.number}
+                        </Link>
+                      ) : (
+                        journal.source.number
+                      )
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="truncate">
+                    {journal.source.partyName ? (
+                      journal.source.partyHref ? (
+                        <Link
+                          href={journal.source.partyHref}
+                          className="underline-offset-4 hover:underline"
+                        >
+                          {journal.source.partyName}
+                        </Link>
+                      ) : (
+                        journal.source.partyName
+                      )
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
                   </TableCell>
                   <TableCell className="numeric tabular">{formatMoney(journal.total, currency)}</TableCell>
                   <TableCell>

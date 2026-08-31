@@ -131,6 +131,18 @@ export const itemSchema = z
     inventoryAccountId: optionalId,
     cogsAccountId: optionalId,
     reorderPoint: optionalMoney,
+
+    /**
+     * Stock the business already has when the item is created.
+     *
+     * Recorded as a real opening movement against Opening Balance Equity, not as
+     * a number written onto the item — stock only exists where the ledger says
+     * it does. Create-only: once the item has a stock history, a change of mind
+     * is an adjustment.
+     */
+    openingQuantity: optionalMoney,
+    openingUnitCost: optionalMoney,
+    openingDate: optionalDate,
   })
   .superRefine((item, ctx) => {
     // Posting is driven by these mappings, so the rule is stated here as well as
@@ -159,6 +171,21 @@ export const itemSchema = z
           message: 'A tracked item needs a cost of goods sold account',
         })
       }
+      // Opening stock has to be valued. Received quantity with no cost has no
+      // defensible figure to put in the inventory account.
+      if (item.openingQuantity && Number(item.openingQuantity) > 0 && !item.openingUnitCost) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['openingUnitCost'],
+          message: 'Say what the opening stock cost, or leave the quantity blank',
+        })
+      }
+    } else if (item.openingQuantity) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['openingQuantity'],
+        message: 'Only an inventory product carries stock',
+      })
     }
   })
 

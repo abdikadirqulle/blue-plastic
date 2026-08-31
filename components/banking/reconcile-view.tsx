@@ -114,7 +114,7 @@ export function ReconcileView({
           <Figure label="Statement says" value={formatMoney(figures.ending, currency)} />
           <div
             className={cn(
-              'rounded-lg border px-3 py-2',
+              'rounded-md border px-3 py-2',
               figures.balanced ? 'border-success/40 bg-success/8' : 'border-destructive/40 bg-destructive/8',
             )}
           >
@@ -267,7 +267,7 @@ export function ReconcileView({
 
 function Figure({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border px-3 py-2">
+    <div className="rounded-md border px-3 py-2">
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="tabular mt-0.5 text-base font-medium">{value}</p>
     </div>
@@ -293,7 +293,7 @@ function LineList({
 
   return (
     <Card className="overflow-hidden p-0">
-      <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+      <div className="panel-head">
         <h2 className="text-sm font-semibold">{title}</h2>
         <span className="tabular text-sm text-muted-foreground">
           {lines.filter((l) => l.cleared).length} of {lines.length} ·{' '}

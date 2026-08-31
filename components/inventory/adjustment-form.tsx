@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { EntityPicker } from '@/components/forms/entity-picker'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -14,7 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
-import { NativeSelect } from '@/components/ui/native-select'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import { saveAdjustmentForm } from '@/app/(app)/inventory/actions'
 
@@ -35,7 +36,7 @@ export function AdjustmentForm({
   currency,
 }: {
   items: ItemOption[]
-  accounts: { id: string; label: string }[]
+  accounts: AccountPickerOption[]
   today: string
   currency: string
 }) {
@@ -113,18 +114,16 @@ export function AdjustmentForm({
             hint="Inventory Shrinkage unless you say otherwise."
             error={state.fieldErrors?.accountId}
           >
-            <NativeSelect
-              {...fieldProps('accountId', state.fieldErrors?.accountId, true)}
-              value={accountId}
-              onChange={(event) => setAccountId(event.target.value)}
-            >
-              <option value="">Inventory Shrinkage (default)</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label}
-                </option>
-              ))}
-            </NativeSelect>
+            <AccountPicker
+              id="accountId"
+              name="accountId"
+              options={accounts}
+              value={accountId || null}
+              onChange={(next) => setAccountId(next ?? '')}
+              placeholder="Inventory Shrinkage (default)"
+              clearable
+              error={state.fieldErrors?.accountId}
+            />
           </Field>
 
           <Field name="reason" label="Reason" error={state.fieldErrors?.reason}>

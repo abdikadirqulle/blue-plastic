@@ -35,7 +35,11 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
 
       <PageHeader
         title={journal.journalNumber}
-        description={journal.memo ?? undefined}
+        description={
+          journal.memo ??
+          [journal.source.number, journal.source.partyName].filter(Boolean).join(' · ') ??
+          undefined
+        }
         actions={
           canReverse ? (
             <ReverseDialog
@@ -52,13 +56,29 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
         <Detail
           label="Source"
           value={JOURNAL_SOURCE_LABELS[journal.sourceType] ?? journal.sourceType}
+          href={journal.source.href ?? undefined}
+          extra={journal.source.number ?? undefined}
         />
         <Detail
           label="Period"
           value={`${formatDate(toCalendarDate(journal.period.startDate))} — ${PERIOD_STATUS_LABELS[journal.period.status]}`}
         />
-        <Detail label="Posted" value={formatDateTime(journal.postedAt, ctx.organization.timeZone)} />
+        {journal.source.partyName ? (
+          <Detail
+            label="Customer / vendor"
+            value={journal.source.partyName}
+            href={journal.source.partyHref ?? undefined}
+          />
+        ) : (
+          <Detail label="Posted" value={formatDateTime(journal.postedAt, ctx.organization.timeZone)} />
+        )}
       </div>
+
+      {journal.source.partyName ? (
+        <p className="mb-4 text-xs text-muted-foreground">
+          Posted {formatDateTime(journal.postedAt, ctx.organization.timeZone)}
+        </p>
+      ) : null}
 
       {journal.status === 'REVERSED' && journal.reversedBy ? (
         <Notice>
@@ -86,6 +106,7 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
             <TableRow>
               <TableHead className="w-12">#</TableHead>
               <TableHead>Account</TableHead>
+              <TableHead className="w-48">Customer / vendor</TableHead>
               <TableHead>Description</TableHead>
               <TableHead className="numeric w-36">Debit</TableHead>
               <TableHead className="numeric w-36">Credit</TableHead>
@@ -104,6 +125,25 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
                     {line.account.name}
                   </Link>
                 </TableCell>
+                <TableCell>
+                  {line.customer ? (
+                    <Link
+                      href={`/customers/${line.customer.id}`}
+                      className="underline-offset-4 hover:underline"
+                    >
+                      {line.customer.displayName}
+                    </Link>
+                  ) : line.vendor ? (
+                    <Link
+                      href={`/vendors/${line.vendor.id}`}
+                      className="underline-offset-4 hover:underline"
+                    >
+                      {line.vendor.displayName}
+                    </Link>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
                 <TableCell className="text-muted-foreground">{line.description ?? '—'}</TableCell>
                 <TableCell className="numeric tabular">
                   {line.debit === '0' ? '' : formatMoney(line.debit, currency)}
@@ -116,7 +156,7 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
           </TableBody>
           <TableFooter>
             <TableRow>
-              <TableCell colSpan={3} className="font-medium">
+              <TableCell colSpan={4} className="font-medium">
                 Totals
                 {journal.balanced ? null : (
                   <Badge variant="destructive" className="ml-2">
@@ -143,12 +183,38 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
   )
 }
 
-function Detail({ label, value }: { label: string; value: string }) {
+function Detail({
+  label,
+  value,
+  href,
+  extra,
+}: {
+  label: string
+  value: string
+  /** Makes the value a link back to whatever produced this entry. */
+  href?: string
+  extra?: string
+}) {
+  const body = (
+    <>
+      {value}
+      {extra ? <span className="tabular ml-1.5 text-muted-foreground">{extra}</span> : null}
+    </>
+  )
+
   return (
     <Card>
       <CardContent className="p-3">
         <p className="text-xs text-muted-foreground">{label}</p>
-        <p className="mt-0.5 text-sm font-medium">{value}</p>
+        <p className="mt-0.5 text-sm font-medium">
+          {href ? (
+            <Link href={href} className="underline-offset-4 hover:underline">
+              {body}
+            </Link>
+          ) : (
+            body
+          )}
+        </p>
       </CardContent>
     </Card>
   )

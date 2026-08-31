@@ -4,7 +4,9 @@ import { notFound } from 'next/navigation'
 import { ArrowLeftIcon, PackageIcon, PencilIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
-import { ReceiveOrderButton, VoidPurchaseButton } from '@/components/purchases/purchase-actions'
+import { ReceiveOrderButton } from '@/components/purchases/purchase-actions'
+import { DisposeButton } from '@/components/data/document-disposal'
+import { dispositionOf } from '@/lib/document-disposition'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -32,8 +34,9 @@ export default async function PurchaseDocumentPage({
   if (!document) notFound()
 
   const currency = ctx.organization.baseCurrency
-  const canVoid =
-    ctx.permissions.has('bill:void') && document.status !== 'VOID' && document.status !== 'DRAFT'
+  // A draft or a purchase order can now be deleted, so the control shows for
+  // those too — what it does is decided by `disposition` below.
+  const canVoid = ctx.permissions.has('bill:void') && document.status !== 'VOID'
 
   // The same rule the service enforces: no editing a voided document, or one
   // with a payment or credit already applied to it.
@@ -44,6 +47,13 @@ export default async function PurchaseDocumentPage({
     ctx.permissions.has('bill:create') &&
     !document.convertedTo &&
     document.status !== 'VOID'
+
+  const disposition = dispositionOf({
+    status: document.status,
+    journalId: document.journalId,
+    convertedToId: document.convertedTo?.id ?? null,
+    appliedCount: document.applications.length,
+  })
 
   return (
     <>
@@ -74,7 +84,15 @@ export default async function PurchaseDocumentPage({
                 <PencilIcon /> Edit
               </Link>
             ) : null}
-            {canVoid ? <VoidPurchaseButton id={id} number={document.number} /> : null}
+            {canVoid ? (
+              <DisposeButton
+                kind="purchase"
+                id={id}
+                number={document.number}
+                disposition={disposition}
+                redirectTo={disposition.action === 'delete' ? `/purchases/${config.slug}` : undefined}
+              />
+            ) : null}
           </>
         }
       />
@@ -95,6 +113,22 @@ export default async function PurchaseDocumentPage({
         {config.type === 'BILL' ? (
           <Detail label="Still owing">
             <span className="tabular font-semibold">{formatMoney(document.balance, currency)}</span>
+          </Detail>
+        ) : null}
+        {/*
+          Where the money came from. An expense is settled the moment it is
+          entered, so the account it left is the most useful thing on the
+          document after the total — and it was not shown anywhere.
+        */}
+        {document.paymentAccount ? (
+          <Detail label="Paid from">
+            <Link
+              href={`/accounts/${document.paymentAccount.id}`}
+              className="underline-offset-4 hover:underline"
+            >
+              <span className="tabular text-muted-foreground">{document.paymentAccount.code}</span>{' '}
+              {document.paymentAccount.name}
+            </Link>
           </Detail>
         ) : null}
         {document.reference ? <Detail label="Their reference">{document.reference}</Detail> : null}
@@ -183,7 +217,7 @@ export default async function PurchaseDocumentPage({
 
       {document.applications.length > 0 ? (
         <Card className="mt-4 overflow-hidden p-0">
-          <div className="border-b bg-muted/30 px-3 py-2 text-sm font-semibold">Settled by</div>
+          <div className="panel-head text-sm font-semibold">Settled by</div>
           <Table>
             <TableBody>
               {document.applications.map((application) => (

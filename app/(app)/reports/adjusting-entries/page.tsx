@@ -61,7 +61,7 @@ export default async function AdjustingEntriesPage({
         <div className="space-y-4">
           {report.rows.map((journal) => (
             <Card key={journal.id} className="overflow-hidden p-0">
-              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b bg-muted/30 px-3 py-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b bg-muted/50 px-3 py-2">
                 <div className="min-w-0">
                   <Link
                     href={`/journals/${journal.id}`}

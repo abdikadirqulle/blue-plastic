@@ -1,24 +1,31 @@
 import 'server-only'
 
+import { accountOptions } from '@/lib/account-options'
+import { Decimal } from '@/lib/money'
+import { positionsOf } from '@/server/accounting/inventory'
 import type { OrgContext } from '@/server/auth/context'
-import { db } from '@/server/db'
+import { db, type Tx } from '@/server/db'
+import { selectableAccounts } from '@/server/services/account.service'
+import { ITEM_GROUPS } from '@/server/services/sales-options'
 
 /** Everything the bill form needs, in one round trip. */
 export async function loadPurchaseOptions(ctx: OrgContext) {
-  const [vendors, items, taxCodes, paymentAccounts, expenseAccounts, terms] = await Promise.all([
+  const [vendors, items, taxCodes, chart, terms] = await Promise.all([
     db.vendor.findMany({
       where: { orgId: ctx.orgId, isActive: true },
       select: { id: true, displayName: true, defaultExpenseAccountId: true },
       orderBy: { displayName: 'asc' },
     }),
+    // Tracked stock is the main thing a purchase document buys, so it has to be
+    // in the picker. Excluding it made receiving stock impossible.
     db.item.findMany({
-      where: { orgId: ctx.orgId, isActive: true, type: { not: 'INVENTORY' } },
+      where: { orgId: ctx.orgId, isActive: true },
       select: {
-        id: true, name: true, sku: true, purchaseCost: true,
+        id: true, name: true, sku: true, purchaseCost: true, type: true,
         purchaseDescription: true, description: true, purchaseTaxCodeId: true,
         expenseAccountId: true,
       },
-      orderBy: { name: 'asc' },
+      orderBy: [{ type: 'asc' }, { name: 'asc' }],
     }),
     db.taxCode.findMany({
       where: { orgId: ctx.orgId, isActive: true },
@@ -28,17 +35,7 @@ export async function loadPurchaseOptions(ctx: OrgContext) {
       },
       orderBy: { name: 'asc' },
     }),
-    db.ledgerAccount.findMany({
-      where: { orgId: ctx.orgId, isActive: true, subtype: { in: ['BANK', 'CREDIT_CARD'] } },
-      select: { id: true, code: true, name: true },
-      orderBy: { code: 'asc' },
-    }),
-    // Costs land in expenses, or in assets when something is capitalised.
-    db.ledgerAccount.findMany({
-      where: { orgId: ctx.orgId, isActive: true, type: { in: ['EXPENSE', 'ASSET', 'LIABILITY'] } },
-      select: { id: true, code: true, name: true, type: true, parentId: true },
-      orderBy: { code: 'asc' },
-    }),
+    selectableAccounts(ctx, { withBalances: true }),
     db.paymentTerm.findMany({
       where: { orgId: ctx.orgId, isActive: true },
       select: { id: true, name: true, type: true, dueDays: true },
@@ -46,7 +43,8 @@ export async function loadPurchaseOptions(ctx: OrgContext) {
     }),
   ])
 
-  const parents = new Set(expenseAccounts.map((a) => a.parentId).filter(Boolean) as string[])
+  const trackedIds = items.filter((item) => item.type === 'INVENTORY').map((item) => item.id)
+  const positions = await positionsOf(db as unknown as Tx, ctx.orgId, trackedIds)
 
   return {
     vendors: vendors.map((vendor) => ({
@@ -61,6 +59,12 @@ export async function loadPurchaseOptions(ctx: OrgContext) {
       description: item.purchaseDescription ?? item.description ?? item.name,
       taxCodeId: item.purchaseTaxCodeId,
       expenseAccountId: item.expenseAccountId,
+      type: item.type,
+      group: ITEM_GROUPS[item.type],
+      onHand:
+        item.type === 'INVENTORY'
+          ? (positions.get(item.id)?.quantity ?? new Decimal(0)).toFixed(2)
+          : null,
     })),
     taxCodes: taxCodes.map((code) => ({
       id: code.id,
@@ -68,10 +72,17 @@ export async function loadPurchaseOptions(ctx: OrgContext) {
       isInclusive: code.isInclusive,
       rate: code.components.reduce((total, c) => total + Number(c.taxRate.rate), 0),
     })),
-    paymentAccounts: paymentAccounts.map((a) => ({ id: a.id, label: `${a.code} ${a.name}` })),
-    expenseAccounts: expenseAccounts
-      .filter((a) => !parents.has(a.id))
-      .map((a) => ({ id: a.id, label: `${a.code} ${a.name}` })),
+    // Where the money left from, on an expense. Bank and credit card lead.
+    paymentAccounts: accountOptions(chart, {
+      prefer: ['BANK', 'CREDIT_CARD', 'UNDEPOSITED_FUNDS', 'OTHER_CURRENT_ASSET'],
+      showBalance: true,
+    }),
+    // Where a cost lands. Expenses lead, then the rest of the chart — a bill can
+    // legitimately capitalise into a fixed asset or settle a liability.
+    expenseAccounts: accountOptions(chart, {
+      prefer: ['OPERATING_EXPENSE', 'COST_OF_GOODS_SOLD', 'OTHER_EXPENSE', 'DEPRECIATION'],
+      preferTypes: ['EXPENSE'],
+    }),
     terms,
   }
 }

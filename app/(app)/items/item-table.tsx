@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useTransition } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { ArchiveIcon, ArchiveRestoreIcon, Loader2Icon, PencilIcon } from 'lucide-react'
 import { toast } from 'sonner'
@@ -27,6 +28,11 @@ export type ItemRow = ItemValues & {
   inventoryAccount: { code: string; name: string } | null
   cogsAccount: { code: string; name: string } | null
   category: { name: string } | null
+  /** Stock, for tracked items. Null for services and non-inventory goods. */
+  onHand?: string | null
+  stockValue?: string | null
+  averageCost?: string | null
+  belowReorder?: boolean
 }
 
 const TYPE_LABEL = {
@@ -112,6 +118,8 @@ export function ItemTable({
             <SortableHeader column="name" label="Item" state={sort} basePath="/items" params={linkParams} />
             <SortableHeader column="type" label="Type" state={sort} basePath="/items" params={linkParams} className="w-32" />
             <TableHead>Posts to</TableHead>
+            <TableHead className="numeric w-28">On hand</TableHead>
+            <TableHead className="numeric w-28">Stock value</TableHead>
             <SortableHeader column="price" label="Price" state={sort} basePath="/items" params={linkParams} className="w-28" numeric defaultDirection="desc" />
             <SortableHeader column="cost" label="Cost" state={sort} basePath="/items" params={linkParams} className="w-28" numeric defaultDirection="desc" />
             <TableHead className="w-10" />
@@ -172,6 +180,30 @@ export function ItemTable({
                     </span>
                   </>
                 ) : null}
+              </TableCell>
+              <TableCell className="numeric tabular">
+                {row.type === 'INVENTORY' ? (
+                  <>
+                    <Link
+                      href={`/inventory/${row.id}`}
+                      className="font-medium underline-offset-4 hover:underline"
+                    >
+                      {row.onHand ?? '0.00'}
+                    </Link>
+                    {row.belowReorder ? (
+                      <Badge variant="warning" className="ml-1.5">
+                        reorder
+                      </Badge>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
+              </TableCell>
+              <TableCell className="numeric tabular text-muted-foreground">
+                {row.type === 'INVENTORY' && row.stockValue
+                  ? formatMoney(row.stockValue, currency)
+                  : '—'}
               </TableCell>
               <TableCell className="numeric tabular">
                 {row.salesPrice ? formatMoney(row.salesPrice, currency) : '—'}

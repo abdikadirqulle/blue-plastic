@@ -62,6 +62,22 @@ export const voidDocument = action
     return document
   })
 
+/**
+ * Delete a document the ledger has never seen.
+ *
+ * Posted documents are refused here and voided instead — the service decides,
+ * so a screen cannot offer something the server will not do. See
+ * `lib/document-disposition.ts`.
+ */
+export const deleteDocument = action
+  .requires('invoice:void')
+  .input(z.object({ id: cuid }))
+  .handler(async (ctx, input) => {
+    const document = await salesService.remove(ctx, input.id)
+    revalidateSales()
+    return document
+  })
+
 export const convertEstimate = action
   .requires('invoice:create')
   .input(convertEstimateSchema)

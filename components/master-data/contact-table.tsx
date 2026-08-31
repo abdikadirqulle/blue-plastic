@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SortableHeader, type SortState } from '@/components/data/sortable-header'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { formatMoney } from '@/lib/money'
 import {
   setCustomersActive,
@@ -46,7 +47,7 @@ export function ContactTable({
   side: ContactSide
   rows: ContactRow[]
   terms: Option[]
-  expenseAccounts?: Option[]
+  expenseAccounts?: AccountPickerOption[]
   currency: string
   today: string
   canEdit: boolean

@@ -143,6 +143,8 @@ export type StatementEntry = {
   charge: Decimal
   credit: Decimal
   balance: Decimal
+  /** Where the document lives, so a statement line is a way in to it. */
+  href: string
 }
 
 /**
@@ -176,7 +178,10 @@ export async function statement(
         type: { in: ['INVOICE', 'CREDIT_MEMO', 'SALES_RECEIPT', 'REFUND_RECEIPT'] },
         date: { gte: toDate(range.from), lte: toDate(range.to) },
       },
-      select: { id: true, type: true, number: true, date: true, dueDate: true, total: true, memo: true },
+      select: {
+        id: true, type: true, number: true, date: true, dueDate: true, total: true, memo: true,
+        reference: true,
+      },
     }),
     client.customerPayment.findMany({
       where: {
@@ -203,9 +208,10 @@ export async function statement(
         number: document.number,
         date: document.date,
         dueDate: document.dueDate,
-        description: document.memo ?? labelFor(document.type),
+        description: document.memo ?? document.reference ?? labelFor(document.type),
         charge: isCharge ? total : ZERO,
         credit: isCredit ? total : ZERO,
+        href: `/sales/${SLUG[document.type] ?? 'invoices'}/${document.id}`,
       }
     }),
     ...payments.map((payment) => ({
@@ -217,6 +223,7 @@ export async function statement(
       description: payment.memo ?? 'Payment received',
       charge: ZERO,
       credit: new Decimal(payment.amount.toString()),
+      href: '/payments',
     })),
   ].sort((a, b) => a.date.getTime() - b.date.getTime() || a.number.localeCompare(b.number))
 
@@ -227,6 +234,13 @@ export async function statement(
   })
 
   return { opening, entries: withBalances, closing: running }
+}
+
+const SLUG: Record<string, string> = {
+  INVOICE: 'invoices',
+  CREDIT_MEMO: 'credit-memos',
+  SALES_RECEIPT: 'sales-receipts',
+  REFUND_RECEIPT: 'refunds',
 }
 
 function labelFor(type: string): string {

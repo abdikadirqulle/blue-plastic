@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -12,7 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
-import { NativeSelect } from '@/components/ui/native-select'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { saveTransferForm } from '@/app/(app)/banking/actions'
 
 export function TransferForm({
@@ -20,7 +21,7 @@ export function TransferForm({
   today,
   currency,
 }: {
-  accounts: { id: string; label: string }[]
+  accounts: AccountPickerOption[]
   today: string
   currency: string
 }) {
@@ -52,18 +53,15 @@ export function TransferForm({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field name="fromAccountId" label="From" required error={e?.fromAccountId}>
-              <NativeSelect
-                {...fieldProps('fromAccountId', e?.fromAccountId)}
-                value={fromAccountId}
-                onChange={(event) => setFrom(event.target.value)}
+              <AccountPicker
+                id="fromAccountId"
+                name="fromAccountId"
+                options={accounts}
+                value={fromAccountId || null}
+                onChange={(next) => setFrom(next ?? '')}
                 required
-              >
-                {accounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.label}
-                  </option>
-                ))}
-              </NativeSelect>
+                error={e?.fromAccountId}
+              />
             </Field>
 
             <Field
@@ -72,18 +70,15 @@ export function TransferForm({
               required
               error={sameAccount ? ['A transfer to itself moves nothing'] : e?.toAccountId}
             >
-              <NativeSelect
-                {...fieldProps('toAccountId', sameAccount ? ['x'] : e?.toAccountId)}
-                value={toAccountId}
-                onChange={(event) => setTo(event.target.value)}
+              <AccountPicker
+                id="toAccountId"
+                name="toAccountId"
+                options={accounts}
+                value={toAccountId || null}
+                onChange={(next) => setTo(next ?? '')}
                 required
-              >
-                {accounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.label}
-                  </option>
-                ))}
-              </NativeSelect>
+                error={sameAccount ? ['x'] : e?.toAccountId}
+              />
             </Field>
           </div>
 

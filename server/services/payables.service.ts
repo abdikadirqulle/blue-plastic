@@ -136,3 +136,124 @@ export async function unpaidBills(ctx: OrgContext, asOf: CalendarDate) {
     })
     .filter((bill) => bill.balance.greaterThan(0))
 }
+
+export type VendorStatementEntry = {
+  id: string
+  kind: 'BILL' | 'VENDOR_CREDIT' | 'PAYMENT' | 'EXPENSE'
+  number: string
+  date: Date
+  dueDate: Date | null
+  description: string
+  /** What increased the amount owed. */
+  charge: Decimal
+  /** What reduced it. */
+  credit: Decimal
+  balance: Decimal
+  href: string
+}
+
+/**
+ * A vendor statement: everything that moved what the business owes them, in date
+ * order, with a running balance.
+ *
+ * The mirror of the customer statement, and it exists for the same reason —
+ * "what do we owe you?" is a question with one right answer, and it should come
+ * from the same rows as the payables control account rather than from a separate
+ * tally. Expenses are listed for completeness and do not move the balance:
+ * they never became a payable.
+ */
+export async function vendorStatement(
+  ctx: OrgContext,
+  vendorId: string,
+  range: { from: CalendarDate; to: CalendarDate },
+  options: { client?: Tx } = {},
+): Promise<{ opening: Decimal; entries: VendorStatementEntry[]; closing: Decimal }> {
+  const client = options.client ?? db
+
+  const [openingRow] = await client.$queryRaw<{ balance: string }[]>`
+    SELECT COALESCE(SUM(l.credit - l.debit), 0) AS balance
+      FROM journal_lines l
+      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+     WHERE l."orgId" = ${ctx.orgId}
+       AND l."vendorId" = ${vendorId}
+       AND l."journalDate" < ${toDate(range.from)}
+  `
+  const opening = new Decimal(openingRow?.balance ?? '0')
+
+  const [documents, payments] = await Promise.all([
+    client.purchaseDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        vendorId,
+        status: { notIn: ['DRAFT', 'VOID'] },
+        type: { in: ['BILL', 'VENDOR_CREDIT', 'EXPENSE'] },
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: { id: true, type: true, number: true, date: true, dueDate: true, total: true, memo: true, reference: true },
+    }),
+    client.billPayment.findMany({
+      where: {
+        orgId: ctx.orgId,
+        vendorId,
+        status: { not: 'VOID' },
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: { id: true, number: true, date: true, amount: true, memo: true, reference: true },
+    }),
+  ])
+
+  const slug: Record<string, string> = {
+    BILL: 'bills',
+    VENDOR_CREDIT: 'vendor-credits',
+    EXPENSE: 'expenses',
+  }
+
+  const entries: Omit<VendorStatementEntry, 'balance'>[] = [
+    ...documents.map((document) => {
+      const total = new Decimal(document.total.toString())
+      return {
+        id: document.id,
+        kind: document.type as VendorStatementEntry['kind'],
+        number: document.number,
+        date: document.date,
+        dueDate: document.dueDate,
+        description: document.memo ?? document.reference ?? labelFor(document.type),
+        charge: document.type === 'BILL' ? total : ZERO,
+        credit: document.type === 'VENDOR_CREDIT' ? total : ZERO,
+        href: `/purchases/${slug[document.type] ?? 'bills'}/${document.id}`,
+      }
+    }),
+    ...payments.map((payment) => ({
+      id: payment.id,
+      kind: 'PAYMENT' as const,
+      number: payment.number,
+      date: payment.date,
+      dueDate: null,
+      description: payment.memo ?? payment.reference ?? 'Payment made',
+      charge: ZERO,
+      credit: new Decimal(payment.amount.toString()),
+      href: '/bill-payments',
+    })),
+  ].sort((a, b) => a.date.getTime() - b.date.getTime() || a.number.localeCompare(b.number))
+
+  let running = opening
+  const withBalances = entries.map((entry) => {
+    running = running.plus(entry.charge).minus(entry.credit)
+    return { ...entry, balance: running }
+  })
+
+  return { opening, entries: withBalances, closing: running }
+}
+
+function labelFor(type: string): string {
+  switch (type) {
+    case 'BILL':
+      return 'Bill'
+    case 'VENDOR_CREDIT':
+      return 'Vendor credit'
+    case 'EXPENSE':
+      return 'Expense'
+    default:
+      return type
+  }
+}

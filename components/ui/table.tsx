@@ -10,8 +10,18 @@ function Table({ className, ...props }: React.ComponentProps<'table'>) {
   )
 }
 
+/**
+ * The header is a tinted strip with small grey capitals, which is how a dense
+ * table tells you where it starts without a heavy rule doing it.
+ */
 function TableHeader({ className, ...props }: React.ComponentProps<'thead'>) {
-  return <thead data-slot="table-header" className={cn('[&_tr]:border-b', className)} {...props} />
+  return (
+    <thead
+      data-slot="table-header"
+      className={cn('bg-muted/50 [&_tr]:border-b', className)}
+      {...props}
+    />
+  )
 }
 
 function TableBody({ className, ...props }: React.ComponentProps<'tbody'>) {
@@ -22,7 +32,7 @@ function TableFooter({ className, ...props }: React.ComponentProps<'tfoot'>) {
   return (
     <tfoot
       data-slot="table-footer"
-      className={cn('border-t bg-muted/40 font-medium [&>tr]:last:border-b-0', className)}
+      className={cn('border-t bg-muted/60 font-medium [&>tr]:last:border-b-0', className)}
       {...props}
     />
   )
@@ -32,7 +42,10 @@ function TableRow({ className, ...props }: React.ComponentProps<'tr'>) {
   return (
     <tr
       data-slot="table-row"
-      className={cn('border-b transition-colors hover:bg-muted/40 data-[state=selected]:bg-muted', className)}
+      className={cn(
+        'border-b transition-colors hover:bg-accent/40 data-[state=selected]:bg-accent/60',
+        className,
+      )}
       {...props}
     />
   )
@@ -43,7 +56,7 @@ function TableHead({ className, ...props }: React.ComponentProps<'th'>) {
     <th
       data-slot="table-head"
       className={cn(
-        'h-10 px-3 text-left align-middle text-xs font-medium text-muted-foreground whitespace-nowrap',
+        'h-8 px-3 text-left align-middle text-[0.6875rem] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap',
         '[&:has([role=checkbox])]:pr-0 [&.numeric]:text-right',
         className,
       )}
@@ -56,7 +69,7 @@ function TableCell({ className, ...props }: React.ComponentProps<'td'>) {
   return (
     <td
       data-slot="table-cell"
-      className={cn('px-3 py-2.5 align-middle [&:has([role=checkbox])]:pr-0 [&.numeric]:text-right', className)}
+      className={cn('px-3 py-1.5 align-middle [&:has([role=checkbox])]:pr-0 [&.numeric]:text-right', className)}
       {...props}
     />
   )

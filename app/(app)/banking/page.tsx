@@ -9,7 +9,9 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { DisposeButton } from '@/components/data/document-disposal'
 import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { dispositionOf } from '@/lib/document-disposition'
 import { formatMoney } from '@/lib/money'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { requireOrgContext } from '@/server/auth/context'
@@ -28,9 +30,11 @@ export default async function BankingPage({
   const ctx = await requireOrgContext('bank:read')
   const sort = readSort(await searchParams, SORTABLE, { sort: 'name', dir: 'asc' })
 
-  const [allAccounts, reconciliations] = await Promise.all([
+  const [allAccounts, reconciliations, transfers, deposits] = await Promise.all([
     bankingService.bankAccounts(ctx),
     history(ctx),
+    bankingService.listTransfers(ctx, { page: 1, pageSize: 25, dir: 'desc' }),
+    bankingService.listDeposits(ctx, { page: 1, pageSize: 25, dir: 'desc' }),
   ])
 
   // Balances are computed from the ledger, so the ordering is applied here.
@@ -134,6 +138,97 @@ export default async function BankingPage({
                   </TableCell>
                 </TableRow>
               ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+
+      {/*
+        Transfers and deposits had no list at all, which meant a transfer entered
+        twice stayed in the books for ever — there was no screen from which to
+        undo one. They are money movements like any other, so they are listed
+        here, in the module that owns them, with the same disposal control every
+        other transaction has.
+      */}
+      <h2 className="mb-3 text-sm font-semibold">Transfers and deposits</h2>
+
+      {transfers.rows.length === 0 && deposits.rows.length === 0 ? (
+        <Card className="mb-6">
+          <CardContent className="p-6 text-sm text-muted-foreground">
+            No transfers or deposits yet. A transfer moves money between two of the business&rsquo;s own
+            accounts; a deposit takes what is in hand to the bank.
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="mb-6 overflow-hidden p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-32">Number</TableHead>
+                <TableHead className="w-28">Date</TableHead>
+                <TableHead className="w-28">Kind</TableHead>
+                <TableHead>Accounts</TableHead>
+                <TableHead className="numeric w-32">Amount</TableHead>
+                <TableHead className="w-20">Status</TableHead>
+                <TableHead className="w-24 print:hidden" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {[
+                ...transfers.rows.map((row) => ({
+                  id: row.id,
+                  number: row.number,
+                  date: row.date,
+                  kind: 'transfer' as const,
+                  detail: `${row.fromAccount.code} ${row.fromAccount.name} → ${row.toAccount.code} ${row.toAccount.name}`,
+                  amount: row.amount,
+                  status: row.status,
+                  journalId: row.journalId,
+                })),
+                ...deposits.rows.map((row) => ({
+                  id: row.id,
+                  number: row.number,
+                  date: row.date,
+                  kind: 'deposit' as const,
+                  detail: `${row.bankAccount.code} ${row.bankAccount.name}`,
+                  amount: row.total,
+                  status: row.status,
+                  journalId: row.journalId,
+                })),
+              ]
+                .sort((a, b) => b.date.getTime() - a.date.getTime())
+                .map((row) => (
+                  <TableRow key={`${row.kind}-${row.id}`}>
+                    <TableCell className="tabular font-medium">{row.number}</TableCell>
+                    <TableCell className="tabular whitespace-nowrap text-muted-foreground">
+                      {formatDate(toCalendarDate(row.date))}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {row.kind === 'transfer' ? 'Transfer' : 'Deposit'}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">{row.detail}</TableCell>
+                    <TableCell className="numeric tabular">{formatMoney(row.amount, currency)}</TableCell>
+                    <TableCell>
+                      <Badge variant={row.status === 'VOID' ? 'destructive' : 'success'}>
+                        {row.status === 'VOID' ? 'void' : 'posted'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="print:hidden">
+                      {canTransact ? (
+                        <DisposeButton
+                          kind={row.kind}
+                          id={row.id}
+                          number={row.number}
+                          variant="ghost"
+                          disposition={dispositionOf({
+                            status: row.status,
+                            journalId: row.journalId,
+                          })}
+                        />
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                ))}
             </TableBody>
           </Table>
         </Card>

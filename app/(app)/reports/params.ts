@@ -70,6 +70,19 @@ export function readSettings(
 
   const asOfParam = one(query.asOf)
 
+  /**
+   * "As at" never runs ahead of today unless somebody types a date.
+   *
+   * A period's end and the date a position is stated at are not the same thing.
+   * Choosing "This year" in August and getting a balance sheet as at 31 December
+   * is a statement about a future nobody has posted; worse, on an ageing report
+   * it marks every invoice not yet due as overdue, because the comparison is
+   * against a date four months away. So the default is the earlier of the two —
+   * and a period wholly in the past still states its own end, which is what
+   * "Last year" is asked for.
+   */
+  const defaultAsOf = range.to > now ? now : range.to
+
   return {
     period,
     range,
@@ -81,7 +94,7 @@ export function readSettings(
         : comparison === 'prior-year'
           ? priorYear(range)
           : undefined,
-    asOf: asOfParam && isCalendarDate(asOfParam) ? asOfParam : range.to,
+    asOf: asOfParam && isCalendarDate(asOfParam) ? asOfParam : defaultAsOf,
   }
 }
 

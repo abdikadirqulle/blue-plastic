@@ -3,13 +3,14 @@ import type { DocumentType, Prisma, SalesDocumentType } from '@prisma/client'
 
 import { toCalendarDate, toDate, today, type CalendarDate } from '@/lib/date'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
+import { dispositionOf } from '@/lib/document-disposition'
 import { dueDateFor } from '@/lib/payment-terms'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { SalesDocumentInput } from '@/lib/validation/sales'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
-import { recordMovement } from '@/server/accounting/inventory'
+import { recordMovement, reverseMovementsFor } from '@/server/accounting/inventory'
 import {
   buildCreditMemoJournal,
   buildInvoiceJournal,
@@ -324,11 +325,15 @@ export async function update(ctx: OrgContext, id: string, input: SalesDocumentIn
         })
       : customer.paymentTerm
 
-    // The old journal comes out before the new one goes in.
+    // The old journal comes out before the new one goes in — and so does the
+    // stock it moved. Reversing only the journal would leave the stock ledger
+    // holding goods the general ledger no longer values, and every edit would
+    // add another copy of the movement on top.
     if (existing.journalId) {
-      await reverseJournal(tx, ctx, existing.journalId, {
+      const reversal = await reverseJournal(tx, ctx, existing.journalId, {
         reason: `${existing.number} edited`,
       })
+      await reverseMovementsFor(tx, ctx, { sourceId: id, date: input.date, journalId: reversal.id })
     }
 
     await tx.salesDocumentLine.deleteMany({ where: { documentId: id } })
@@ -517,10 +522,12 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
 }
 
 /**
- * Void a document: reverse its journal, keep the paper.
+ * Void a document: reverse its journal, return any stock, keep the paper.
  *
- * Nothing is ever deleted. A missing invoice number is a question nobody can
- * answer later; a voided one answers it.
+ * A posted document is never deleted. A missing invoice number is a question
+ * nobody can answer later; a voided one answers it. What *can* be deleted is a
+ * document the ledger has never seen — see `remove` and
+ * `lib/document-disposition.ts`.
  */
 export async function voidDocument(ctx: OrgContext, id: string, reason: string) {
   const meta = await requestMeta()
@@ -541,7 +548,11 @@ export async function voidDocument(ctx: OrgContext, id: string, reason: string) 
     }
 
     if (document.journalId) {
-      await reverseJournal(tx, ctx, document.journalId, { reason: `${document.number} voided — ${reason}` })
+      const reversal = await reverseJournal(tx, ctx, document.journalId, {
+        reason: `${document.number} voided — ${reason}`,
+      })
+      // The goods come back too. A voided invoice never went out of the door.
+      await reverseMovementsFor(tx, ctx, { sourceId: id, journalId: reversal.id })
     }
 
     await tx.salesDocument.update({
@@ -553,6 +564,63 @@ export async function voidDocument(ctx: OrgContext, id: string, reason: string) 
       tx,
       ctx,
       { entity: 'SalesDocument', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
+      meta,
+    )
+
+    return { id, number: document.number }
+  })
+}
+
+/**
+ * Delete a document that never reached the ledger.
+ *
+ * Only a draft or an estimate can get here, and only while nothing points at
+ * it. Anything posted is refused with the reason, and the caller is expected to
+ * void it instead — which is what `dispositionOf` tells every screen up front.
+ */
+export async function remove(ctx: OrgContext, id: string) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const document = await tx.salesDocument.findFirst({
+      where: { id, orgId: ctx.orgId },
+      select: {
+        id: true, type: true, number: true, status: true, journalId: true, total: true,
+        convertedTo: { select: { id: true, number: true } },
+        _count: { select: { applications: true, creditsApplied: true } },
+      },
+    })
+    if (!document) throw notFound('Document')
+
+    const disposition = dispositionOf({
+      status: document.status,
+      journalId: document.journalId,
+      convertedToId: document.convertedTo?.id ?? null,
+      appliedCount: document._count.applications + document._count.creditsApplied,
+    })
+
+    if (disposition.action !== 'delete') {
+      throw precondition(
+        `${document.number} cannot be deleted. ${disposition.reason}` +
+          (disposition.action === 'void' ? ' Void it instead — the entry is reversed and both stay on the record.' : ''),
+      )
+    }
+
+    // Nothing posted means no stock moved either, but a draft that was once
+    // posted and reverted would have movements to clear. Cheap to be sure.
+    await reverseMovementsFor(tx, ctx, { sourceId: id })
+
+    await tx.salesDocument.delete({ where: { id } })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'SalesDocument',
+        entityId: id,
+        action: 'DELETE',
+        before: { type: document.type, number: document.number, total: document.total.toString() },
+      },
       meta,
     )
 

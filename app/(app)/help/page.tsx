@@ -53,8 +53,9 @@ const FLOWS: { title: string; steps: { text: string; href?: string }[] }[] = [
     title: 'Stock',
     steps: [
       { text: 'Only an item whose type is "Inventory product" tracks stock. The type is fixed once the item exists.', href: '/items' },
-      { text: 'A tracked item starts at zero. Stock arrives by entering the bill or expense you bought it on.', href: '/purchases/bills/new' },
-      { text: 'If the books already have stock, record the count and its cost as an adjustment.', href: '/inventory/adjustments/new' },
+      { text: 'Create the product with what is on the shelf today and what it cost — the opening quantity posts into the inventory account against Opening Balance Equity.', href: '/items' },
+      { text: 'After that, stock arrives by entering the bill or expense you bought it on.', href: '/purchases/bills/new' },
+      { text: 'A count that disagrees with the books is recorded as an adjustment, and the difference goes to Inventory Shrinkage.', href: '/inventory/adjustments/new' },
       { text: 'Selling a tracked item moves stock and posts its cost in the same entry as the sale. A non-inventory item does neither.', href: '/inventory' },
     ],
   },
@@ -81,6 +82,10 @@ const RULES: { rule: string; why: string }[] = [
   {
     rule: 'A posted entry is never edited or deleted.',
     why: 'It is reversed, and both entries stay. An audit trail that can lose a transaction is not an audit trail, and the database refuses the edit even if the application asks for it.',
+  },
+  {
+    rule: 'A document the ledger has never seen can simply be deleted.',
+    why: 'A draft or an estimate has told the ledger nothing and nobody outside the business holds its number, so getting rid of a mistake does not need a reversal. Anything posted is voided instead — the entry comes out, any stock goes back, and the document stays readable with VOID across it. Every screen offers whichever of the two applies, and says why when neither does.',
   },
   {
     rule: 'Every entry balances, to the cent.',

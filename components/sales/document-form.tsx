@@ -6,6 +6,7 @@ import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
+import { AccountPicker } from '@/components/forms/account-picker'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
@@ -15,6 +16,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
+import type { AccountPickerOption } from '@/lib/account-options'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
 import type { SalesTypeConfig } from '@/lib/sales-types'
 import { saveDocumentForm } from '@/app/(app)/sales/actions'
@@ -25,6 +27,11 @@ export type ItemOption = {
   price: string | null
   description: string | null
   taxCodeId: string | null
+  /** SERVICE | NON_INVENTORY | INVENTORY — decides the picker heading. */
+  type?: string
+  group?: string
+  /** Stock on hand, for tracked items. Shown beside the name. */
+  onHand?: string | null
 }
 export type Option = { id: string; label: string }
 export type TaxOption = Option & { rate: number; isInclusive: boolean }
@@ -73,7 +80,7 @@ export function DocumentForm({
   customers: Option[]
   items: ItemOption[]
   taxCodes: TaxOption[]
-  depositAccounts: Option[]
+  depositAccounts: AccountPickerOption[]
   terms: Option[]
   today: string
   currency: string
@@ -135,6 +142,21 @@ export function DocumentForm({
   }, [state, router, config.slug])
 
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
+
+  /**
+   * Tracked items are grouped and show what is on hand. A picker that hid them —
+   * as this one used to — made an inventory product impossible to sell.
+   */
+  const itemOptions = useMemo(
+    () =>
+      items.map((item) => ({
+        id: item.id,
+        label: item.label,
+        group: item.group,
+        hint: item.onHand != null ? `${item.onHand} on hand` : undefined,
+      })),
+    [items],
+  )
   const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
 
   /**
@@ -282,12 +304,11 @@ export function DocumentForm({
                 required
                 error={state.fieldErrors?.depositAccountId}
               >
-                <EntityPicker
+                <AccountPicker
                   id="depositAccountId"
                   options={depositAccounts}
                   value={depositAccountId || null}
                   onChange={(next) => setDepositAccountId(next ?? '')}
-                  placeholder="Search accounts"
                   required
                   error={state.fieldErrors?.depositAccountId}
                 />
@@ -314,7 +335,7 @@ export function DocumentForm({
         disagree. The purchase side is the mirror image: see bill-form.tsx.
       */}
       <Card className="overflow-hidden p-0">
-        <div className="flex items-baseline justify-between border-b bg-muted/30 px-3 py-2">
+        <div className="panel-head">
           <h2 className="text-sm font-semibold">Product and service details</h2>
           <span className="text-xs text-muted-foreground">
             Each line posts to the income account its item names.
@@ -355,7 +376,7 @@ export function DocumentForm({
                     <td className="px-2 py-1.5">
                       <EntityPicker
                         kind="item"
-                        options={items}
+                        options={itemOptions}
                         value={line.itemId || null}
                         onChange={(next) => chooseItem(line.key, next ?? '')}
                         placeholder="Item"

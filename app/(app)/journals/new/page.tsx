@@ -4,6 +4,7 @@ import { ArrowLeftIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { buttonVariants } from '@/components/ui/button'
+import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { requireOrgContext } from '@/server/auth/context'
 import * as accountService from '@/server/services/account.service'
@@ -13,15 +14,21 @@ export const metadata: Metadata = { title: 'New journal entry' }
 
 export default async function NewJournalPage() {
   const ctx = await requireOrgContext('journal:post')
-  const accounts = await accountService.postableAccounts(ctx)
+  const chart = await accountService.selectableAccounts(ctx)
 
-  // Control accounts are maintained by their documents. Leaving them out of the
-  // picker is kinder than letting someone choose one and be refused on submit.
-  const selectable = accounts.filter(
-    (account) =>
-      account.subtype !== 'ACCOUNTS_RECEIVABLE' &&
-      account.subtype !== 'ACCOUNTS_PAYABLE' &&
-      account.subtype !== 'INVENTORY',
+  // The one place where a narrowing is right. Receivables, payables and
+  // inventory are control accounts: their balances are the sum of a subledger,
+  // and a manual entry against one would break the agreement between the two.
+  // The posting engine refuses it (R7/R8) — leaving them out of the picker is
+  // kinder than letting someone choose one and be refused on submit. Everything
+  // else in the chart is here, grouped by statement type.
+  const selectable = accountOptions(
+    chart.filter(
+      (account) =>
+        account.subtype !== 'ACCOUNTS_RECEIVABLE' &&
+        account.subtype !== 'ACCOUNTS_PAYABLE' &&
+        account.subtype !== 'INVENTORY',
+    ),
   )
 
   return (

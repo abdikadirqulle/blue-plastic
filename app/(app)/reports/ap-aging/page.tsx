@@ -6,9 +6,11 @@ import { PageHeader } from '@/components/data/page-header'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableFooter, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, today } from '@/lib/date'
+import { formatDate } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
+import { readSettings } from '../params'
+import { ReportControls } from '../report-controls'
 import { AGING_BUCKETS, BUCKET_LABELS, aging } from '@/server/services/payables.service'
 
 const SORTABLE = ['name', 'total', ...AGING_BUCKETS] as const
@@ -22,7 +24,10 @@ export default async function PayablesAgingPage({
 }) {
   const ctx = await requireOrgContext('report:read')
   const params = await searchParams
-  const asOf = typeof params.asOf === 'string' ? params.asOf : today(ctx.organization.timeZone)
+  // The same period control every other report has, so "as at the end of last
+  // quarter" is one click rather than a date typed by hand.
+  const settings = readSettings(params, ctx.organization, 'this-fiscal-year')
+  const asOf = settings.asOf
 
   const report = await aging(ctx, asOf)
   const currency = ctx.organization.baseCurrency
@@ -44,6 +49,16 @@ export default async function PayablesAgingPage({
       <PageHeader
         title="Payables aging"
         description={`Unpaid bills as at ${formatDate(asOf)}, bucketed by how long they have been due.`}
+      />
+
+      <ReportControls
+        period={settings.period}
+        from={settings.range.from}
+        to={settings.range.to}
+        asOf={settings.asOf}
+        basis={settings.basis}
+        comparison={settings.comparison}
+        controls={{ mode: 'asOf', exportAs: 'ap-aging' }}
       />
 
       <Card className="overflow-hidden p-0">

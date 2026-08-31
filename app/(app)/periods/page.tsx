@@ -84,7 +84,7 @@ export default async function PeriodsPage() {
       <div className="space-y-6">
         {years.map((year) => (
           <Card key={year.id} className="overflow-hidden p-0">
-            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b bg-muted/30 px-3 py-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b bg-muted/50 px-3 py-2">
               <h2 className="text-sm font-semibold">
                 Fiscal year {year.year}
                 <span className="ml-2 font-normal text-muted-foreground">

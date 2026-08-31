@@ -1,5 +1,6 @@
 'use server'
 
+import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { action } from '@/server/action'
 import { db } from '@/server/db'
@@ -24,14 +25,15 @@ export const contactDialogOptions = action
         select: { id: true, name: true },
         orderBy: [{ isDefault: 'desc' }, { dueDays: 'asc' }],
       }),
-      accountService.postableAccounts(ctx),
+      accountService.selectableAccounts(ctx),
     ])
 
     return {
       terms: terms.map((term) => ({ id: term.id, label: term.name })),
-      expenseAccounts: accounts
-        .filter((account) => account.type === 'EXPENSE')
-        .map((account) => ({ id: account.id, label: `${account.code} ${account.name}` })),
+      // The whole chart. A vendor's usual category is normally an expense, but a
+      // landlord's deposit is an asset and a lender's is a liability — so the
+      // list is ordered, not filtered (see lib/account-options.ts).
+      expenseAccounts: accountOptions(accounts, { preferTypes: ['EXPENSE'] }),
       today: today(ctx.organization.timeZone),
       currency: ctx.organization.baseCurrency,
     }
@@ -41,19 +43,16 @@ export const itemDialogOptions = action
   .requires('item:read')
   .handler(async (ctx) => {
     const [accounts, taxCodes, categories] = await Promise.all([
-      accountService.postableAccounts(ctx),
+      accountService.selectableAccounts(ctx),
       taxService.listCodes(ctx),
       itemService.listCategories(ctx),
     ])
 
     return {
-      accounts: accounts.map((account) => ({
-        id: account.id,
-        label: `${account.code} ${account.name}`,
-        type: account.type as string,
-        subtype: account.subtype as string,
-      })),
+      accounts,
       taxCodes: taxCodes.filter((code) => code.isActive).map((code) => ({ id: code.id, label: code.name })),
       categories: categories.map((category) => ({ id: category.id, label: category.name })),
+      today: today(ctx.organization.timeZone),
+      currency: ctx.organization.baseCurrency,
     }
   })

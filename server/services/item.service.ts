@@ -1,11 +1,16 @@
 import 'server-only'
 import type { Prisma } from '@prisma/client'
 
+import { today } from '@/lib/date'
+import { Decimal } from '@/lib/money'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { ItemInput } from '@/lib/validation/master-data'
+import { systemAccountId } from '@/server/accounting/chart-of-accounts'
+import { positionsOf, recordMovement } from '@/server/accounting/inventory'
+import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
-import { db } from '@/server/db'
+import { db, type Tx } from '@/server/db'
 import { conflict, notFound, validation } from '@/server/errors'
 
 const ITEM_SELECT = {
@@ -74,7 +79,30 @@ export async function list(
     db.item.count({ where }),
   ])
 
-  return paged(rows.map(serialise), total, query)
+  // Stock travels with the item, because stock *is* a property of the item —
+  // not a separate register kept somewhere else. The products list shows what
+  // is on hand and what it is worth, so nobody has to hold two screens in their
+  // head to answer "have we got any?".
+  const trackedIds = rows.filter((row) => row.type === 'INVENTORY').map((row) => row.id)
+  const positions = await positionsOf(db as unknown as Tx, ctx.orgId, trackedIds)
+
+  return paged(
+    rows.map((row) => {
+      const position = positions.get(row.id)
+      return {
+        ...serialise(row),
+        onHand: position ? position.quantity.toFixed(2) : null,
+        stockValue: position ? position.value.toFixed(2) : null,
+        averageCost: position ? position.averageCost.toFixed(4) : null,
+        belowReorder:
+          position && row.reorderPoint
+            ? position.quantity.lessThanOrEqualTo(row.reorderPoint.toString())
+            : false,
+      }
+    }),
+    total,
+    query,
+  )
 }
 
 export async function get(ctx: OrgContext, id: string) {
@@ -93,6 +121,52 @@ export async function create(ctx: OrgContext, input: ItemInput) {
       data: { orgId: ctx.orgId, ...toData(input) },
       select: { id: true, name: true, type: true },
     })
+
+    // Stock setup is part of creating an inventory item, not a separate errand
+    // in another module. It posts like any other receipt: the value goes into
+    // the inventory account against Opening Balance Equity, and the stock ledger
+    // gets its first movement — so the item is usable the moment it exists.
+    const openingQuantity = new Decimal(input.openingQuantity ?? '0')
+
+    if (item.type === 'INVENTORY' && openingQuantity.greaterThan(0)) {
+      const date = input.openingDate ?? today(ctx.organization.timeZone)
+
+      const movement = await recordMovement(tx, ctx, {
+        itemId: item.id,
+        date,
+        type: 'OPENING',
+        sourceType: 'OPENING_BALANCE',
+        sourceId: item.id,
+        quantity: openingQuantity,
+        unitCost: input.openingUnitCost ?? '0',
+      })
+
+      if (!movement.value.isZero()) {
+        const journal = await postJournal(tx, ctx, {
+          date,
+          memo: `Opening stock — ${item.name}`,
+          sourceType: 'OPENING_BALANCE',
+          sourceId: item.id,
+          lines: [
+            {
+              accountId: input.inventoryAccountId!,
+              debit: movement.value,
+              description: `${openingQuantity.toFixed(2)} × ${movement.unitCost.toFixed(4)}`,
+            },
+            {
+              accountId: await systemAccountId(tx, ctx.orgId, 'OPENING_BALANCE_EQUITY'),
+              credit: movement.value,
+              description: `Opening stock — ${item.name}`,
+            },
+          ],
+        })
+
+        await tx.inventoryTransaction.updateMany({
+          where: { orgId: ctx.orgId, itemId: item.id, journalId: null },
+          data: { journalId: journal.id },
+        })
+      }
+    }
 
     await writeAudit(tx, ctx, { entity: 'Item', entityId: item.id, action: 'CREATE', after: item }, meta)
     return item
