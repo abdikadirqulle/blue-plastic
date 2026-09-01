@@ -51,6 +51,7 @@ export default async function SalesByItemPage({ searchParams }: { searchParams: 
             currency={ctx.organization.baseCurrency}
             nameHeader="Item"
             countHeader="Documents"
+            linkTo={(id) => `/inventory/${id}`}
             quantities
             empty="Nothing was sold in this period."
           />

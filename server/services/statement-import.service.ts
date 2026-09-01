@@ -256,7 +256,7 @@ export async function suggestMatches(
            l.debit           AS "debit",
            l.credit          AS "credit"
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE l."orgId" = ${ctx.orgId}
        AND l."accountId" = ${imported.accountId}
        AND (l.debit - l.credit) = ${amount.toFixed(4)}::numeric

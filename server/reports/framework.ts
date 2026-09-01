@@ -88,7 +88,7 @@ export async function accountFigures(
             LEFT JOIN journal_lines l
               ON l."accountId" = a.id AND l."orgId" = a."orgId"
             LEFT JOIN journals j
-              ON j.id = l."journalId" AND j.status <> 'DRAFT'
+              ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
              AND (${excludeClosing} = false OR j."isClosingEntry" = false)
              AND EXISTS (
                    SELECT 1 FROM journal_lines cl
@@ -114,7 +114,7 @@ export async function accountFigures(
             LEFT JOIN journal_lines l
               ON l."accountId" = a.id AND l."orgId" = a."orgId"
             LEFT JOIN journals j
-              ON j.id = l."journalId" AND j.status <> 'DRAFT'
+              ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
              AND (${excludeClosing} = false OR j."isClosingEntry" = false)
            WHERE a."orgId" = ${orgId}
              AND (l.id IS NULL OR j.id IS NOT NULL)

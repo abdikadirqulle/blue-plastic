@@ -61,6 +61,28 @@ export async function nextDocumentNumber(
   return format(created.prefix, 1, created.padding)
 }
 
+/**
+ * What the next number will be, without taking it.
+ *
+ * For showing on a form before anything is saved. It is a preview and nothing
+ * more: the real number is allocated under a row lock at the moment of posting,
+ * so if somebody else posts first this one moves on. Reserving it here instead
+ * would burn a number every time a form was opened and abandoned.
+ */
+export async function peekDocumentNumber(
+  client: Tx,
+  orgId: string,
+  docType: DocumentType,
+): Promise<string> {
+  const sequence = await client.documentSequence.findFirst({
+    where: { orgId, docType },
+    select: { prefix: true, nextNumber: true, padding: true },
+  })
+
+  if (!sequence) return format(DEFAULT_PREFIX[docType], 1, 5)
+  return format(sequence.prefix, sequence.nextNumber, sequence.padding)
+}
+
 function format(prefix: string, value: number, padding: number): string {
   return `${prefix}${String(value).padStart(padding, '0')}`
 }

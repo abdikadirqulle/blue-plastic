@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { calendarDate, cuid, moneyString, optionalText, requiredText } from './common'
+import { calendarDate, cuid, moneyString, optionalText } from './common'
 
 const optionalId = z
   .union([cuid, z.literal('')])
@@ -51,7 +51,6 @@ export const purchaseDocumentSchema = z.object({
 
 export type PurchaseDocumentInput = z.infer<typeof purchaseDocumentSchema>
 
-export const voidPurchaseSchema = z.object({ id: cuid, reason: requiredText('Reason', 300) })
 export const convertOrderSchema = z.object({ id: cuid, date: calendarDate })
 
 export const billPaymentSchema = z.object({
@@ -71,3 +70,34 @@ export const applyVendorCreditSchema = z.object({
   creditDocumentId: cuid,
   applications: z.array(z.object({ billId: cuid, amount: moneyString })).min(1).max(200),
 })
+
+/* --- Receiving ------------------------------------------------------------ */
+
+/**
+ * A goods receipt against a purchase order: how much of each line arrived.
+ *
+ * Quantities are strings, like every other quantity in the system, so a decimal
+ * survives the round trip without going through a float.
+ */
+export const receiveOrderSchema = z.object({
+  orderId: cuid,
+  date: calendarDate,
+  reference: optionalText(100),
+  memo: optionalText(500),
+  lines: z
+    .array(
+      z.object({
+        lineId: cuid,
+        /** Blank and "0" both mean "none of this line arrived". */
+        quantity: z
+          .string()
+          .trim()
+          .regex(/^\d{0,12}(\.\d{1,4})?$/, 'Enter a quantity')
+          .transform((value) => (value === '' || value === '.' ? '0' : value)),
+      }),
+    )
+    .min(1, 'Enter a quantity against at least one line')
+    .max(200),
+})
+
+export type ReceiveOrderInput = z.infer<typeof receiveOrderSchema>

@@ -65,6 +65,7 @@ export default async function SalesListPage({
 
   const canCreate = ctx.permissions.has(config.createPermission)
   const canEditDocuments = ctx.permissions.has('invoice:update')
+  const canDelete = ctx.permissions.has('invoice:void')
   const newButton = canCreate ? (
     <Link href={`/sales/${config.slug}/new`} className={buttonVariants({ size: 'sm' })}>
       <PlusIcon /> New {config.singular.toLowerCase()}
@@ -185,6 +186,11 @@ export default async function SalesListPage({
                             : []),
                           { label: 'Print', href: `${basePath}/${row.id}/print`, icon: 'print' as const },
                         ]}
+                        onDelete={
+                          canDelete
+                            ? { kind: 'sales', id: row.id, number: row.number }
+                            : undefined
+                        }
                       />
                     </TableCell>
                   </TableRow>

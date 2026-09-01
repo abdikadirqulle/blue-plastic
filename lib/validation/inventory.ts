@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { calendarDate, cuid, optionalText, requiredText } from './common'
+import { calendarDate, cuid, optionalText } from './common'
 
 const quantity = z
   .string()
@@ -41,4 +41,3 @@ export const negativeStockSchema = z.object({
   allowNegativeStock: z.coerce.boolean(),
 })
 
-export const voidAdjustmentSchema = z.object({ id: cuid, reason: requiredText('Reason', 300) })

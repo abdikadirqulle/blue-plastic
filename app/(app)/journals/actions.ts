@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache'
 
 import { toFormState, type FormState } from '@/components/forms/action-state'
 import { manualJournalSchema, reverseJournalSchema } from '@/lib/validation/accounting'
+import { deleteRecordSchema } from '@/lib/validation/common'
 import { action } from '@/server/action'
 import * as journalService from '@/server/services/journal.service'
 
@@ -30,6 +31,25 @@ export const reverseJournalAction = action
     revalidateLedger()
     revalidatePath(`/journals/${input.journalId}`)
     return { id: reversal.id, journalNumber: reversal.journalNumber }
+  })
+
+/**
+ * Delete a journal entry.
+ *
+ * Routed by the service to whatever document produced it, so deleting the entry
+ * and deleting the transaction are the same act. See `journal.service.remove`.
+ */
+export const deleteJournal = action
+  .requires('journal:reverse')
+  .input(deleteRecordSchema)
+  .handler(async (ctx, input) => {
+    const result = await journalService.remove(ctx, input.id, input.reason)
+    revalidateLedger()
+    revalidatePath('/sales')
+    revalidatePath('/purchases')
+    revalidatePath('/banking')
+    revalidatePath('/inventory')
+    return result
   })
 
 /**

@@ -55,7 +55,9 @@ export default async function ExpensesByCategoryPage({
             currency={ctx.organization.baseCurrency}
             nameHeader="Account"
             countHeader="Entries"
-            linkTo={(id) => `/accounts/${id}?from=${settings.range.from}&to=${settings.range.to}`}
+            linkTo={(id) =>
+              `/reports/transaction-detail?account=${id}&period=custom&from=${settings.range.from}&to=${settings.range.to}&back=/reports/expenses-by-category`
+            }
             empty="No expenses were recorded in this period."
           />
         </div>

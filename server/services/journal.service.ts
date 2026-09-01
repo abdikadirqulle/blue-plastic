@@ -1,14 +1,22 @@
 import 'server-only'
-import type { Prisma } from '@prisma/client'
+import type { JournalSourceType, Prisma } from '@prisma/client'
 
 import { Decimal, toMoneyString } from '@/lib/money'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { ManualJournalInput } from '@/lib/validation/accounting'
+import { partyRequiredBy } from '@/lib/account-options'
+import { deleteJournals } from '@/server/accounting/deletion'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import type { OrgContext } from '@/server/auth/context'
 import { db } from '@/server/db'
-import { forbidden, notFound, validation } from '@/server/errors'
+import { notFound, validation } from '@/server/errors'
+import * as bankingService from '@/server/services/banking.service'
+import * as billPaymentService from '@/server/services/bill-payment.service'
+import * as inventoryService from '@/server/services/inventory.service'
 import { resolveSources, sourceFor, type JournalSource } from '@/server/services/journal-sources'
+import * as paymentService from '@/server/services/payment.service'
+import * as purchaseService from '@/server/services/purchase.service'
+import * as salesService from '@/server/services/sales.service'
 
 export type JournalRow = {
   id: string
@@ -40,6 +48,10 @@ export async function list(
 ) {
   const where: Prisma.JournalWhereInput = {
     orgId: ctx.orgId,
+    // A deleted entry is gone from this list for the same reason it is gone from
+    // every balance. The row survives and its own page still reads, so a link in
+    // an audit record still resolves.
+    status: { not: 'DELETED' },
     ...(query.q
       ? {
           OR: [
@@ -127,6 +139,8 @@ export async function get(ctx: OrgContext, id: string) {
       isClosingEntry: true,
       currencyCode: true,
       postedAt: true,
+      deletedAt: true,
+      deleteReason: true,
       reversalReason: true,
       reversalOf: { select: { id: true, journalNumber: true, date: true } },
       reversedBy: { select: { id: true, journalNumber: true, date: true } },
@@ -184,10 +198,23 @@ export async function get(ctx: OrgContext, id: string) {
 /**
  * Post a manual journal.
  *
- * Manual entry is the one place a human chooses both sides, so it is also the one
- * place where a control account could be hit without its subledger counterpart.
- * The posting engine refuses that (R7/R8); this refuses it earlier, with a
- * message that explains why rather than quoting a constraint.
+ * Manual entry is the one place a human chooses both sides, so it is the one
+ * place the subledger dimensions have to be asked for rather than derived.
+ *
+ * It used to refuse receivables, payables and inventory outright. That was the
+ * wrong call twice over. Half the entries a business actually makes by hand are
+ * against exactly those accounts — writing off a bad debt, recording a customer
+ * payment that arrived without an invoice, opening a set of books, settling a
+ * vendor balance from petty cash — and a system that refuses them is a system
+ * where those things simply do not get recorded. And the protection was
+ * illusory: the ledger already refuses an unnamed control-account line (R7), so
+ * the only thing the ban bought was the inability to name one.
+ *
+ * What replaces it is the rule the ledger itself enforces: a receivables line
+ * names a customer, a payables line names a vendor, and a party may not be
+ * attached to a line that has no business carrying one. Aging then continues to
+ * agree with the control account, because the aging reports read the control
+ * account (see `receivables.service`).
  */
 export async function createManual(ctx: OrgContext, input: ManualJournalInput) {
   const lines = input.lines
@@ -196,6 +223,8 @@ export async function createManual(ctx: OrgContext, input: ManualJournalInput) {
       debit: line.debit.trim(),
       credit: line.credit.trim(),
       description: line.description.trim() || null,
+      customerId: line.customerId ?? null,
+      vendorId: line.vendorId ?? null,
     }))
     .filter((line) => line.accountId && (line.debit !== '' || line.credit !== ''))
 
@@ -203,22 +232,65 @@ export async function createManual(ctx: OrgContext, input: ManualJournalInput) {
     throw validation('Enter at least two lines: something debited and something credited.')
   }
 
-  const controlAccounts = await db.ledgerAccount.findMany({
-    where: {
-      orgId: ctx.orgId,
-      id: { in: lines.map((line) => line.accountId) },
-      systemKey: { in: ['ACCOUNTS_RECEIVABLE', 'ACCOUNTS_PAYABLE', 'INVENTORY_ASSET'] },
-    },
-    select: { name: true, systemKey: true },
+  const accounts = await db.ledgerAccount.findMany({
+    where: { orgId: ctx.orgId, id: { in: lines.map((line) => line.accountId) } },
+    select: { id: true, code: true, name: true, subtype: true },
+  })
+  const byId = new Map(accounts.map((account) => [account.id, account]))
+
+  const fieldErrors: Record<string, string[]> = {}
+  const complain = (index: number, field: string, message: string) => {
+    fieldErrors[`lines.${index}.${field}`] = [message]
+  }
+
+  lines.forEach((line, index) => {
+    const account = byId.get(line.accountId)
+    if (!account) {
+      complain(index, 'accountId', 'That account no longer exists.')
+      return
+    }
+
+    const requires = partyRequiredBy(account.subtype)
+
+    if (requires === 'customer' && !line.customerId) {
+      complain(
+        index,
+        'customerId',
+        `${account.name} is a receivables account. Say whose balance this moves.`,
+      )
+    }
+    if (requires === 'vendor' && !line.vendorId) {
+      complain(
+        index,
+        'vendorId',
+        `${account.name} is a payables account. Say whose balance this moves.`,
+      )
+    }
+
+    // A name is welcome on any line — who an expense was with is worth recording
+    // whatever account it landed in. What is refused is a name of the *wrong
+    // kind* on a control account, because that is the one place the name is not
+    // a note but a subledger balance: a vendor on a receivables line would put
+    // the aging report and the control account permanently out of step.
+    if (requires === 'customer' && line.vendorId) {
+      complain(index, 'vendorId', `${account.name} is a receivables account. Name a customer, not a vendor.`)
+    }
+    if (requires === 'vendor' && line.customerId) {
+      complain(index, 'customerId', `${account.name} is a payables account. Name a vendor, not a customer.`)
+    }
+    if (line.customerId && line.vendorId) {
+      complain(index, 'vendorId', 'A line carries one name, not two.')
+    }
   })
 
-  if (controlAccounts.length > 0) {
-    const names = [...new Set(controlAccounts.map((account) => account.name))].join(', ')
-    throw forbidden(
-      `${names} is a control account maintained by the system. ` +
-        `Post to it through an invoice, bill, payment or inventory adjustment so the subledger stays in step.`,
+  if (Object.keys(fieldErrors).length > 0) {
+    throw validation(
+      'Some lines are missing the customer or vendor their account requires.',
+      fieldErrors,
     )
   }
+
+  await assertPartiesExist(ctx, lines)
 
   return db.$transaction((tx) =>
     postJournal(tx, ctx, {
@@ -231,9 +303,87 @@ export async function createManual(ctx: OrgContext, input: ManualJournalInput) {
         debit: line.debit === '' ? 0 : line.debit,
         credit: line.credit === '' ? 0 : line.credit,
         description: line.description,
+        customerId: line.customerId,
+        vendorId: line.vendorId,
       })),
     }),
   )
+}
+
+/** A named party has to be one of this organisation's, not merely a valid id. */
+async function assertPartiesExist(
+  ctx: OrgContext,
+  lines: { customerId: string | null; vendorId: string | null }[],
+) {
+  const customerIds = [...new Set(lines.map((line) => line.customerId).filter(Boolean) as string[])]
+  const vendorIds = [...new Set(lines.map((line) => line.vendorId).filter(Boolean) as string[])]
+
+  const [customers, vendors] = await Promise.all([
+    customerIds.length
+      ? db.customer.count({ where: { orgId: ctx.orgId, id: { in: customerIds } } })
+      : 0,
+    vendorIds.length ? db.vendor.count({ where: { orgId: ctx.orgId, id: { in: vendorIds } } }) : 0,
+  ])
+
+  if (customers !== customerIds.length) throw notFound('Customer')
+  if (vendors !== vendorIds.length) throw notFound('Vendor')
+}
+
+/**
+ * Delete a journal entry.
+ *
+ * A journal that a document produced is not deleted on its own: the invoice, bill
+ * or payment that caused it would still be sitting in its list claiming to be
+ * posted. So the delete is routed to that document's own service, which withdraws
+ * the pair together. That is not an alternative offered instead of deleting — the
+ * person clicked Delete and the transaction is deleted; it is only the question of
+ * which record is the transaction.
+ *
+ * A manual entry has no document behind it, and is withdrawn directly.
+ */
+export async function remove(ctx: OrgContext, id: string, reason?: string | null) {
+  const journal = await db.journal.findFirst({
+    where: { id, orgId: ctx.orgId },
+    select: { id: true, journalNumber: true, sourceType: true, sourceId: true, status: true },
+  })
+  if (!journal) throw notFound('Journal')
+  if (journal.status === 'DELETED') return { id, number: journal.journalNumber }
+
+  if (journal.sourceId) {
+    const owner = OWNED_BY[journal.sourceType]
+    if (owner) return owner(ctx, journal.sourceId, reason)
+  }
+
+  return db.$transaction(async (tx) => {
+    await deleteJournals(tx, ctx, [id], reason)
+    return { id, number: journal.journalNumber }
+  })
+}
+
+/**
+ * Which service owns the transaction behind a journal.
+ *
+ * A closing entry and a reversal are deliberately absent: the first is undone by
+ * reopening the year, and the second goes with whatever it reversed.
+ */
+const OWNED_BY: Partial<
+  Record<
+    JournalSourceType,
+    (ctx: OrgContext, id: string, reason?: string | null) => Promise<{ id: string; number: string }>
+  >
+> = {
+  INVOICE: (ctx, id, reason) => salesService.remove(ctx, id, reason),
+  SALES_RECEIPT: (ctx, id, reason) => salesService.remove(ctx, id, reason),
+  CREDIT_MEMO: (ctx, id, reason) => salesService.remove(ctx, id, reason),
+  REFUND_RECEIPT: (ctx, id, reason) => salesService.remove(ctx, id, reason),
+  CUSTOMER_PAYMENT: (ctx, id, reason) => paymentService.remove(ctx, id, reason),
+  BILL: (ctx, id, reason) => purchaseService.remove(ctx, id, reason),
+  EXPENSE: (ctx, id, reason) => purchaseService.remove(ctx, id, reason),
+  VENDOR_CREDIT: (ctx, id, reason) => purchaseService.remove(ctx, id, reason),
+  BILL_PAYMENT: (ctx, id, reason) => billPaymentService.remove(ctx, id, reason),
+  TRANSFER: (ctx, id, reason) => bankingService.removeTransfer(ctx, id, reason),
+  DEPOSIT: (ctx, id, reason) => bankingService.removeDeposit(ctx, id, reason),
+  INVENTORY_ADJUSTMENT: (ctx, id, reason) => inventoryService.removeAdjustment(ctx, id, reason),
 }
 
 export async function reverse(

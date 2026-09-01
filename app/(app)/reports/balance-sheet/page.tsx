@@ -25,7 +25,11 @@ export default async function BalanceSheetPage({
 
   const sheet = await balanceSheet(ctx.orgId, settings.asOf, { basis: settings.basis })
 
-  const drill = (accountId: string) => `/accounts/${accountId}?from=1900-01-01&to=${settings.asOf}`
+  // A balance sheet figure is a position, not a movement, so the detail behind
+  // it runs from the beginning of the ledger to the statement date rather than
+  // over the reporting period.
+  const drill = (accountId: string) =>
+    `/reports/transaction-detail?account=${accountId}&period=custom&from=1900-01-01&to=${settings.asOf}&back=/reports/balance-sheet`
 
   return (
     <>

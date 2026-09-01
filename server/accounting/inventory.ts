@@ -304,6 +304,7 @@ export async function valuation(tx: Tx, orgId: string) {
          LIMIT 1
       ) t ON true
      WHERE i."orgId" = ${orgId}
+       AND i."deletedAt" IS NULL
        AND i.type = 'INVENTORY'
      ORDER BY i.name
   `
@@ -343,7 +344,7 @@ export async function stockAgreesWithLedger(tx: Tx, orgId: string) {
   const [row] = await tx.$queryRaw<{ balance: string }[]>`
     SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       JOIN ledger_accounts a ON a.id = l."accountId"
      WHERE l."orgId" = ${orgId}
        AND a."systemKey" = 'INVENTORY_ASSET'

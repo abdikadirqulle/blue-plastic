@@ -175,7 +175,10 @@ export async function resolveSources(
   for (const payment of customerPayments) {
     resolved.set(key('CUSTOMER_PAYMENT', payment.id), {
       number: payment.number,
-      href: '/payments',
+      // The payments list, filtered to this one. There is no payment page of its
+      // own, and a link to an unfiltered list of two hundred rows is not a
+      // drill-down — it is a place to start looking again.
+      href: `/payments?q=${encodeURIComponent(payment.number)}`,
       partyName: payment.customer.displayName,
       partyHref: `/customers/${payment.customer.id}`,
     })
@@ -184,7 +187,7 @@ export async function resolveSources(
   for (const payment of billPayments) {
     resolved.set(key('BILL_PAYMENT', payment.id), {
       number: payment.number,
-      href: '/bill-payments',
+      href: `/bill-payments?q=${encodeURIComponent(payment.number)}`,
       partyName: payment.vendor.displayName,
       partyHref: `/vendors/${payment.vendor.id}`,
     })
@@ -193,7 +196,7 @@ export async function resolveSources(
   for (const transfer of transfers) {
     resolved.set(key('TRANSFER', transfer.id), {
       number: transfer.number,
-      href: '/banking',
+      href: '/banking#transfers',
       partyName: null,
       partyHref: null,
     })
@@ -202,7 +205,7 @@ export async function resolveSources(
   for (const deposit of deposits) {
     resolved.set(key('DEPOSIT', deposit.id), {
       number: deposit.number,
-      href: '/banking',
+      href: '/banking#transfers',
       partyName: null,
       partyHref: null,
     })
@@ -211,7 +214,7 @@ export async function resolveSources(
   for (const adjustment of adjustments) {
     resolved.set(key('INVENTORY_ADJUSTMENT', adjustment.id), {
       number: adjustment.number,
-      href: '/inventory',
+      href: '/inventory#adjustments',
       partyName: null,
       partyHref: null,
     })

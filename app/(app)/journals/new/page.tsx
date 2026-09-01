@@ -7,6 +7,8 @@ import { buttonVariants } from '@/components/ui/button'
 import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
+import { peekDocumentNumber } from '@/server/sequences'
 import * as accountService from '@/server/services/account.service'
 import { JournalEntryForm } from './journal-entry-form'
 
@@ -14,22 +16,27 @@ export const metadata: Metadata = { title: 'New journal entry' }
 
 export default async function NewJournalPage() {
   const ctx = await requireOrgContext('journal:post')
-  const chart = await accountService.selectableAccounts(ctx)
 
-  // The one place where a narrowing is right. Receivables, payables and
-  // inventory are control accounts: their balances are the sum of a subledger,
-  // and a manual entry against one would break the agreement between the two.
-  // The posting engine refuses it (R7/R8) — leaving them out of the picker is
-  // kinder than letting someone choose one and be refused on submit. Everything
-  // else in the chart is here, grouped by statement type.
-  const selectable = accountOptions(
-    chart.filter(
-      (account) =>
-        account.subtype !== 'ACCOUNTS_RECEIVABLE' &&
-        account.subtype !== 'ACCOUNTS_PAYABLE' &&
-        account.subtype !== 'INVENTORY',
-    ),
-  )
+  const [chart, customers, vendors, entryNumber] = await Promise.all([
+    // The whole chart. Every postable account, receivables, payables, stock and
+    // system accounts included. The screen used to hide those three, on the
+    // theory that a hand-written entry against a control account would break the
+    // agreement with its subledger. It does not: the subledger *is* the control
+    // account's lines, and the reports read them. What the ledger actually
+    // requires is a name on the line (R7), which is what the form now asks for.
+    accountService.selectableAccounts(ctx),
+    db.customer.findMany({
+      where: { orgId: ctx.orgId, isActive: true },
+      select: { id: true, displayName: true, companyName: true },
+      orderBy: { displayName: 'asc' },
+    }),
+    db.vendor.findMany({
+      where: { orgId: ctx.orgId, isActive: true },
+      select: { id: true, displayName: true, companyName: true },
+      orderBy: { displayName: 'asc' },
+    }),
+    peekDocumentNumber(db, ctx.orgId, 'JOURNAL'),
+  ])
 
   return (
     <>
@@ -39,11 +46,22 @@ export default async function NewJournalPage() {
 
       <PageHeader
         title="New journal entry"
-        description="Debits on the left, credits on the right. Accounts receivable, accounts payable and inventory are maintained by their own documents and are not listed here."
+        description="Debits on the left, credits on the right. Every account in the chart is available; a line against receivables or payables has to say whose balance it moves."
       />
 
       <JournalEntryForm
-        accounts={selectable}
+        accounts={accountOptions(chart)}
+        customers={customers.map((customer) => ({
+          id: customer.id,
+          label: customer.displayName,
+          hint: customer.companyName ?? undefined,
+        }))}
+        vendors={vendors.map((vendor) => ({
+          id: vendor.id,
+          label: vendor.displayName,
+          hint: vendor.companyName ?? undefined,
+        }))}
+        entryNumber={entryNumber}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
       />

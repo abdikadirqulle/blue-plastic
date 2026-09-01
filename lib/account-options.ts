@@ -1,4 +1,4 @@
-import type { AccountSubtype, AccountType } from '@prisma/client'
+import type { AccountSubtype, AccountType, SystemAccountKey } from '@prisma/client'
 
 import { ACCOUNT_SUBTYPE_LABELS, ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER } from '@/lib/accounting-labels'
 
@@ -23,9 +23,31 @@ export type AccountChoice = {
   name: string
   type: AccountType
   subtype: AccountSubtype
+  /** The role the engine posts to through this account, where it has one. */
+  systemKey?: SystemAccountKey | null
   /** Natural-side balance as at today, pre-formatted. Optional. */
   balance?: string | null
 }
+
+/**
+ * The subledger dimension a line against this account must carry.
+ *
+ * Receivables and payables are control accounts: their balance is the sum of a
+ * subledger, and a line that does not say whose it is makes the aging report and
+ * the trial balance disagree. R7 refuses such a line in the database, so every
+ * picker that can reach one has to be able to ask for the name.
+ *
+ * Keyed on the subtype rather than the system role deliberately — a business
+ * with two receivables accounts gets the same protection on both.
+ */
+export type PartyRequirement = 'customer' | 'vendor' | null
+
+export const partyRequiredBy = (subtype: AccountSubtype): PartyRequirement =>
+  subtype === 'ACCOUNTS_RECEIVABLE'
+    ? 'customer'
+    : subtype === 'ACCOUNTS_PAYABLE'
+      ? 'vendor'
+      : null
 
 export type AccountPickerOption = {
   id: string
@@ -35,6 +57,8 @@ export type AccountPickerOption = {
   /** Kept so a caller can react to the choice — a bank account, a stock account. */
   type: AccountType
   subtype: AccountSubtype
+  /** Set when choosing this account obliges the caller to name a customer or vendor. */
+  requiresParty?: PartyRequirement
 }
 
 export const SUGGESTED_GROUP = 'Suggested'
@@ -106,6 +130,7 @@ export function accountOptions(
     group,
     type: account.type,
     subtype: account.subtype,
+    requiresParty: partyRequiredBy(account.subtype),
   })
 
   return [

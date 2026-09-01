@@ -5,13 +5,13 @@ import type { PurchaseDocumentType } from '@prisma/client'
 import { z } from 'zod'
 
 import { toFormState, type FormState } from '@/components/forms/action-state'
-import { cuid } from '@/lib/validation/common'
+import { cuid, deleteRecordSchema } from '@/lib/validation/common'
 import {
   applyVendorCreditSchema,
   billPaymentSchema,
   convertOrderSchema,
   purchaseDocumentSchema,
-  voidPurchaseSchema,
+  receiveOrderSchema,
 } from '@/lib/validation/purchases'
 import { requireOrgContext } from '@/server/auth/context'
 import { action } from '@/server/action'
@@ -51,22 +51,15 @@ export const updatePurchase = action
     return document
   })
 
-export const voidPurchase = action
-  .requires('bill:void')
-  .input(voidPurchaseSchema)
-  .handler(async (ctx, input) => {
-    const document = await purchaseService.voidDocument(ctx, input.id, input.reason)
-    revalidatePurchases()
-    return document
-  })
-
-/** Delete a draft or a purchase order. Anything posted is voided instead. */
+/** Delete a bill, expense, vendor credit or purchase order. */
 export const deletePurchase = action
   .requires('bill:void')
-  .input(z.object({ id: cuid }))
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const document = await purchaseService.remove(ctx, input.id)
+    const document = await purchaseService.remove(ctx, input.id, input.reason)
     revalidatePurchases()
+    revalidatePath('/inventory')
+    revalidatePath('/reports')
     return document
   })
 
@@ -76,6 +69,23 @@ export const convertOrder = action
   .handler(async (ctx, input) => {
     const bill = await purchaseService.convertOrder(ctx, input.id, input.date)
     revalidatePurchases()
+    return bill
+  })
+
+/**
+ * Book a delivery in against a purchase order.
+ *
+ * Guarded by `bill:create` rather than a receiving permission of its own,
+ * because that is precisely what it does: it raises a bill for what arrived.
+ */
+export const receiveOrder = action
+  .requires('bill:create')
+  .input(receiveOrderSchema)
+  .handler(async (ctx, input) => {
+    const bill = await purchaseService.receiveOrder(ctx, input)
+    revalidatePurchases()
+    revalidatePath('/inventory')
+    revalidatePath(`/purchases/purchase-orders/${input.orderId}`)
     return bill
   })
 
@@ -97,11 +107,11 @@ export const applyVendorCredit = action
     return credit
   })
 
-export const voidBillPayment = action
+export const deleteBillPayment = action
   .requires('expense:void')
-  .input(voidPurchaseSchema)
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const payment = await billPaymentService.voidPayment(ctx, input.id, input.reason)
+    const payment = await billPaymentService.remove(ctx, input.id, input.reason)
     revalidatePurchases()
     return payment
   })
@@ -159,6 +169,31 @@ export async function savePurchaseForm(_prev: FormState, formData: FormData): Pr
   return toFormState(
     result,
     result.ok && 'number' in result.data ? `${result.data.number} saved.` : 'Saved.',
+  )
+}
+
+/**
+ * The receiving form posts JSON: its line grid is an array, and flattening then
+ * re-parsing it would only invent a chance to lose a line.
+ */
+export async function receiveOrderForm(_prev: FormState, formData: FormData): Promise<FormState> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(String(formData.get('payload') ?? '{}'))
+  } catch {
+    return { status: 'error', message: 'The receipt could not be read. Please try again.' }
+  }
+
+  const result = await receiveOrder(parsed)
+  return toFormState(
+    result,
+    result.ok && 'number' in result.data
+      ? `Received on bill ${result.data.number}. ${
+          result.data.orderStatus === 'CLOSED'
+            ? `${result.data.orderNumber} is now complete.`
+            : `${result.data.orderNumber} still has items outstanding.`
+        }`
+      : 'Receipt recorded.',
   )
 }
 

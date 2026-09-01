@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 
 import { toFormState, type FormState } from '@/components/forms/action-state'
-import { cuid } from '@/lib/validation/common'
+import { cuid, deleteRecordSchema } from '@/lib/validation/common'
 import {
   depositSchema,
   excludeTransactionSchema,
@@ -15,7 +15,6 @@ import {
   toggleClearedSchema,
   transferSchema,
   undoReconciliationSchema,
-  voidBankDocumentSchema,
 } from '@/lib/validation/banking'
 import { action } from '@/server/action'
 import * as bankingService from '@/server/services/banking.service'
@@ -48,20 +47,20 @@ export const createDeposit = action
     return deposit
   })
 
-export const voidTransfer = action
+export const deleteTransfer = action
   .requires('bank:transact')
-  .input(voidBankDocumentSchema)
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const result = await bankingService.voidTransfer(ctx, input.id, input.reason)
+    const result = await bankingService.removeTransfer(ctx, input.id, input.reason)
     revalidateBanking()
     return result
   })
 
-export const voidDeposit = action
+export const deleteDeposit = action
   .requires('bank:transact')
-  .input(voidBankDocumentSchema)
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const result = await bankingService.voidDeposit(ctx, input.id, input.reason)
+    const result = await bankingService.removeDeposit(ctx, input.id, input.reason)
     revalidateBanking()
     return result
   })

@@ -14,16 +14,33 @@ import { db, type Tx } from '@/server/db'
  * disagree — which is the whole reason R7 requires a customer on every AR line.
  */
 
-export const AGING_BUCKETS = ['current', 'd1_30', 'd31_60', 'd61_90', 'd90_plus'] as const
+export const AGING_BUCKETS = [
+  'unapplied',
+  'current',
+  'd1_30',
+  'd31_60',
+  'd61_90',
+  'd90_plus',
+] as const
 export type AgingBucket = (typeof AGING_BUCKETS)[number]
 
 export const BUCKET_LABELS: Record<AgingBucket, string> = {
+  unapplied: 'Not on a document',
   current: 'Not yet due',
   d1_30: '1–30 days',
   d31_60: '31–60 days',
   d61_90: '61–90 days',
   d90_plus: '90+ days',
 }
+
+/** Buckets that represent something actually overdue. */
+export const OVERDUE_BUCKETS = AGING_BUCKETS.filter(
+  (bucket) => bucket !== 'current' && bucket !== 'unapplied',
+)
+
+export const emptyBuckets = (): Record<AgingBucket, Decimal> => ({
+  unapplied: ZERO, current: ZERO, d1_30: ZERO, d31_60: ZERO, d61_90: ZERO, d90_plus: ZERO,
+})
 
 export type AgingRow = {
   customerId: string
@@ -50,78 +67,116 @@ export async function aging(
   const client = options.client ?? db
   const asOfDate = toDate(asOf)
 
-  const rows = await client.$queryRaw<
-    {
-      customerId: string
-      customerName: string
-      days: number | null
-      outstanding: string
-    }[]
-  >`
-    SELECT d."customerId"                       AS "customerId",
-           c."displayName"                      AS "customerName",
-           (${asOfDate}::date - d."dueDate")    AS days,
-           (d.total - COALESCE((
-              SELECT SUM(a.amount) FROM sales_applications a WHERE a."invoiceId" = d.id
-           ), 0))                               AS outstanding
-      FROM sales_documents d
-      JOIN customers c ON c.id = d."customerId"
-     WHERE d."orgId"  = ${ctx.orgId}
-       AND d.type     = 'INVOICE'
-       AND d.status  IN ('OPEN', 'PARTIAL')
-       AND d.date    <= ${asOfDate}
-  `
+  const [rows, subledger] = await Promise.all([
+    client.$queryRaw<
+      {
+        customerId: string
+        customerName: string
+        days: number | null
+        outstanding: string
+      }[]
+    >`
+      SELECT d."customerId"                       AS "customerId",
+             c."displayName"                      AS "customerName",
+             (${asOfDate}::date - d."dueDate")    AS days,
+             (d.total - COALESCE((
+                SELECT SUM(a.amount) FROM sales_applications a WHERE a."invoiceId" = d.id
+             ), 0))                               AS outstanding
+        FROM sales_documents d
+        JOIN customers c ON c.id = d."customerId"
+       WHERE d."orgId"  = ${ctx.orgId}
+         AND d."deletedAt" IS NULL
+         AND d.type     = 'INVOICE'
+         AND d.status  IN ('OPEN', 'PARTIAL')
+         AND d.date    <= ${asOfDate}
+    `,
+    // The control account, broken down by whose balance it is.
+    //
+    // This is what makes the report tie out. Not every receivable comes from an
+    // open invoice: an opening balance posts straight to the control account, a
+    // payment can sit unapplied, and a hand-written entry can raise or write off
+    // a balance with no document at all. Those used to be invisible here, so the
+    // report quietly disagreed with the ledger the first time anybody entered a
+    // customer with an opening balance.
+    client.$queryRaw<{ customerId: string; customerName: string; balance: string }[]>`
+      SELECT l."customerId"    AS "customerId",
+             c."displayName"   AS "customerName",
+             COALESCE(SUM(l.debit - l.credit), 0) AS balance
+        FROM journal_lines l
+        JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+        JOIN ledger_accounts a ON a.id = l."accountId"
+        JOIN customers c ON c.id = l."customerId"
+       WHERE l."orgId" = ${ctx.orgId}
+         AND a."systemKey" = 'ACCOUNTS_RECEIVABLE'
+         AND l."journalDate" <= ${asOfDate}
+       GROUP BY l."customerId", c."displayName"
+    `,
+  ])
 
   const byCustomer = new Map<string, AgingRow>()
-  const totals: Record<AgingBucket, Decimal> = {
-    current: ZERO, d1_30: ZERO, d31_60: ZERO, d61_90: ZERO, d90_plus: ZERO,
-  }
+  const totals = emptyBuckets()
   let grandTotal = ZERO
+
+  const rowFor = (customerId: string, customerName: string): AgingRow => {
+    const existing = byCustomer.get(customerId)
+    if (existing) return existing
+    const created: AgingRow = {
+      customerId,
+      customerName,
+      buckets: emptyBuckets(),
+      total: ZERO,
+    }
+    byCustomer.set(customerId, created)
+    return created
+  }
+
+  const add = (row: AgingRow, bucket: AgingBucket, amount: Decimal) => {
+    row.buckets[bucket] = row.buckets[bucket].plus(amount)
+    row.total = row.total.plus(amount)
+    totals[bucket] = totals[bucket].plus(amount)
+    grandTotal = grandTotal.plus(amount)
+  }
+
+  const documentTotals = new Map<string, Decimal>()
 
   for (const row of rows) {
     const outstanding = new Decimal(row.outstanding)
     if (outstanding.lessThanOrEqualTo(0)) continue
 
-    const bucket = bucketFor(row.days)
-
-    const existing =
-      byCustomer.get(row.customerId) ??
-      {
-        customerId: row.customerId,
-        customerName: row.customerName,
-        buckets: { current: ZERO, d1_30: ZERO, d31_60: ZERO, d61_90: ZERO, d90_plus: ZERO },
-        total: ZERO,
-      }
-
-    existing.buckets[bucket] = existing.buckets[bucket].plus(outstanding)
-    existing.total = existing.total.plus(outstanding)
-    byCustomer.set(row.customerId, existing)
-
-    totals[bucket] = totals[bucket].plus(outstanding)
-    grandTotal = grandTotal.plus(outstanding)
+    add(rowFor(row.customerId, row.customerName), bucketFor(row.days), outstanding)
+    documentTotals.set(
+      row.customerId,
+      (documentTotals.get(row.customerId) ?? ZERO).plus(outstanding),
+    )
   }
 
-  // The comparison that makes the report trustworthy: does it agree with the
-  // ledger? If not, the report says so rather than quietly being wrong.
-  const [control] = await client.$queryRaw<{ balance: string }[]>`
-    SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
-      FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
-      JOIN ledger_accounts a ON a.id = l."accountId"
-     WHERE l."orgId" = ${ctx.orgId}
-       AND a."systemKey" = 'ACCOUNTS_RECEIVABLE'
-       AND l."journalDate" <= ${asOfDate}
-  `
+  // Whatever the ledger holds for a customer that no open invoice explains. It
+  // is a real part of what they owe — or, when negative, of what is held on
+  // account for them — so it belongs on the report rather than in the gap
+  // between the report and the trial balance.
+  for (const entry of subledger) {
+    const balance = new Decimal(entry.balance)
+    const explained = documentTotals.get(entry.customerId) ?? ZERO
+    const residual = balance.minus(explained)
+    if (residual.abs().lessThan('0.005')) continue
 
-  const controlBalance = new Decimal(control?.balance ?? '0')
+    add(rowFor(entry.customerId, entry.customerName), 'unapplied', residual)
+  }
+
+  const controlBalance = subledger.reduce(
+    (sum, entry) => sum.plus(new Decimal(entry.balance)),
+    ZERO,
+  )
 
   return {
-    rows: [...byCustomer.values()].sort((a, b) => a.customerName.localeCompare(b.customerName)),
+    rows: [...byCustomer.values()]
+      .filter((row) => !row.total.isZero())
+      .sort((a, b) => a.customerName.localeCompare(b.customerName)),
     totals,
     grandTotal,
     asOf,
     controlBalance,
-    agrees: grandTotal.equals(controlBalance),
+    agrees: grandTotal.minus(controlBalance).abs().lessThan('0.005'),
   }
 }
 
@@ -162,7 +217,7 @@ export async function statement(
   const [openingRow] = await client.$queryRaw<{ balance: string }[]>`
     SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE l."orgId" = ${ctx.orgId}
        AND l."customerId" = ${customerId}
        AND l."journalDate" < ${toDate(range.from)}

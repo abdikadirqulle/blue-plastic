@@ -3,11 +3,11 @@ import type { DocumentType, Prisma, SalesDocumentType } from '@prisma/client'
 
 import { toCalendarDate, toDate, today, type CalendarDate } from '@/lib/date'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
-import { dispositionOf } from '@/lib/document-disposition'
 import { dueDateFor } from '@/lib/payment-terms'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { SalesDocumentInput } from '@/lib/validation/sales'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
+import { softDeleteDocument } from '@/server/accounting/deletion'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
 import { recordMovement, reverseMovementsFor } from '@/server/accounting/inventory'
@@ -88,7 +88,12 @@ export async function list(
   const [rows, total] = await Promise.all([
     db.salesDocument.findMany({
       where,
-      select: DOCUMENT_SELECT,
+      // The applied count comes back with the row so a list can say what
+      // deleting one would release without a second query per row.
+      select: {
+        ...DOCUMENT_SELECT,
+        _count: { select: { applications: true, creditsApplied: true } },
+      },
       orderBy:
         (options.sort ? SALES_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
         [{ date: 'desc' }, { number: 'desc' }],
@@ -103,6 +108,7 @@ export async function list(
     rows.map((row) => ({
       ...serialise(row),
       balance: toMoneyString(balances.get(row.id) ?? new Decimal(row.total.toString()), 2),
+      appliedCount: row._count.applications + row._count.creditsApplied,
     })),
     total,
     query,
@@ -522,107 +528,81 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
 }
 
 /**
- * Void a document: reverse its journal, return any stock, keep the paper.
+ * Delete a sales document.
  *
- * A posted document is never deleted. A missing invoice number is a question
- * nobody can answer later; a voided one answers it. What *can* be deleted is a
- * document the ledger has never seen — see `remove` and
- * `lib/document-disposition.ts`.
+ * One verb, whatever state the document is in. A draft is withdrawn; a posted
+ * invoice is withdrawn along with the journal it posted and the stock it moved.
+ * Nothing is offered instead of deleting, and nothing has to be undone first:
+ * payments and credits applied to it are released back to their payment, which is
+ * then simply unapplied money sitting on the customer's account — which is what
+ * it now is.
+ *
+ * Nothing is physically removed. See `server/accounting/deletion.ts` for why
+ * that is compatible with the figure disappearing from every report.
  */
-export async function voidDocument(ctx: OrgContext, id: string, reason: string) {
-  const meta = await requestMeta()
-
+export async function remove(ctx: OrgContext, id: string, reason?: string | null) {
   return db.$transaction(async (tx) => {
     const document = await tx.salesDocument.findFirst({
-      where: { id, orgId: ctx.orgId },
-      select: { id: true, number: true, status: true, journalId: true },
-    })
-    if (!document) throw notFound('Document')
-    if (document.status === 'VOID') throw conflict(`${document.number} is already void.`)
-
-    const applied = await appliedTotal(tx, id)
-    if (!applied.isZero()) {
-      throw precondition(
-        `${document.number} has ${toMoneyString(applied, 2)} applied to it. Remove that first.`,
-      )
-    }
-
-    if (document.journalId) {
-      const reversal = await reverseJournal(tx, ctx, document.journalId, {
-        reason: `${document.number} voided — ${reason}`,
-      })
-      // The goods come back too. A voided invoice never went out of the door.
-      await reverseMovementsFor(tx, ctx, { sourceId: id, journalId: reversal.id })
-    }
-
-    await tx.salesDocument.update({
-      where: { id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
-    })
-
-    await writeAudit(
-      tx,
-      ctx,
-      { entity: 'SalesDocument', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
-      meta,
-    )
-
-    return { id, number: document.number }
-  })
-}
-
-/**
- * Delete a document that never reached the ledger.
- *
- * Only a draft or an estimate can get here, and only while nothing points at
- * it. Anything posted is refused with the reason, and the caller is expected to
- * void it instead — which is what `dispositionOf` tells every screen up front.
- */
-export async function remove(ctx: OrgContext, id: string) {
-  const meta = await requestMeta()
-
-  return db.$transaction(async (tx) => {
-    const document = await tx.salesDocument.findFirst({
-      where: { id, orgId: ctx.orgId },
+      // `deletedAt: undefined` opts out of the client's soft-delete filter, so a
+      // second Delete on the same row is a no-op rather than a "not found".
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
       select: {
         id: true, type: true, number: true, status: true, journalId: true, total: true,
-        convertedTo: { select: { id: true, number: true } },
-        _count: { select: { applications: true, creditsApplied: true } },
+        deletedAt: true,
+        applications: { select: { id: true, paymentId: true, invoiceId: true } },
+        creditsApplied: { select: { id: true, paymentId: true, invoiceId: true } },
       },
     })
     if (!document) throw notFound('Document')
+    if (document.deletedAt) return { id, number: document.number }
 
-    const disposition = dispositionOf({
-      status: document.status,
-      journalId: document.journalId,
-      convertedToId: document.convertedTo?.id ?? null,
-      appliedCount: document._count.applications + document._count.creditsApplied,
-    })
+    // Applications are the only rows that genuinely have to go: they are a link
+    // between two documents, and a link to something withdrawn is not history,
+    // it is a dangling reference. Removing them restores the payment's unapplied
+    // balance, which is the correct state once the invoice is gone.
+    const applications = [...document.applications, ...document.creditsApplied]
+    const touchedInvoiceIds = [
+      ...new Set(applications.map((application) => application.invoiceId).filter((v) => v !== id)),
+    ]
 
-    if (disposition.action !== 'delete') {
-      throw precondition(
-        `${document.number} cannot be deleted. ${disposition.reason}` +
-          (disposition.action === 'void' ? ' Void it instead — the entry is reversed and both stay on the record.' : ''),
-      )
+    if (applications.length > 0) {
+      await tx.salesApplication.deleteMany({
+        where: { id: { in: applications.map((application) => application.id) } },
+      })
     }
 
-    // Nothing posted means no stock moved either, but a draft that was once
-    // posted and reverted would have movements to clear. Cheap to be sure.
+    // An estimate this became, or that became this, loses its link for the same
+    // reason: it points at something that is no longer there.
+    await tx.salesDocument.updateMany({
+      where: { orgId: ctx.orgId, convertedFromId: id },
+      data: { convertedFromId: null },
+    })
+
+    // The goods come back. Stock positions are running totals, so a movement is
+    // undone by appending its opposite rather than by hiding the original row —
+    // and both sides fall by the same amount, because withdrawing the journal
+    // takes the inventory value out of the general ledger at the same time.
     await reverseMovementsFor(tx, ctx, { sourceId: id })
 
-    await tx.salesDocument.delete({ where: { id } })
-
-    await writeAudit(
-      tx,
-      ctx,
-      {
-        entity: 'SalesDocument',
-        entityId: id,
-        action: 'DELETE',
-        before: { type: document.type, number: document.number, total: document.total.toString() },
+    await softDeleteDocument(tx, ctx, {
+      mark: (stamp) => tx.salesDocument.update({ where: { id }, data: stamp }),
+      entity: 'SalesDocument',
+      id,
+      number: document.number,
+      journalIds: [document.journalId],
+      reason,
+      before: {
+        type: document.type,
+        status: document.status,
+        total: document.total.toString(),
+        applicationsReleased: applications.length,
       },
-      meta,
-    )
+    })
+
+    // Whatever those applications were settling is outstanding again.
+    for (const invoiceId of touchedInvoiceIds) {
+      await refreshStatus(tx, invoiceId)
+    }
 
     return { id, number: document.number }
   })

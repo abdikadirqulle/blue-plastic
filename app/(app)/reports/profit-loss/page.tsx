@@ -27,7 +27,7 @@ export default async function ProfitAndLossPage({
   })
 
   const drill = (accountId: string) =>
-    `/accounts/${accountId}?from=${settings.range.from}&to=${settings.range.to}`
+    `/reports/transaction-detail?account=${accountId}&period=custom&from=${settings.range.from}&to=${settings.range.to}&back=/reports/profit-loss`
 
   return (
     <>

@@ -241,7 +241,7 @@ const paymentsReceived: TableReport = {
       const amount = new Decimal(payment.amount.toString())
       total = total.plus(amount)
       return {
-        href: '/payments',
+        href: `/payments?q=${encodeURIComponent(payment.number)}`,
         cells: {
           number: payment.number,
           date: date(payment.date),
@@ -433,7 +433,7 @@ const paymentsMade: TableReport = {
       const amount = new Decimal(payment.amount.toString())
       total = total.plus(amount)
       return {
-        href: '/bill-payments',
+        href: `/bill-payments?q=${encodeURIComponent(payment.number)}`,
         cells: {
           number: payment.number,
           date: date(payment.date),
@@ -485,6 +485,7 @@ const expensesByVendor: TableReport = {
         JOIN vendors v ON v.id = d."vendorId"
        WHERE d."orgId" = ${ctx.orgId}
          AND d.status NOT IN ('DRAFT', 'VOID')
+        AND d."deletedAt" IS NULL
          AND d.type IN ('BILL', 'EXPENSE', 'VENDOR_CREDIT')
          AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
        GROUP BY v.id, v."displayName"
@@ -540,6 +541,7 @@ const purchasesByItem: TableReport = {
         JOIN items i ON i.id = l."itemId"
        WHERE d."orgId" = ${ctx.orgId}
          AND d.status NOT IN ('DRAFT', 'VOID')
+        AND d."deletedAt" IS NULL
          AND d.type IN ('BILL', 'EXPENSE', 'VENDOR_CREDIT')
          AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
        GROUP BY i.id, i.name, i.sku
@@ -594,6 +596,7 @@ const productProfitability: TableReport = {
         JOIN items i ON i.id = l."itemId"
        WHERE d."orgId" = ${ctx.orgId}
          AND d.status NOT IN ('DRAFT', 'VOID')
+        AND d."deletedAt" IS NULL
          AND d.type IN ('INVOICE', 'SALES_RECEIPT', 'CREDIT_MEMO', 'REFUND_RECEIPT')
          AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
        GROUP BY i.id, i.name, i.sku
@@ -826,7 +829,7 @@ const generalLedgerReport: TableReport = {
 
       rows.push({
         emphasis: true,
-        href: `/accounts/${account.id}`,
+        href: `/reports/transaction-detail?account=${account.id}&period=custom&from=${range.from}&to=${range.to}`,
         cells: {
           date: null,
           account: `${account.code} — ${account.name}`,
@@ -894,7 +897,7 @@ const journalReport: TableReport = {
     const journals = await db.journal.findMany({
       where: {
         orgId: ctx.orgId,
-        status: { not: 'DRAFT' },
+        status: { notIn: ['DRAFT', 'DELETED'] },
         date: { gte: toDate(range.from), lte: toDate(range.to) },
       },
       select: {
@@ -980,7 +983,7 @@ const accountBalances: TableReport = {
              COALESCE(SUM(CASE WHEN l."journalDate" <= ${toDate(range.to)} THEN l.debit - l.credit ELSE 0 END), 0) AS closing
         FROM ledger_accounts a
         LEFT JOIN journal_lines l ON l."accountId" = a.id AND l."orgId" = a."orgId"
-        LEFT JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+        LEFT JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
        WHERE a."orgId" = ${ctx.orgId}
          AND (l.id IS NULL OR j.id IS NOT NULL)
        GROUP BY a.id, a.code, a.name, a.type, a.subtype
@@ -1001,7 +1004,7 @@ const accountBalances: TableReport = {
         { key: 'closing', label: 'Closing', format: 'money', width: 'w-32' },
       ],
       rows: rows.map((row) => ({
-        href: `/accounts/${row.id}`,
+        href: `/reports/transaction-detail?account=${row.id}&period=custom&from=${range.from}&to=${range.to}`,
         cells: {
           code: row.code,
           name: row.name,

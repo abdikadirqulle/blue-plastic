@@ -4,9 +4,15 @@ import { toDate, type CalendarDate } from '@/lib/date'
 import { Decimal, ZERO } from '@/lib/money'
 import type { OrgContext } from '@/server/auth/context'
 import { db, type Tx } from '@/server/db'
-import { AGING_BUCKETS, BUCKET_LABELS, type AgingBucket } from '@/server/services/receivables.service'
+import {
+  AGING_BUCKETS,
+  BUCKET_LABELS,
+  emptyBuckets,
+  OVERDUE_BUCKETS,
+  type AgingBucket,
+} from '@/server/services/receivables.service'
 
-export { AGING_BUCKETS, BUCKET_LABELS }
+export { AGING_BUCKETS, BUCKET_LABELS, OVERDUE_BUCKETS }
 
 export type PayablesAgingRow = {
   vendorId: string
@@ -37,70 +43,99 @@ export async function aging(
   const client = options.client ?? db
   const asOfDate = toDate(asOf)
 
-  const rows = await client.$queryRaw<
-    { vendorId: string; vendorName: string; days: number | null; outstanding: string }[]
-  >`
-    SELECT d."vendorId"                      AS "vendorId",
-           v."displayName"                   AS "vendorName",
-           (${asOfDate}::date - d."dueDate") AS days,
-           (d.total - COALESCE((
-              SELECT SUM(a.amount) FROM purchase_applications a WHERE a."billId" = d.id
-           ), 0))                            AS outstanding
-      FROM purchase_documents d
-      JOIN vendors v ON v.id = d."vendorId"
-     WHERE d."orgId" = ${ctx.orgId}
-       AND d.type    = 'BILL'
-       AND d.status IN ('OPEN', 'PARTIAL')
-       AND d.date   <= ${asOfDate}
-  `
+  const [rows, subledger] = await Promise.all([
+    client.$queryRaw<
+      { vendorId: string; vendorName: string; days: number | null; outstanding: string }[]
+    >`
+      SELECT d."vendorId"                      AS "vendorId",
+             v."displayName"                   AS "vendorName",
+             (${asOfDate}::date - d."dueDate") AS days,
+             (d.total - COALESCE((
+                SELECT SUM(a.amount) FROM purchase_applications a WHERE a."billId" = d.id
+             ), 0))                            AS outstanding
+        FROM purchase_documents d
+        JOIN vendors v ON v.id = d."vendorId"
+       WHERE d."orgId" = ${ctx.orgId}
+         AND d."deletedAt" IS NULL
+         AND d.type    = 'BILL'
+         AND d.status IN ('OPEN', 'PARTIAL')
+         AND d.date   <= ${asOfDate}
+    `,
+    // Payables are a credit balance, so the control account is read the other
+    // way up. Broken down by vendor for the same reason the receivables report
+    // breaks its control account down by customer: an opening balance, an
+    // unapplied payment or a hand-written entry is a real payable with no open
+    // bill behind it, and leaving it out is what made the two disagree.
+    client.$queryRaw<{ vendorId: string; vendorName: string; balance: string }[]>`
+      SELECT l."vendorId"     AS "vendorId",
+             v."displayName"  AS "vendorName",
+             COALESCE(SUM(l.credit - l.debit), 0) AS balance
+        FROM journal_lines l
+        JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+        JOIN ledger_accounts a ON a.id = l."accountId"
+        JOIN vendors v ON v.id = l."vendorId"
+       WHERE l."orgId" = ${ctx.orgId}
+         AND a."systemKey" = 'ACCOUNTS_PAYABLE'
+         AND l."journalDate" <= ${asOfDate}
+       GROUP BY l."vendorId", v."displayName"
+    `,
+  ])
 
   const byVendor = new Map<string, PayablesAgingRow>()
-  const totals: Record<AgingBucket, Decimal> = {
-    current: ZERO, d1_30: ZERO, d31_60: ZERO, d61_90: ZERO, d90_plus: ZERO,
-  }
+  const totals = emptyBuckets()
   let grandTotal = ZERO
+
+  const rowFor = (vendorId: string, vendorName: string): PayablesAgingRow => {
+    const existing = byVendor.get(vendorId)
+    if (existing) return existing
+    const created: PayablesAgingRow = {
+      vendorId,
+      vendorName,
+      buckets: emptyBuckets(),
+      total: ZERO,
+    }
+    byVendor.set(vendorId, created)
+    return created
+  }
+
+  const add = (row: PayablesAgingRow, bucket: AgingBucket, amount: Decimal) => {
+    row.buckets[bucket] = row.buckets[bucket].plus(amount)
+    row.total = row.total.plus(amount)
+    totals[bucket] = totals[bucket].plus(amount)
+    grandTotal = grandTotal.plus(amount)
+  }
+
+  const documentTotals = new Map<string, Decimal>()
 
   for (const row of rows) {
     const outstanding = new Decimal(row.outstanding)
     if (outstanding.lessThanOrEqualTo(0)) continue
 
-    const bucket = bucketFor(row.days)
-    const existing =
-      byVendor.get(row.vendorId) ??
-      {
-        vendorId: row.vendorId,
-        vendorName: row.vendorName,
-        buckets: { current: ZERO, d1_30: ZERO, d31_60: ZERO, d61_90: ZERO, d90_plus: ZERO },
-        total: ZERO,
-      }
-
-    existing.buckets[bucket] = existing.buckets[bucket].plus(outstanding)
-    existing.total = existing.total.plus(outstanding)
-    byVendor.set(row.vendorId, existing)
-
-    totals[bucket] = totals[bucket].plus(outstanding)
-    grandTotal = grandTotal.plus(outstanding)
+    add(rowFor(row.vendorId, row.vendorName), bucketFor(row.days), outstanding)
+    documentTotals.set(row.vendorId, (documentTotals.get(row.vendorId) ?? ZERO).plus(outstanding))
   }
 
-  // Payables are a credit balance, so the control account is read the other way up.
-  const [control] = await client.$queryRaw<{ balance: string }[]>`
-    SELECT COALESCE(SUM(l.credit - l.debit), 0) AS balance
-      FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
-      JOIN ledger_accounts a ON a.id = l."accountId"
-     WHERE l."orgId" = ${ctx.orgId}
-       AND a."systemKey" = 'ACCOUNTS_PAYABLE'
-       AND l."journalDate" <= ${asOfDate}
-  `
+  for (const entry of subledger) {
+    const balance = new Decimal(entry.balance)
+    const residual = balance.minus(documentTotals.get(entry.vendorId) ?? ZERO)
+    if (residual.abs().lessThan('0.005')) continue
 
-  const controlBalance = new Decimal(control?.balance ?? '0')
+    add(rowFor(entry.vendorId, entry.vendorName), 'unapplied', residual)
+  }
+
+  const controlBalance = subledger.reduce(
+    (sum, entry) => sum.plus(new Decimal(entry.balance)),
+    ZERO,
+  )
 
   return {
-    rows: [...byVendor.values()].sort((a, b) => a.vendorName.localeCompare(b.vendorName)),
+    rows: [...byVendor.values()]
+      .filter((row) => !row.total.isZero())
+      .sort((a, b) => a.vendorName.localeCompare(b.vendorName)),
     totals,
     grandTotal,
     controlBalance,
-    agrees: grandTotal.equals(controlBalance),
+    agrees: grandTotal.minus(controlBalance).abs().lessThan('0.005'),
     asOf,
   }
 }
@@ -173,7 +208,7 @@ export async function vendorStatement(
   const [openingRow] = await client.$queryRaw<{ balance: string }[]>`
     SELECT COALESCE(SUM(l.credit - l.debit), 0) AS balance
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE l."orgId" = ${ctx.orgId}
        AND l."vendorId" = ${vendorId}
        AND l."journalDate" < ${toDate(range.from)}

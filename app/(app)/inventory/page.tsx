@@ -9,9 +9,8 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { DisposeButton } from '@/components/data/document-disposal'
+import { DeleteButton } from '@/components/data/delete-record'
 import { formatDate, toCalendarDate } from '@/lib/date'
-import { dispositionOf } from '@/lib/document-disposition'
 import { formatMoney, ZERO } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
 import * as inventoryService from '@/server/services/inventory.service'
@@ -230,7 +229,7 @@ export default async function InventoryPage({
         </>
       )}
 
-      <h2 className="mb-3 text-sm font-semibold">Adjustments</h2>
+      <h2 id="adjustments" className="mb-3 scroll-mt-20 text-sm font-semibold">Adjustments</h2>
 
       {adjustments.length === 0 ? (
         <Card>
@@ -286,15 +285,11 @@ export default async function InventoryPage({
                   </TableCell>
                   <TableCell className="print:hidden">
                     {canAdjust ? (
-                      <DisposeButton
+                      <DeleteButton
                         kind="inventory-adjustment"
                         id={adjustment.id}
                         number={adjustment.number}
                         variant="ghost"
-                        disposition={dispositionOf({
-                          status: adjustment.status,
-                          journalId: adjustment.journalId,
-                        })}
                       />
                     ) : null}
                   </TableCell>

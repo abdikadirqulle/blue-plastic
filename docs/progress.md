@@ -11,7 +11,8 @@
 | 7 — Inventory               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-07-inventory.md) · migration `inventory` · 51 integrity objects · 226 tests                                                                                                                      |
 | 8 — Reporting               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-08-reporting.md) · no migration — reports read the ledger · 51 integrity objects · 272 tests · [ADR-0010](./decisions/0010-no-balance-rollup-table.md)                                          |
 | 9 — Period Close & Year-End | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-09-period-close.md) · migration written, not yet applied · 56 integrity objects · [ADR-0011](./decisions/0011-closing-entries-excluded-from-the-profit-and-loss.md)                                |
-| 10 — Interface & Hardening  | ✅ Complete            | 2026-08-31 · [detail](./phases/phase-10-hardening.md) · no migration · [ADR-0012](./decisions/0012-owned-combobox-and-dialog.md) · 292 tests · second pass 10.12–10.22: deletion, stock reversal on void/edit, account selectors, reports, statements, Odoo-style visual system · not clicked through in a browser |
+| 10 — Interface & Hardening  | ✅ Complete            | 2026-09-01 · [detail](./phases/phase-10-hardening.md) · migrations `receiving`, `soft_delete` · [ADR-0012](./decisions/0012-owned-combobox-and-dialog.md), [ADR-0013](./decisions/0013-soft-delete-for-transactions.md) · 304 tests · 56 integrity objects · second pass 10.12–10.22; third pass 10.23–10.28: aging agrees with the ledger, whole-chart journals, one-verb Delete everywhere, partial receiving, transaction detail by account · not clicked through in a browser |
+| 11 — The practical gaps     | ⛔ Not started         | Scoped 2026-09-01 from a review against QuickBooks — [roadmap](./04-roadmap.md#phase-11--the-practical-gaps). Seventeen tasks in three bands, and an explicit list of what is excluded |
 
 Phases advance only on explicit instruction from the owner.
 
@@ -24,6 +25,40 @@ Phases advance only on explicit instruction from the owner.
 | Rate limiting on the sign-in endpoint                                                 | 10                |
 | An end-to-end test through `voidDocument` asserting `stockAgreesWithLedger`           | 10                |
 | End-to-end browser tests — nothing in Phase 10 has been clicked through                | 10                |
+
+## Third pass over Phase 10 — 2026-09-01
+
+Four reported problems and one review, all inside Phase 10's remit. Detail in
+[phase-10-hardening.md](./phases/phase-10-hardening.md), tasks 10.23–10.27.
+
+One was a reporting defect that had been in the books since Phase 3 and is worth
+knowing about on its own:
+
+**The AR and AP aging reports did not agree with the control account, and could
+not.** They were built from open invoices and bills; the control balance was read
+from the journal lines. A customer opening balance posts straight to receivables
+with no invoice behind it — so the very first customer entered with an opening
+balance made the report disagree with the trial balance. The same was true of any
+unapplied payment. The report noticed and said `agrees: false`, which is honest
+but not useful. Both reports now read the control account broken down by
+counterparty and put whatever no open document explains on that party's own row,
+so the total *is* the control balance rather than being compared to it.
+
+The other three were the interface refusing what the ledger permits: a manual
+journal that hid a third of the chart of accounts, lists with no way to delete
+anything, and a purchase order that could only be received in full.
+
+**Delete took two attempts.** The first put the existing *void* control into the
+row menus, which meant the application now declined to delete things in fifteen
+more places. The owner asked for Delete, not for a third place to be told about
+reversal, and he was right. What shipped is one verb — Delete — that actually
+removes the transaction from every list, report and balance, while the row itself
+stays in PostgreSQL unedited so what was once posted can still be reconstructed.
+The reasoning, and what the database still refuses, is in
+[ADR-0013](./decisions/0013-soft-delete-for-transactions.md).
+
+A fifth item — a review of the system against QuickBooks — produced
+[Phase 11](./04-roadmap.md#phase-11--the-practical-gaps), scoped and not started.
 
 ## Second pass over Phase 10 — 2026-08-31
 

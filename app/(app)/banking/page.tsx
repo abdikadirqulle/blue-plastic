@@ -9,9 +9,8 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { DisposeButton } from '@/components/data/document-disposal'
+import { DeleteButton } from '@/components/data/delete-record'
 import { formatDate, toCalendarDate, today } from '@/lib/date'
-import { dispositionOf } from '@/lib/document-disposition'
 import { formatMoney } from '@/lib/money'
 import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { requireOrgContext } from '@/server/auth/context'
@@ -150,7 +149,7 @@ export default async function BankingPage({
         here, in the module that owns them, with the same disposal control every
         other transaction has.
       */}
-      <h2 className="mb-3 text-sm font-semibold">Transfers and deposits</h2>
+      <h2 id="transfers" className="mb-3 scroll-mt-20 text-sm font-semibold">Transfers and deposits</h2>
 
       {transfers.rows.length === 0 && deposits.rows.length === 0 ? (
         <Card className="mb-6">
@@ -215,15 +214,11 @@ export default async function BankingPage({
                     </TableCell>
                     <TableCell className="print:hidden">
                       {canTransact ? (
-                        <DisposeButton
+                        <DeleteButton
                           kind={row.kind}
                           id={row.id}
                           number={row.number}
                           variant="ghost"
-                          disposition={dispositionOf({
-                            status: row.status,
-                            journalId: row.journalId,
-                          })}
                         />
                       ) : null}
                     </TableCell>

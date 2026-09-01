@@ -101,3 +101,18 @@ export function paged<T>(rows: T[], total: number, query: ListQuery): Paged<T> {
     pageCount: Math.max(1, Math.ceil(total / query.pageSize)),
   }
 }
+
+/**
+ * Deleting a record.
+ *
+ * The reason is optional. Deleting a transaction that was entered by mistake is
+ * an ordinary correction, and demanding a written justification for one is how a
+ * field ends up holding the word "mistake" ten thousand times. When somebody does
+ * type something, it is kept on the record and in the audit log.
+ */
+export const deleteRecordSchema = z.object({
+  id: cuid,
+  reason: optionalText(300),
+})
+
+export type DeleteRecordInput = z.infer<typeof deleteRecordSchema>

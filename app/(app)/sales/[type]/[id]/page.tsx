@@ -5,8 +5,7 @@ import { ArrowLeftIcon, PencilIcon, PrinterIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { ConvertEstimateButton } from '@/components/sales/document-actions'
-import { DisposeButton } from '@/components/data/document-disposal'
-import { dispositionOf } from '@/lib/document-disposition'
+import { DeleteButton } from '@/components/data/delete-record'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -35,7 +34,7 @@ export default async function SalesDocumentPage({
   const currency = ctx.organization.baseCurrency
   // A draft can now be deleted, so the control shows for it too — what it does
   // is decided by `disposition` below.
-  const canVoid = ctx.permissions.has('invoice:void') && document.status !== 'VOID'
+  const canDelete = ctx.permissions.has('invoice:void') && document.status !== 'VOID'
 
   // The same rule the service enforces: a voided document cannot be edited, and
   // neither can one with money already applied to it — the payment would have to
@@ -47,14 +46,6 @@ export default async function SalesDocumentPage({
     ctx.permissions.has('invoice:create') &&
     !document.convertedTo &&
     document.status !== 'VOID'
-
-  // Delete or void — the record decides, not the screen.
-  const disposition = dispositionOf({
-    status: document.status,
-    journalId: document.journalId,
-    convertedToId: document.convertedTo?.id ?? null,
-    appliedCount: document.applications.length,
-  })
 
   return (
     <>
@@ -91,13 +82,12 @@ export default async function SalesDocumentPage({
                 <PencilIcon /> Edit
               </Link>
             ) : null}
-            {canVoid ? (
-              <DisposeButton
+            {canDelete ? (
+              <DeleteButton
                 kind="sales"
                 id={id}
                 number={document.number}
-                disposition={disposition}
-                redirectTo={disposition.action === 'delete' ? `/sales/${config.slug}` : undefined}
+                redirectTo={`/sales/${config.slug}`}
               />
             ) : null}
           </>
@@ -127,7 +117,8 @@ export default async function SalesDocumentPage({
       {document.status === 'VOID' ? (
         <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
           Voided{document.voidReason ? ` — ${document.voidReason}` : ''}. Its entry was reversed; both
-          remain in the ledger.
+          remain in the ledger. Voiding was replaced by deleting — no new document reaches this
+          state.
         </div>
       ) : null}
 

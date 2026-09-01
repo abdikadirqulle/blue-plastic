@@ -58,11 +58,10 @@ export default async function DashboardPage() {
   const cashAccounts = figures.filter((row) => CASH_SUBTYPES.includes(row.subtype))
   const cash = sumBy(cashAccounts, (row) => row.closing)
 
+  // Overdue means past its due date. A balance that is not on a document has no
+  // due date to be past, so it is not overdue — it is simply outstanding.
   const overdue = (buckets: Record<receivables.AgingBucket, Decimal>) =>
-    receivables.AGING_BUCKETS.filter((bucket) => bucket !== 'current').reduce(
-      (total, bucket) => total.plus(buckets[bucket]),
-      ZERO,
-    )
+    receivables.OVERDUE_BUCKETS.reduce((total, bucket) => total.plus(buckets[bucket]), ZERO)
 
   return (
     <>

@@ -6,8 +6,8 @@ import { toFormState, type FormState } from '@/components/forms/action-state'
 import {
   inventoryAdjustmentSchema,
   negativeStockSchema,
-  voidAdjustmentSchema,
 } from '@/lib/validation/inventory'
+import { deleteRecordSchema } from '@/lib/validation/common'
 import { action } from '@/server/action'
 import { requestMeta, writeAudit } from '@/server/audit'
 import { db } from '@/server/db'
@@ -25,15 +25,16 @@ export const createAdjustment = action
   })
 
 /**
- * Void a stock adjustment: reverse the journal and put the stock back.
+ * Delete a stock adjustment.
  *
- * A count entered against the wrong item had no way back before this.
+ * The stock it moved goes back and its journal is withdrawn. A count entered
+ * against the wrong item had no way back before this.
  */
-export const voidAdjustment = action
+export const deleteAdjustment = action
   .requires('inventory:adjust')
-  .input(voidAdjustmentSchema)
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const result = await inventoryService.voidAdjustment(ctx, input.id, input.reason)
+    const result = await inventoryService.removeAdjustment(ctx, input.id, input.reason)
     revalidatePath('/inventory')
     revalidatePath('/accounts')
     revalidatePath('/journals')

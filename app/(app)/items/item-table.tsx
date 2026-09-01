@@ -3,7 +3,13 @@
 import { useState, useTransition } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ArchiveIcon, ArchiveRestoreIcon, Loader2Icon, PencilIcon } from 'lucide-react'
+import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  Loader2Icon,
+  MoreHorizontalIcon,
+  PencilIcon,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -12,9 +18,17 @@ import {
   type ItemValues,
   type SimpleOption,
 } from '@/components/master-data/item-dialog'
+import { DeleteMenuItem } from '@/components/data/delete-record'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SortableHeader, type SortState } from '@/components/data/sortable-header'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatMoney } from '@/lib/money'
 import { setItemsActive } from './actions'
@@ -69,6 +83,17 @@ export function ItemTable({
   const [isPending, startTransition] = useTransition()
 
   const allSelected = rows.length > 0 && rows.every((row) => selected.has(row.id))
+
+  const single = (id: string, isActive: boolean) =>
+    startTransition(async () => {
+      const result = await setItemsActive({ ids: [id], isActive })
+      if (result.ok) {
+        toast.success(isActive ? 'Restored.' : 'Archived.')
+        router.refresh()
+      } else {
+        toast.error(result.error.message)
+      }
+    })
 
   const bulk = (isActive: boolean) =>
     startTransition(async () => {
@@ -212,16 +237,44 @@ export function ItemTable({
                 {row.purchaseCost ? formatMoney(row.purchaseCost, currency) : '—'}
               </TableCell>
               <TableCell>
-                {canEdit ? (
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`Edit ${row.name}`}
-                    onClick={() => setEditing(row)}
-                  >
-                    <PencilIcon />
-                  </Button>
-                ) : null}
+                <div className="flex items-center justify-end gap-0.5">
+                  {canEdit ? (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Edit ${row.name}`}
+                      onClick={() => setEditing(row)}
+                    >
+                      <PencilIcon />
+                    </Button>
+                  ) : null}
+                  {canArchive ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${row.name}`}>
+                          <MoreHorizontalIcon />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onSelect={(event) => {
+                            event.preventDefault()
+                            single(row.id, !row.isActive)
+                          }}
+                        >
+                          {row.isActive ? (
+                            <ArchiveIcon className="size-4" />
+                          ) : (
+                            <ArchiveRestoreIcon className="size-4" />
+                          )}
+                          {row.isActive ? 'Archive' : 'Restore'}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DeleteMenuItem kind="item" id={row.id} number={row.name} />
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : null}
+                </div>
               </TableCell>
             </TableRow>
           ))}

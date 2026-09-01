@@ -95,7 +95,7 @@ export default async function AdjustingEntriesPage({
                       <TableCell className="tabular text-muted-foreground">{line.account.code}</TableCell>
                       <TableCell>
                         <Link
-                          href={`/accounts/${line.account.id}?from=${settings.range.from}&to=${settings.range.to}`}
+                          href={`/reports/transaction-detail?account=${line.account.id}&period=custom&from=${settings.range.from}&to=${settings.range.to}&back=/reports/adjusting-entries`}
                           className="underline-offset-4 hover:underline"
                         >
                           {line.account.name}

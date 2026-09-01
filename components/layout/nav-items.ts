@@ -159,6 +159,7 @@ export const MODULES: NavModule[] = [
       { label: 'Trial balance', href: '/reports/trial-balance' },
       { label: 'Statements', href: '/reports/statements/customer', also: ['/reports/statements'] },
       { label: 'General ledger', href: '/reports/general-ledger' },
+      { label: 'Transaction detail', href: '/reports/transaction-detail' },
     ],
   },
   {

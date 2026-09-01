@@ -618,25 +618,243 @@ What is deliberately *not* Odoo: the typography stays on the system stack,
 amounts stay tabular, and the palette keeps its own colour rather than copying a
 brand that belongs to somebody else.
 
+## Third pass — 2026-09-01 (10.23–10.28)
+
+Four things reported as broken, one review, and two rounds of correction on the
+delete work. All of it sits inside Phase 10's remit: the ledger has been right
+since Phase 2, and every one of these was the interface refusing to let somebody
+do something the ledger was perfectly happy with — except the first, which was a
+reporting defect that had been there since Phase 3 and that nobody had a reason
+to notice.
+
+Two migrations: `receiving` and `soft_delete`. Both additive.
+
+## 10.23 — The aging reports did not agree with the ledger
+
+Found while making the manual journal accept receivables. `receivables.service`
+opens by claiming that "every figure here comes from the same rows as the
+receivables control account". It did not. The aging was built from open invoices,
+and the control balance was read from the journal lines, and the report compared
+the two and set `agrees: false` when they differed.
+
+They differ more often than that framing suggests. Three ordinary things put a
+balance on a control account without an open invoice behind it:
+
+1. **A customer opening balance.** `contact.service` posts it straight to
+   receivables against Opening Balance Equity. There is no invoice. So the first
+   customer entered with an opening balance made the aging report disagree with
+   the trial balance, and it said so, and nobody could do anything about it.
+2. **An unapplied payment.** Money received and not yet matched credits
+   receivables and appears on no invoice.
+3. **A hand-written entry** — which, as of 10.24, is something a person can
+   actually make.
+
+The fix is not a bigger tolerance. Both aging reports now read the control
+account **broken down by counterparty**, subtract what open documents already
+explain, and put the remainder on the customer's or vendor's own row in a new
+first column, "Not on a document". The grand total is then the control balance by
+construction, so `agrees` is true because the arithmetic makes it true rather
+than because nothing unusual has happened yet.
+
+`OVERDUE_BUCKETS` is exported alongside `AGING_BUCKETS` because the dashboard's
+"overdue" figure means *past a due date*, and a balance with no document has no
+due date to be past. It is outstanding, not overdue, and the dashboard now says
+so.
+
+## 10.24 — The manual journal offered a third of the chart
+
+The journal screen filtered receivables, payables and inventory out of its
+account picker, with a comment explaining that a manual entry against a control
+account would break the agreement with its subledger.
+
+That was wrong twice. Half of what a business records by hand is against exactly
+those accounts — an opening balance, a bad debt written off, a customer payment
+that arrived without an invoice, a vendor settled out of petty cash. And the
+protection was illusory: the posting engine and R7 already refuse a control-
+account line that does not name its counterparty, so the only thing the ban
+bought was the inability to name one.
+
+What replaced it:
+
+- **The whole chart**, receivables, payables, stock and system accounts included.
+- **A "Customer / vendor" column** on every line, which appears when the chosen
+  account requires one and says "not needed" when it does not. `partyRequiredBy`
+  in `lib/account-options.ts` is the single definition of when that is, keyed on
+  the subtype rather than the system role so a business with two receivables
+  accounts is protected on both.
+- **The service enforces the same rule** before the engine does, per line, with
+  the field named — including the converse, that a name may not be attached to a
+  line that is not a control account, because a counterparty on an ordinary
+  expense line would sit in the ledger meaning nothing.
+- **Entry presets.** Nobody sits down to "make a journal entry"; they sit down to
+  record that a customer paid. Eleven starting grids — customer payment, vendor
+  payment, expense, other income, amounts owed either way, write-off, transfer,
+  owner contribution, period-end adjustment — each of which sets the two sides,
+  the suggested accounts, and which line needs a name. Everything stays editable
+  afterwards: a preset is a guess about intent, and the person is the authority
+  on it. `journal-entry-presets.ts`.
+
+Ordering, never filtering, throughout: a preset lifts the accounts it expects
+into "Suggested" and leaves the rest of the chart one keystroke away.
+
+## 10.25 — Nothing could be deleted, and the answer was a vocabulary lesson
+
+Two passes, because the first one was wrong.
+
+`RowActions` held navigation and nothing else, on the reasoning that a
+destructive action two clicks deep in a table of near-identical rows is how the
+wrong invoice gets voided. The reasoning was right about the risk and wrong about
+the remedy: what it produced was an application in which the only way to undo a
+mistyped bill was to know that its own page had a button, and in which items
+could not be removed at all.
+
+The first attempt put the existing control into the row menus — which meant it
+now said *Void* in fifteen more places. The owner's response was the correct one:
+he asked for Delete, not for a third place to be told about reversal. The second
+attempt is [ADR-0013](../decisions/0013-soft-delete-for-transactions.md), and it
+is a different thing rather than a bigger version of the same thing.
+
+**One verb.** Delete. `lib/document-disposition.ts` — which worked out per record
+whether the screen should offer delete, void or a refusal — is deleted, along
+with `voidDocument` on both document services and the five void actions and
+schemas behind them. There is no branch left for a screen to get wrong.
+
+**It actually removes the transaction**, from every list, selector, search,
+report and balance. What it does not do is remove the row from PostgreSQL: the
+journal is marked `DELETED` and nothing about it is edited, so what was once
+posted can still be reconstructed. The ADR sets out why those two are compatible
+and what the database still refuses.
+
+**Dependencies are handled rather than made the user's problem.** Deleting an
+invoice releases the payments applied to it — they become unapplied money against
+the customer, which is what they now are. Deleting a bill that was received
+against a purchase order puts the quantities back on the order and re-opens it.
+Deleting a customer payment that had been banked takes its deposit with it, and
+the rest of that deposit goes back to undeposited funds, because there is no
+honest way to remove one payment from a posted total and leave the rest. Deleting
+an item writes off any stock still on hand through the shrinkage account rather
+than leaving value in the Inventory Asset account belonging to something that no
+longer appears on any report.
+
+**One thing still refuses, and it is not an alternative workflow.** A transfer or
+deposit that has been reconciled with the bank says so and names the
+reconciliation to undo first — a different record standing in the way, not a
+different verb being offered.
+
+Where the control appears: sales, purchases, journals, items, payments, bill
+payments, transfers, deposits and inventory adjustments — in the row menu on
+every list and on each record's own page. Deleting a journal that a document
+produced deletes the document too; they are one transaction, and which row you
+happened to be looking at is not a reason to leave half of it behind.
+
+## 10.26 — Receiving was all or nothing
+
+A purchase order had one button: *Receive and bill*, which turned the entire
+order into a bill for everything on it whether or not the entire order had turned
+up. There was no way to say "three of the ten came". The choice was to bill for
+goods that were not there — inflating stock and payables — or to record nothing
+until the rest arrived, which is what people did.
+
+- **Schema** (`20260901151603_receiving`): `quantityReceived` on
+  `PurchaseDocumentLine`, and `convertedFromId` loses its unique index so one
+  order can produce several bills. Migration backfills closed orders as fully
+  received, since that is what converting one used to mean.
+- **`receiveOrder`** takes a quantity per line, raises a bill for exactly what
+  arrived, increments the count on the order and closes it when nothing is
+  outstanding. Over-receipt is refused with the remaining quantity named.
+- **A page of its own** at `/purchases/purchase-orders/[id]/receive`: every line
+  with ordered, already in, outstanding and one box to type into, plus "receive
+  everything outstanding" for the common case where the delivery is complete.
+- **`createWithin`** — `create` split so its body takes the caller's
+  transaction. Receiving writes the bill and updates the order as one unit of
+  work; the old `convertOrder` opened a nested transaction and could leave a bill
+  in the books with the order untouched. `convertOrder` survives as a wrapper
+  that receives whatever is outstanding.
+- The order's own line table now shows received and outstanding per line.
+
+## 10.27 — Transaction detail by account
+
+Drill-down existed but stopped short in two different ways.
+
+It stopped one hop short of the document: a figure on the profit and loss led to
+the account register, and the register led to the *journal*, so tracing a number
+to the invoice that caused it took three screens and the middle one was the least
+informative of the three. `generalLedger` now returns `sourceId`, `customerId`,
+`vendorId` and the party name, and the rows resolve their source document through
+`journal-sources.ts`.
+
+And it led to the wrong kind of page. `/accounts/[id]` is the chart-of-accounts
+register — a maintenance screen that happens to list postings. What a report
+needs is a report: **Transaction detail by account**, at
+`/reports/transaction-detail`, built the way QuickBooks builds it and for the same
+reason. Date, type, number, name, memo, split, debit, credit, running balance;
+the period controls every other report has; an account switcher, because somebody
+who drilled into Sales very often wants Sales returns next and going back to click
+a different row answers nothing; and a link on every row to the document behind
+it.
+
+So the chain is three clicks and never leaves the subject: profit and loss → the
+sales account → the transactions in it → the invoice.
+
+Every account drill-down now goes there — profit and loss, balance sheet, trial
+balance, expenses by category, adjusting entries, the general ledger report and
+account balances — carrying the period it came from and a link back to it. The
+balance sheet is the one that differs: a balance-sheet figure is a position, not a
+movement, so its detail runs from the beginning of the ledger to the statement
+date.
+
+Alongside it: sales-by-item rows link to the item, and the payment reports and
+journal sources link to the payments list *filtered to that payment* rather than
+to an unfiltered list of two hundred rows, which is not a drill-down but a place
+to start looking again.
+
+## 10.28 — The journal form
+
+Following the third pass, three corrections from the owner:
+
+- **The entry number is shown.** `peekDocumentNumber` reads what the sequence will
+  give without taking it — a preview, since the real number is allocated under a
+  row lock at the moment of posting.
+- **Name is a column on every line**, not only on control accounts. One picker
+  listing customers and vendors under two headings; the side it came from decides
+  whether the id lands in `customerId` or `vendorId`. Who a cost was with is worth
+  recording whatever account it landed in. The service still *requires* the right
+  kind on a receivables or payables line and refuses the wrong kind, because there
+  the name is not a note but a subledger balance.
+- **The "What is this entry?" preset selector is gone**, along with
+  `journal-entry-presets.ts`. It was eleven starting grids for a form that has
+  five columns; the grid was faster than the menu in front of it.
+
 ## Verification
 
-`pnpm lint`, `pnpm typecheck`, `pnpm build` clean; `pnpm test` 292 passed in 27
-files (was 272 in 25). New tests:
+`pnpm lint`, `pnpm typecheck` and `pnpm build` clean. `pnpm db:verify` reports all
+56 integrity objects present after both migrations. `pnpm test`: 304 passed in 28
+files (was 292 in 27).
+
+New tests:
 
 - `lib/account-options.test.ts` — a selector never drops an account; relevance is
   ordering; the kind is always named.
-- `lib/document-disposition.test.ts` — which of delete, void and blocked applies.
 - `tests/report-presentation.test.ts` — the new period presets, including that a
   business week runs Monday to Sunday.
-- `tests/inventory-costing.test.ts` — reversing a document's stock: it comes out
-  at the cost it went in at, two lines of one item net to one row, calling it
-  twice still leaves nothing behind, and it lets stock go negative rather than
-  trapping a wrong bill in the books.
+- `tests/inventory-costing.test.ts` — reversing a document's stock.
+- `tests/subledger-and-receiving.test.ts` (third pass) — an AR or AP balance that
+  came from a journal rather than a document still appears on the aging and the
+  report still agrees with the control account; a write-off nets against the
+  balance it was raised on; a settled customer leaves the report entirely; R7
+  refuses a control-account line with no counterparty; an order reports what is
+  still to come per line and never reports a negative outstanding quantity.
+- `tests/soft-delete.test.ts` (third pass) — a deleted entry leaves every balance
+  and leaves the aging; its row, lines and amounts are unchanged; deleting twice
+  is a no-op; a reversal goes with what it reverses. Then four that attack the
+  trigger from raw SQL: a deletion with no stamp is refused, a deletion that
+  changes anything else is refused, a deleted entry cannot be edited, and
+  `DELETE FROM journals` on a posted row is still refused outright.
 
-**Not verified:** none of this has been clicked through in a browser. The stock
-reversal is covered at the level of `reverseMovementsFor`; there is still no test
-that drives `voidDocument` end to end on a bill carrying stock and then asserts
-`stockAgreesWithLedger`. That is the next test worth writing.
+**Not verified:** none of this has been clicked through in a browser. There is
+still no test that drives a document delete end to end on a bill carrying stock
+and then asserts `stockAgreesWithLedger` — the pieces are covered separately, the
+composition is not. That is the next test worth writing.
 
 ## What Phase 10 does not do
 
@@ -645,3 +863,8 @@ that drives `voidDocument` end to end on a bill carrying stock and then asserts
   Phase 10 sketch and remain unbuilt.
 - No end-to-end browser test suite. That is the honest gap left by this phase,
   and the thing most worth building next.
+- **No screen showing deleted records.** A deleted transaction is invisible but
+  not gone, and the audit log holds every deletion with its reason and its author
+  — which is enough to answer "what happened to INV-00042" but requires somebody
+  to go and look. A "recently deleted" view is worth building and is not built.
+  See [ADR-0013](../decisions/0013-soft-delete-for-transactions.md).

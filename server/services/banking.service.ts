@@ -7,7 +7,8 @@ import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { DepositInput, TransferInput } from '@/lib/validation/banking'
 import { buildDepositJournal, buildTransferJournal } from '@/server/accounting/builders/banking'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
-import { postJournal, reverseJournal } from '@/server/accounting/posting'
+import { softDeleteDocument } from '@/server/accounting/deletion'
+import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
 import { db, type Tx } from '@/server/db'
@@ -31,7 +32,7 @@ export async function bankAccounts(ctx: OrgContext) {
            COALESCE(SUM(l.debit - l.credit), 0) AS balance,
            COALESCE(SUM(CASE WHEN e.id IS NOT NULL THEN l.debit - l.credit ELSE 0 END), 0) AS cleared
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       LEFT JOIN reconciliation_entries e ON e."journalLineId" = l.id
      WHERE l."orgId" = ${ctx.orgId}
        AND l."accountId" = ANY(${accounts.map((a) => a.id)})
@@ -314,79 +315,104 @@ export async function createDeposit(ctx: OrgContext, input: DepositInput) {
   })
 }
 
-/* --- Voiding -------------------------------------------------------------- */
+/* --- Deleting ------------------------------------------------------------- */
 
-export async function voidTransfer(ctx: OrgContext, id: string, reason: string) {
-  return voidBankDocument(ctx, 'BankTransfer', id, reason)
+export async function removeTransfer(ctx: OrgContext, id: string, reason?: string | null) {
+  return removeBankDocument(ctx, 'BankTransfer', id, reason)
 }
 
-export async function voidDeposit(ctx: OrgContext, id: string, reason: string) {
-  return voidBankDocument(ctx, 'Deposit', id, reason)
+export async function removeDeposit(ctx: OrgContext, id: string, reason?: string | null) {
+  return removeBankDocument(ctx, 'Deposit', id, reason)
 }
 
-async function voidBankDocument(
+/**
+ * Delete a deposit inside somebody else's transaction.
+ *
+ * Deleting a customer payment that has already been banked has to take the
+ * deposit with it, and the two have to succeed or fail together.
+ */
+export async function removeDepositWithin(
+  tx: Tx,
+  ctx: OrgContext,
+  id: string,
+  reason?: string | null,
+) {
+  return removeBankDocumentWithin(tx, ctx, 'Deposit', id, reason)
+}
+
+/**
+ * Delete a transfer or a deposit.
+ *
+ * The one thing that genuinely cannot be waved through is a reconciled item: it
+ * has been agreed with the bank, and removing it silently would put a finished
+ * reconciliation out by exactly this amount. That is not an alternative workflow
+ * being offered instead of deleting — it is a different record standing in the
+ * way, and the message says which one and what to do about it.
+ *
+ * Deleting a deposit releases the payments it banked. They go back to the
+ * undeposited list, which is where they were and where they belong.
+ */
+async function removeBankDocument(
   ctx: OrgContext,
   entity: 'BankTransfer' | 'Deposit',
   id: string,
-  reason: string,
+  reason?: string | null,
 ) {
-  const meta = await requestMeta()
+  return db.$transaction((tx) => removeBankDocumentWithin(tx, ctx, entity, id, reason))
+}
 
-  return db.$transaction(async (tx) => {
+async function removeBankDocumentWithin(
+  tx: Tx,
+  ctx: OrgContext,
+  entity: 'BankTransfer' | 'Deposit',
+  id: string,
+  reason?: string | null,
+) {
+  {
     const document =
       entity === 'BankTransfer'
         ? await tx.bankTransfer.findFirst({
-            where: { id, orgId: ctx.orgId },
-            select: { id: true, number: true, status: true, journalId: true },
+            where: { id, orgId: ctx.orgId, deletedAt: undefined },
+            select: { id: true, number: true, status: true, journalId: true, deletedAt: true },
           })
         : await tx.deposit.findFirst({
-            where: { id, orgId: ctx.orgId },
-            select: { id: true, number: true, status: true, journalId: true },
+            where: { id, orgId: ctx.orgId, deletedAt: undefined },
+            select: { id: true, number: true, status: true, journalId: true, deletedAt: true },
           })
 
     if (!document) throw notFound(entity === 'BankTransfer' ? 'Transfer' : 'Deposit')
-    if (document.status === 'VOID') throw conflict(`${document.number} is already void.`)
+    if (document.deletedAt) return { id, number: document.number }
 
-    // Something already reconciled has been agreed with the bank. Unpicking it
-    // silently would put a finished reconciliation out by exactly this amount.
     if (document.journalId) {
       const cleared = await tx.reconciliationEntry.count({
         where: { journalLine: { journalId: document.journalId } },
       })
       if (cleared > 0) {
         throw precondition(
-          `${document.number} has been reconciled. Undo that reconciliation before voiding it.`,
+          `${document.number} has been reconciled with the bank. Undo that reconciliation first, ` +
+            `then delete it — otherwise the reconciliation would silently be out by this amount.`,
         )
       }
-
-      await reverseJournal(tx, ctx, document.journalId, {
-        reason: `${document.number} voided — ${reason}`,
-      })
     }
 
-    if (entity === 'BankTransfer') {
-      await tx.bankTransfer.update({
-        where: { id },
-        data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
-      })
-    } else {
-      await tx.deposit.update({
-        where: { id },
-        data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
-      })
-      // Releasing the payments puts them back in the undeposited list.
+    if (entity === 'Deposit') {
+      // Releasing the lines puts the payments back in the undeposited list.
       await tx.depositLine.deleteMany({ where: { depositId: id } })
     }
 
-    await writeAudit(
-      tx,
-      ctx,
-      { entity, entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
-      meta,
-    )
-
-    return { id, number: document.number }
-  })
+    return softDeleteDocument(tx, ctx, {
+      mark: (stamp) =>
+        entity === 'BankTransfer'
+          ? tx.bankTransfer.update({ where: { id }, data: stamp })
+          : tx.deposit.update({ where: { id }, data: stamp }),
+      entity,
+      id,
+      number: document.number,
+      journalIds: [document.journalId],
+      reason,
+      before: { status: document.status },
+    })
+  }
 }
 
 /**

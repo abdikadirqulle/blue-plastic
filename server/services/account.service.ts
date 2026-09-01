@@ -314,7 +314,9 @@ export async function setActive(ctx: OrgContext, id: string, isActive: boolean) 
 export async function postableAccounts(ctx: OrgContext) {
   const accounts = await db.ledgerAccount.findMany({
     where: { orgId: ctx.orgId, isActive: true },
-    select: { id: true, code: true, name: true, type: true, subtype: true, parentId: true },
+    select: {
+      id: true, code: true, name: true, type: true, subtype: true, parentId: true, systemKey: true,
+    },
     orderBy: [{ code: 'asc' }],
   })
 
@@ -392,6 +394,7 @@ export async function selectableAccounts(
     name: account.name,
     type: account.type,
     subtype: account.subtype,
+    systemKey: account.systemKey,
     balance: balances ? toMoneyString(balances.get(account.id)?.natural ?? 0, 2) : null,
   }))
 }

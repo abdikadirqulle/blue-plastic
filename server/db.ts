@@ -5,6 +5,55 @@ import { PrismaClient } from '@prisma/client'
 import { env } from '@/lib/env'
 
 /**
+ * The tables where "deleted" is a flag rather than a missing row.
+ *
+ * Deleting a transaction in this system marks it and leaves it in the database —
+ * the reasoning is in `server/accounting/deletion.ts`. The consequence is that
+ * every read has to exclude the marked ones, and there are something like seventy
+ * of those across the services and the reports.
+ *
+ * Seventy places to remember is seventy places to forget, and the one that gets
+ * forgotten shows a deleted invoice on a report. So the filter is applied here,
+ * once, by a client extension: a query against these models excludes deleted rows
+ * unless it says otherwise. The code that has to see them — the delete path
+ * itself, and the audit trail — asks for them explicitly with
+ * `deletedAt: { not: undefined }` or by going through `withDeleted`.
+ */
+const SOFT_DELETED_MODELS = new Set([
+  'SalesDocument',
+  'PurchaseDocument',
+  'CustomerPayment',
+  'BillPayment',
+  'BankTransfer',
+  'Deposit',
+  'InventoryAdjustment',
+  'Item',
+])
+
+const READS = new Set([
+  'findMany', 'findFirst', 'findFirstOrThrow', 'count', 'aggregate', 'groupBy',
+])
+
+type QueryArgs = { where?: Record<string, unknown> } & Record<string, unknown>
+
+/**
+ * `true` when the caller has already said something about `deletedAt` — including
+ * `undefined`, which is how a caller says "I want both".
+ */
+const mentionsDeletion = (where: Record<string, unknown> | undefined) =>
+  where !== undefined && 'deletedAt' in where
+
+function withoutDeleted(args: QueryArgs): QueryArgs {
+  if (mentionsDeletion(args.where)) {
+    // `deletedAt: undefined` means "show me everything"; Prisma would ignore the
+    // key, so it is removed rather than passed through.
+    const { deletedAt, ...rest } = args.where as { deletedAt?: unknown }
+    return deletedAt === undefined ? { ...args, where: rest } : args
+  }
+  return { ...args, where: { ...(args.where ?? {}), deletedAt: null } }
+}
+
+/**
  * Prisma 7 takes its connection through a driver adapter rather than a URL in the
  * schema. `@prisma/adapter-pg` wraps node-postgres, which also gives us a real
  * connection pool we can size.
@@ -16,7 +65,7 @@ function createClient() {
     max: 10,
   })
 
-  return new PrismaClient({
+  const client = new PrismaClient({
     adapter,
     log: env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
     // Prisma's 5s default assumes a database on the same machine. Ours is remote,
@@ -25,6 +74,19 @@ function createClient() {
     // alone writes an organisation, a user, a membership and fifteen sequences.
     transactionOptions: { maxWait: 10_000, timeout: 30_000 },
   })
+
+  return client.$extends({
+    query: {
+      $allModels: {
+        async $allOperations({ model, operation, args, query }) {
+          if (!SOFT_DELETED_MODELS.has(model) || !READS.has(operation)) {
+            return query(args)
+          }
+          return query(withoutDeleted(args as QueryArgs))
+        },
+      },
+    },
+  }) as unknown as PrismaClient
 }
 
 /**

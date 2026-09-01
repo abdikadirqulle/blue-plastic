@@ -40,7 +40,6 @@ export const depositSchema = z.object({
 
 export type DepositInput = z.infer<typeof depositSchema>
 
-export const voidBankDocumentSchema = z.object({ id: cuid, reason: requiredText('Reason', 300) })
 
 /* --- Statement import ----------------------------------------------------- */
 

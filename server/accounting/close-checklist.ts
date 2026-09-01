@@ -59,7 +59,7 @@ export async function closeChecklist(
   const [balance] = await client.$queryRaw<{ debit: string; credit: string }[]>`
     SELECT COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE l."orgId" = ${ctx.orgId}
        AND l."journalDate" <= ${to}
   `
@@ -79,7 +79,7 @@ export async function closeChecklist(
     WITH control AS (
       SELECT COALESCE(SUM(l.debit - l.credit), 0) AS amount
         FROM journal_lines l
-        JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+        JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
         JOIN ledger_accounts a ON a.id = l."accountId"
        WHERE l."orgId" = ${ctx.orgId}
          AND a."systemKey" = 'ACCOUNTS_RECEIVABLE'
@@ -88,7 +88,7 @@ export async function closeChecklist(
     subsidiary AS (
       SELECT COALESCE(SUM(l.debit - l.credit), 0) AS amount
         FROM journal_lines l
-        JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+        JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
         JOIN ledger_accounts a ON a.id = l."accountId"
        WHERE l."orgId" = ${ctx.orgId}
          AND a."systemKey" = 'ACCOUNTS_RECEIVABLE'
@@ -151,6 +151,7 @@ export async function closeChecklist(
         SELECT "paymentId" AS id, SUM(amount) AS amount FROM sales_applications GROUP BY "paymentId"
       ) applied ON applied.id = p.id
      WHERE p."orgId" = ${ctx.orgId}
+       AND p."deletedAt" IS NULL
        AND p.status <> 'VOID'
        AND p.date <= ${to}
        AND p.amount - COALESCE(applied.amount, 0) > 0.0001
@@ -172,7 +173,7 @@ export async function closeChecklist(
   const [undeposited] = await client.$queryRaw<{ balance: string }[]>`
     SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       JOIN ledger_accounts a ON a.id = l."accountId"
      WHERE l."orgId" = ${ctx.orgId}
        AND a.subtype = 'UNDEPOSITED_FUNDS'
@@ -238,7 +239,7 @@ export async function closeChecklist(
   const [openingBalanceEquity] = await client.$queryRaw<{ balance: string }[]>`
     SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       JOIN ledger_accounts a ON a.id = l."accountId"
      WHERE l."orgId" = ${ctx.orgId}
        AND a."systemKey" = 'OPENING_BALANCE_EQUITY'
@@ -277,7 +278,7 @@ export async function adjustingEntries(
   const journals = await client.journal.findMany({
     where: {
       orgId,
-      status: { not: 'DRAFT' },
+      status: { notIn: ['DRAFT', 'DELETED'] },
       date: { gte: toDate(range.from), lte: toDate(range.to) },
       OR: [{ isAdjusting: true }, { isClosingEntry: true }],
     },

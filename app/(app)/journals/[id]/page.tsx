@@ -80,6 +80,18 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
         </p>
       ) : null}
 
+      {journal.status === 'DELETED' ? (
+        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
+          This entry was deleted
+          {journal.deletedAt
+            ? ` on ${formatDate(toCalendarDate(journal.deletedAt))}`
+            : ''}
+          {journal.deleteReason ? ` — ${journal.deleteReason}` : ''}. It is excluded from every
+          balance and every report. The entry is kept, exactly as it was posted, so what was once in
+          the books can still be read.
+        </div>
+      ) : null}
+
       {journal.status === 'REVERSED' && journal.reversedBy ? (
         <Notice>
           This entry was reversed by{' '}

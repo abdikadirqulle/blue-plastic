@@ -7,11 +7,12 @@ import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { BillPaymentInput } from '@/lib/validation/purchases'
 import { buildBillPaymentJournal } from '@/server/accounting/builders/purchases'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
-import { postJournal, reverseJournal } from '@/server/accounting/posting'
+import { softDeleteDocument } from '@/server/accounting/deletion'
+import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
 import { db, type Tx } from '@/server/db'
-import { conflict, notFound, precondition, validation } from '@/server/errors'
+import { notFound, precondition, validation } from '@/server/errors'
 import { nextDocumentNumber } from '@/server/sequences'
 import { outstandingBalances, refreshStatus } from '@/server/services/purchase.service'
 
@@ -329,42 +330,41 @@ export async function applyCredit(
   })
 }
 
-export async function voidPayment(ctx: OrgContext, id: string, reason: string) {
-  const meta = await requestMeta()
-
+/**
+ * Delete a vendor payment: withdraw its journal, release the bills it settled.
+ *
+ * Nothing is physically removed — see `server/accounting/deletion.ts`.
+ */
+export async function remove(ctx: OrgContext, id: string, reason?: string | null) {
   return db.$transaction(async (tx) => {
     const payment = await tx.billPayment.findFirst({
-      where: { id, orgId: ctx.orgId },
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
       select: {
-        id: true, number: true, status: true, journalId: true,
+        id: true, number: true, status: true, journalId: true, amount: true, deletedAt: true,
         applications: { select: { billId: true } },
       },
     })
     if (!payment) throw notFound('Payment')
-    if (payment.status === 'VOID') throw conflict(`${payment.number} is already void.`)
+    if (payment.deletedAt) return { id, number: payment.number }
 
     const billIds = payment.applications.map((application) => application.billId)
     await tx.purchaseApplication.deleteMany({ where: { paymentId: id } })
 
-    if (payment.journalId) {
-      await reverseJournal(tx, ctx, payment.journalId, {
-        reason: `${payment.number} voided — ${reason}`,
-      })
-    }
-
-    await tx.billPayment.update({
-      where: { id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
+    await softDeleteDocument(tx, ctx, {
+      mark: (stamp) => tx.billPayment.update({ where: { id }, data: stamp }),
+      entity: 'BillPayment',
+      id,
+      number: payment.number,
+      journalIds: [payment.journalId],
+      reason,
+      before: {
+        amount: payment.amount.toString(),
+        status: payment.status,
+        applicationsReleased: billIds.length,
+      },
     })
 
     for (const billId of billIds) await refreshStatus(tx, billId)
-
-    await writeAudit(
-      tx,
-      ctx,
-      { entity: 'BillPayment', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
-      meta,
-    )
 
     return { id, number: payment.number }
   })

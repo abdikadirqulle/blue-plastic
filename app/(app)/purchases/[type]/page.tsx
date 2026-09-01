@@ -59,6 +59,7 @@ export default async function PurchaseListPage({
   const page = await purchaseService.list(ctx, config.type, query, { status, ...sort })
   const basePath = `/purchases/${config.slug}`
   const canEditDocuments = ctx.permissions.has('bill:update')
+  const canDelete = ctx.permissions.has('bill:void')
   const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
   const currency = ctx.organization.baseCurrency
   const now = today(ctx.organization.timeZone)
@@ -178,7 +179,28 @@ export default async function PurchaseListPage({
                           ...(canEditDocuments && row.status !== 'VOID'
                             ? [{ label: 'Edit', href: `${basePath}/${row.id}/edit`, icon: 'edit' as const }]
                             : []),
+                          // Booking a delivery in is the thing most often done to
+                          // an order, so it belongs on the row and not two screens
+                          // away.
+                          ...(config.type === 'PURCHASE_ORDER' &&
+                          ctx.permissions.has('bill:create') &&
+                          row.status !== 'VOID' &&
+                          row.status !== 'DRAFT' &&
+                          row.status !== 'CLOSED'
+                            ? [
+                                {
+                                  label: 'Receive items',
+                                  href: `/purchases/purchase-orders/${row.id}/receive`,
+                                  icon: 'open' as const,
+                                },
+                              ]
+                            : []),
                         ]}
+                        onDelete={
+                          canDelete
+                            ? { kind: 'purchase', id: row.id, number: row.number }
+                            : undefined
+                        }
                       />
                     </TableCell>
                   </TableRow>

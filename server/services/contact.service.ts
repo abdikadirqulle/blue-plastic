@@ -183,7 +183,7 @@ export async function subledgerBalances(
                  COALESCE(SUM(l.debit), 0)  AS debit,
                  COALESCE(SUM(l.credit), 0) AS credit
             FROM journal_lines l
-            JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+            JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
            WHERE l."orgId" = ${ctx.orgId}
              AND l."customerId" = ANY(${ids})
            GROUP BY l."customerId"
@@ -193,7 +193,7 @@ export async function subledgerBalances(
                  COALESCE(SUM(l.debit), 0)  AS debit,
                  COALESCE(SUM(l.credit), 0) AS credit
             FROM journal_lines l
-            JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+            JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
            WHERE l."orgId" = ${ctx.orgId}
              AND l."vendorId" = ANY(${ids})
            GROUP BY l."vendorId"

@@ -76,6 +76,12 @@ const journalLineSchema = z
     debit: z.string().trim().default(''),
     credit: z.string().trim().default(''),
     description: z.string().trim().max(300).default(''),
+    /**
+     * The subledger dimension. Required on a receivables or payables line and
+     * refused on any other — see R7 and `partyRequiredBy`.
+     */
+    customerId: optionalId,
+    vendorId: optionalId,
   })
   .refine((line) => !(line.debit !== '' && line.credit !== ''), {
     message: 'Enter a debit or a credit, not both',

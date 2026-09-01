@@ -3,11 +3,11 @@ import type { DocumentType, Prisma, PurchaseDocumentType } from '@prisma/client'
 
 import { toCalendarDate, toDate, today, type CalendarDate } from '@/lib/date'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
-import { dispositionOf } from '@/lib/document-disposition'
 import { dueDateFor } from '@/lib/payment-terms'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
-import type { PurchaseDocumentInput } from '@/lib/validation/purchases'
+import type { PurchaseDocumentInput, ReceiveOrderInput } from '@/lib/validation/purchases'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
+import { softDeleteDocument } from '@/server/accounting/deletion'
 import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { priceDocument, type DraftSalesLine } from '@/server/accounting/sales-pricing'
 import { recordMovement, reverseMovementsFor } from '@/server/accounting/inventory'
@@ -88,7 +88,12 @@ export async function list(
   const [rows, total] = await Promise.all([
     db.purchaseDocument.findMany({
       where,
-      select: DOCUMENT_SELECT,
+      // Applied payments and credits come back with the row so a list can say
+      // what deleting one would release without a second query per row.
+      select: {
+        ...DOCUMENT_SELECT,
+        _count: { select: { applications: true, creditsApplied: true } },
+      },
       orderBy:
         (options.sort ? PURCHASE_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
         [{ date: 'desc' }, { number: 'desc' }],
@@ -112,6 +117,7 @@ export async function list(
         row.type === 'BILL'
           ? toMoneyString(balances.get(row.id) ?? new Decimal(row.total.toString()), 2)
           : '0.00',
+      appliedCount: row._count.applications + row._count.creditsApplied,
     })),
     total,
     query,
@@ -127,6 +133,7 @@ export async function get(ctx: OrgContext, id: string) {
         orderBy: { lineNumber: 'asc' },
         select: {
           id: true, lineNumber: true, description: true, quantity: true, unitPrice: true,
+          quantityReceived: true,
           discountPercent: true, amount: true, taxAmount: true,
           item: { select: { id: true, name: true, sku: true } },
           taxCode: { select: { id: true, name: true } },
@@ -156,6 +163,13 @@ export async function get(ctx: OrgContext, id: string) {
     lines: document.lines.map((line) => ({
       ...line,
       quantity: line.quantity.toString(),
+      quantityReceived: line.quantityReceived.toString(),
+      // Only meaningful on an order, but computed once here rather than in each
+      // screen that wants to show what is still to come.
+      quantityRemaining: Decimal.max(
+        new Decimal(line.quantity.toString()).minus(line.quantityReceived.toString()),
+        0,
+      ).toString(),
       unitPrice: line.unitPrice.toString(),
       discountPercent: line.discountPercent?.toString() ?? null,
       amount: line.amount.toString(),
@@ -191,8 +205,27 @@ export async function create(
   input: PurchaseDocumentInput,
 ) {
   const meta = await requestMeta()
+  return db.$transaction((tx) => createWithin(tx, ctx, type, input, meta))
+}
 
-  return db.$transaction(async (tx) => {
+/**
+ * The body of `create`, taking the caller's transaction.
+ *
+ * Split out because two things create a bill as part of a larger act: receiving
+ * goods against a purchase order, and converting one outright. Both also have to
+ * update the order in the same breath — and when creation opened its own
+ * transaction, as it used to, a failure after the bill was written left the bill
+ * in the books with the order still showing nothing received. One unit of work
+ * or none.
+ */
+async function createWithin(
+  tx: Tx,
+  ctx: OrgContext,
+  type: PurchaseDocumentType,
+  input: PurchaseDocumentInput,
+  meta: Awaited<ReturnType<typeof requestMeta>>,
+) {
+  {
     const vendor = await requireVendor(tx, ctx, input.vendorId)
     const lines = await resolveLines(tx, ctx, input.lines, vendor.defaultExpenseAccountId)
     const taxCodes = await loadTaxCodes(tx, ctx, lines)
@@ -277,7 +310,7 @@ export async function create(
     )
 
     return { id: document.id, number: document.number }
-  })
+  }
 }
 
 export async function update(ctx: OrgContext, id: string, input: PurchaseDocumentInput) {
@@ -516,158 +549,418 @@ export async function postDocument(tx: Tx, ctx: OrgContext, id: string) {
   return journal
 }
 
-export async function voidDocument(ctx: OrgContext, id: string, reason: string) {
-  const meta = await requestMeta()
 
+/**
+ * Delete a purchase document.
+ *
+ * One verb, whatever state it is in. A bill is withdrawn with the journal it
+ * posted and the stock it received; payments applied to it are released and
+ * become unapplied money against the vendor. A bill raised by receiving against a
+ * purchase order puts what it received back on the order, so the order re-opens
+ * with the right quantity still to come — a delivery deleted is a delivery that
+ * did not happen.
+ *
+ * Nothing is physically removed. See `server/accounting/deletion.ts`.
+ */
+export async function remove(ctx: OrgContext, id: string, reason?: string | null) {
   return db.$transaction(async (tx) => {
     const document = await tx.purchaseDocument.findFirst({
-      where: { id, orgId: ctx.orgId },
-      select: { id: true, number: true, status: true, journalId: true },
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
+      select: {
+        id: true, type: true, number: true, status: true, journalId: true, total: true,
+        deletedAt: true, convertedFromId: true,
+        applications: { select: { id: true, billId: true } },
+        creditsApplied: { select: { id: true, billId: true } },
+        lines: { select: { id: true, itemId: true, quantity: true } },
+      },
     })
     if (!document) throw notFound('Document')
-    if (document.status === 'VOID') throw conflict(`${document.number} is already void.`)
+    if (document.deletedAt) return { id, number: document.number }
 
-    const applied = await appliedTotal(tx, id)
-    if (!applied.isZero()) {
-      throw precondition(
-        `${document.number} has ${toMoneyString(applied, 2)} applied to it. Remove that first.`,
-      )
-    }
+    const applications = [...document.applications, ...document.creditsApplied]
+    const touchedBillIds = [
+      ...new Set(applications.map((application) => application.billId).filter((v) => v !== id)),
+    ]
 
-    if (document.journalId) {
-      const reversal = await reverseJournal(tx, ctx, document.journalId, {
-        reason: `${document.number} voided — ${reason}`,
+    if (applications.length > 0) {
+      await tx.purchaseApplication.deleteMany({
+        where: { id: { in: applications.map((application) => application.id) } },
       })
-      // The goods go back with the money. A voided bill received nothing.
-      await reverseMovementsFor(tx, ctx, { sourceId: id, journalId: reversal.id })
     }
 
-    await tx.purchaseDocument.update({
-      where: { id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
+    // A bill raised by receiving hands its quantities back to the order.
+    if (document.convertedFromId) {
+      await restoreOrderQuantities(tx, ctx, document.convertedFromId, id)
+    }
+
+    // A purchase order that has bills against it loses the link; the bills stay,
+    // because they are the record of goods actually received and money owed.
+    await tx.purchaseDocument.updateMany({
+      where: { orgId: ctx.orgId, convertedFromId: id },
+      data: { convertedFromId: null },
     })
 
-    await writeAudit(
-      tx,
-      ctx,
-      { entity: 'PurchaseDocument', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
-      meta,
-    )
+    // Stock received goes back out. See the note in `sales.service.remove`.
+    await reverseMovementsFor(tx, ctx, { sourceId: id })
+
+    await softDeleteDocument(tx, ctx, {
+      mark: (stamp) => tx.purchaseDocument.update({ where: { id }, data: stamp }),
+      entity: 'PurchaseDocument',
+      id,
+      number: document.number,
+      journalIds: [document.journalId],
+      reason,
+      before: {
+        type: document.type,
+        status: document.status,
+        total: document.total.toString(),
+        applicationsReleased: applications.length,
+      },
+    })
+
+    for (const billId of touchedBillIds) {
+      await refreshStatus(tx, billId)
+    }
 
     return { id, number: document.number }
   })
 }
 
 /**
- * Delete a purchase document that never reached the ledger.
+ * Put a deleted receipt's quantities back on the order it was received against.
  *
- * The mirror of the sales side, and the same rule: a draft or a purchase order
- * has told the ledger nothing, so it can go. A posted bill, expense or vendor
- * credit is voided instead — its journal reversed, its stock returned, the
- * document kept. `dispositionOf` says which applies before anything is clicked.
+ * The order's count is the only thing in the system that would otherwise be left
+ * stating something untrue: it would still say ten arrived when the bill saying
+ * so has been withdrawn. The status follows the count back — an order with
+ * nothing received is open again, not closed.
  */
-export async function remove(ctx: OrgContext, id: string) {
-  const meta = await requestMeta()
-
-  return db.$transaction(async (tx) => {
-    const document = await tx.purchaseDocument.findFirst({
-      where: { id, orgId: ctx.orgId },
+async function restoreOrderQuantities(
+  tx: Tx,
+  ctx: OrgContext,
+  orderId: string,
+  billId: string,
+): Promise<void> {
+  const [order, bill] = await Promise.all([
+    tx.purchaseDocument.findFirst({
+      where: { id: orderId, orgId: ctx.orgId, type: 'PURCHASE_ORDER' },
       select: {
-        id: true, type: true, number: true, status: true, journalId: true, total: true,
-        convertedTo: { select: { id: true, number: true } },
-        _count: { select: { applications: true, creditsApplied: true } },
+        id: true, status: true,
+        lines: { select: { id: true, itemId: true, description: true, quantity: true, quantityReceived: true } },
       },
-    })
-    if (!document) throw notFound('Document')
+    }),
+    tx.purchaseDocument.findFirst({
+      where: { id: billId, orgId: ctx.orgId },
+      select: { lines: { select: { itemId: true, description: true, quantity: true } } },
+    }),
+  ])
+  if (!order || !bill) return
 
-    const disposition = dispositionOf({
-      status: document.status,
-      journalId: document.journalId,
-      convertedToId: document.convertedTo?.id ?? null,
-      appliedCount: document._count.applications + document._count.creditsApplied,
-    })
-
-    if (disposition.action !== 'delete') {
-      throw precondition(
-        `${document.number} cannot be deleted. ${disposition.reason}` +
-          (disposition.action === 'void' ? ' Void it instead — the entry is reversed and both stay on the record.' : ''),
-      )
-    }
-
-    await reverseMovementsFor(tx, ctx, { sourceId: id })
-    await tx.purchaseDocument.delete({ where: { id } })
-
-    await writeAudit(
-      tx,
-      ctx,
-      {
-        entity: 'PurchaseDocument',
-        entityId: id,
-        action: 'DELETE',
-        before: { type: document.type, number: document.number, total: document.total.toString() },
-      },
-      meta,
+  // Receipt lines are copied from the order's, so they match on what identifies
+  // a line: the item, or the description where there is no item.
+  const remainingByKey = new Map<string, Decimal>()
+  for (const line of bill.lines) {
+    const key = line.itemId ?? `text:${line.description ?? ''}`
+    remainingByKey.set(
+      key,
+      (remainingByKey.get(key) ?? ZERO).plus(new Decimal(line.quantity.toString())),
     )
+  }
 
-    return { id, number: document.number }
+  for (const line of order.lines) {
+    const key = line.itemId ?? `text:${line.description ?? ''}`
+    const giveBack = remainingByKey.get(key)
+    if (!giveBack || giveBack.isZero()) continue
+
+    const received = new Decimal(line.quantityReceived.toString())
+    const restored = Decimal.max(received.minus(giveBack), 0)
+
+    await tx.purchaseDocumentLine.update({
+      where: { id: line.id },
+      data: { quantityReceived: restored.toFixed(4) },
+    })
+
+    remainingByKey.set(key, ZERO)
+  }
+
+  const refreshed = await tx.purchaseDocumentLine.findMany({
+    where: { documentId: orderId },
+    select: { quantity: true, quantityReceived: true },
   })
+
+  const outstanding = refreshed.reduce(
+    (total, line) =>
+      total.plus(
+        Decimal.max(
+          new Decimal(line.quantity.toString()).minus(line.quantityReceived.toString()),
+          0,
+        ),
+      ),
+    ZERO,
+  )
+
+  const anyReceived = refreshed.some((line) => !new Decimal(line.quantityReceived.toString()).isZero())
+
+  if (order.status !== 'VOID' && order.status !== 'DRAFT') {
+    await tx.purchaseDocument.update({
+      where: { id: orderId },
+      data: { status: outstanding.isZero() ? 'CLOSED' : anyReceived ? 'PARTIAL' : 'OPEN' },
+    })
+  }
 }
 
-/** Turn a purchase order into a bill once the goods arrive. */
-export async function convertOrder(ctx: OrgContext, orderId: string, date: CalendarDate) {
+/**
+ * What is on an order, what has arrived, and what is still to come.
+ *
+ * The receiving screen is built from this and nothing else, so what it shows and
+ * what the service will accept cannot drift apart.
+ */
+export type ReceivableLine = {
+  lineId: string
+  lineNumber: number
+  itemId: string | null
+  itemName: string | null
+  sku: string | null
+  isTracked: boolean
+  description: string | null
+  unitPrice: string
+  ordered: string
+  received: string
+  remaining: string
+}
+
+export async function receivableOrder(
+  ctx: OrgContext,
+  orderId: string,
+  options: { client?: Tx } = {},
+) {
+  const client = options.client ?? db
+  const order = await client.purchaseDocument.findFirst({
+    where: { id: orderId, orgId: ctx.orgId, type: 'PURCHASE_ORDER' },
+    select: {
+      id: true, number: true, status: true, date: true, reference: true, memo: true,
+      vendor: { select: { id: true, displayName: true } },
+      convertedTo: {
+        select: { id: true, number: true, date: true, status: true },
+        orderBy: { date: 'asc' },
+      },
+      lines: {
+        orderBy: { lineNumber: 'asc' },
+        select: {
+          id: true, lineNumber: true, itemId: true, description: true,
+          quantity: true, quantityReceived: true, unitPrice: true,
+          item: { select: { name: true, sku: true, type: true } },
+        },
+      },
+    },
+  })
+  if (!order) throw notFound('Purchase order')
+
+  const lines: ReceivableLine[] = order.lines.map((line) => {
+    const ordered = new Decimal(line.quantity.toString())
+    const received = new Decimal(line.quantityReceived.toString())
+    return {
+      lineId: line.id,
+      lineNumber: line.lineNumber,
+      itemId: line.itemId,
+      itemName: line.item?.name ?? null,
+      sku: line.item?.sku ?? null,
+      isTracked: line.item?.type === 'INVENTORY',
+      description: line.description,
+      unitPrice: line.unitPrice.toString(),
+      ordered: ordered.toFixed(2),
+      received: received.toFixed(2),
+      // Over-receipt is refused, so nothing outstanding is ever negative even if
+      // an earlier bill was voided by hand.
+      remaining: Decimal.max(ordered.minus(received), 0).toFixed(2),
+    }
+  })
+
+  return {
+    id: order.id,
+    number: order.number,
+    status: order.status,
+    date: order.date,
+    reference: order.reference,
+    memo: order.memo,
+    vendor: order.vendor,
+    receipts: order.convertedTo,
+    lines,
+    fullyReceived: lines.every((line) => new Decimal(line.remaining).isZero()),
+  }
+}
+
+/**
+ * Receive goods against a purchase order.
+ *
+ * An order is rarely filled in one delivery, and this used to be all or nothing:
+ * one button that turned the whole order into a bill for everything on it,
+ * whether or not it had all turned up. If half arrived, the choice was to bill
+ * for goods that were not there — inflating stock and the payables balance — or
+ * to record nothing at all until the rest came. Both are wrong, and the second
+ * is what people did.
+ *
+ * So a receipt is a quantity per line. It raises a bill for exactly what arrived,
+ * which is what moves stock and raises the payable; the order keeps count of what
+ * it is still owed and closes itself when nothing is left. Receiving the balance
+ * later is the same act again.
+ *
+ * The bill is the accounting document — this is not a second ledger. All the
+ * order carries is the count, and the receiving service is its only writer.
+ */
+export async function receiveOrder(ctx: OrgContext, input: ReceiveOrderInput) {
   const meta = await requestMeta()
 
   return db.$transaction(async (tx) => {
     const order = await tx.purchaseDocument.findFirst({
-      where: { id: orderId, orgId: ctx.orgId, type: 'PURCHASE_ORDER' },
+      where: { id: input.orderId, orgId: ctx.orgId, type: 'PURCHASE_ORDER' },
       select: {
         id: true, number: true, status: true, vendorId: true, reference: true, memo: true,
-        paymentTermId: true, convertedTo: { select: { number: true } },
+        paymentTermId: true,
         lines: {
           orderBy: { lineNumber: 'asc' },
           select: {
-            itemId: true, description: true, quantity: true, unitPrice: true,
+            id: true, lineNumber: true, itemId: true, description: true,
+            quantity: true, quantityReceived: true, unitPrice: true,
             discountPercent: true, taxCodeId: true, expenseAccountId: true,
           },
         },
       },
     })
     if (!order) throw notFound('Purchase order')
-    if (order.convertedTo) {
-      throw conflict(`${order.number} has already become bill ${order.convertedTo.number}.`)
-    }
+
     if (order.status === 'VOID') {
       throw precondition(`${order.number} is void and cannot be received.`)
     }
+    if (order.status === 'DRAFT') {
+      throw precondition(
+        `${order.number} is still a draft. Save it as an order before receiving against it.`,
+      )
+    }
+    if (order.status === 'CLOSED') {
+      throw conflict(`${order.number} is closed — everything on it has already been received.`)
+    }
 
-    const bill = await create(ctx, 'BILL', {
-      vendorId: order.vendorId,
-      date,
-      reference: order.reference,
-      memo: order.memo,
-      paymentTermId: order.paymentTermId,
-      lines: order.lines.map((line) => ({
-        itemId: line.itemId,
-        expenseAccountId: line.expenseAccountId,
-        description: line.description,
-        quantity: line.quantity.toString(),
-        unitPrice: line.unitPrice.toString(),
-        discountPercent: line.discountPercent?.toString() ?? null,
-        taxCodeId: line.taxCodeId,
-      })),
-    } as PurchaseDocumentInput)
+    const byId = new Map(order.lines.map((line) => [line.id, line]))
+    const receiving = new Map<string, Decimal>()
 
-    await tx.purchaseDocument.update({ where: { id: bill.id }, data: { convertedFromId: orderId } })
-    await tx.purchaseDocument.update({ where: { id: orderId }, data: { status: 'CLOSED' } })
+    for (const request of input.lines) {
+      const line = byId.get(request.lineId)
+      if (!line) throw notFound('Order line')
+
+      const quantity = new Decimal(request.quantity)
+      if (quantity.isZero()) continue
+      if (quantity.isNegative()) {
+        throw validation(
+          'A received quantity cannot be negative. To send goods back, raise a vendor credit.',
+        )
+      }
+
+      const remaining = new Decimal(line.quantity.toString()).minus(
+        line.quantityReceived.toString(),
+      )
+      if (quantity.greaterThan(remaining)) {
+        throw validation(
+          `Line ${line.lineNumber} has ${remaining.toFixed(2)} still to come and you have entered ` +
+            `${quantity.toFixed(2)}. Receive what arrived; if the vendor sent more than was ordered, ` +
+            `amend the order first so the paperwork matches the delivery.`,
+          { [`lines.${line.lineNumber}.quantity`]: [`At most ${remaining.toFixed(2)}`] },
+        )
+      }
+
+      receiving.set(line.id, quantity)
+    }
+
+    if (receiving.size === 0) {
+      throw validation('Enter a quantity against at least one line.')
+    }
+
+    const bill = await createWithin(
+      tx,
+      ctx,
+      'BILL',
+      {
+        vendorId: order.vendorId,
+        date: input.date,
+        reference: input.reference ?? order.reference,
+        memo:
+          input.memo ??
+          [`Received against ${order.number}`, order.memo].filter(Boolean).join(' — '),
+        paymentTermId: order.paymentTermId,
+        lines: order.lines
+          .filter((line) => receiving.has(line.id))
+          .map((line) => ({
+            itemId: line.itemId,
+            expenseAccountId: line.expenseAccountId,
+            description: line.description,
+            quantity: receiving.get(line.id)!.toString(),
+            unitPrice: line.unitPrice.toString(),
+            discountPercent: line.discountPercent?.toString() ?? null,
+            taxCodeId: line.taxCodeId,
+          })),
+      } as PurchaseDocumentInput,
+      meta,
+    )
+
+    await tx.purchaseDocument.update({
+      where: { id: bill.id },
+      data: { convertedFromId: order.id },
+    })
+
+    for (const [lineId, quantity] of receiving) {
+      await tx.purchaseDocumentLine.update({
+        where: { id: lineId },
+        data: { quantityReceived: { increment: quantity.toFixed(4) } },
+      })
+    }
+
+    // Closed once nothing is outstanding; otherwise it stays open, showing what
+    // is still owed rather than disappearing off the list of live orders.
+    const outstanding = order.lines.reduce((total, line) => {
+      const received = new Decimal(line.quantityReceived.toString()).plus(
+        receiving.get(line.id) ?? 0,
+      )
+      return total.plus(Decimal.max(new Decimal(line.quantity.toString()).minus(received), 0))
+    }, new Decimal(0))
+
+    const status = outstanding.isZero() ? 'CLOSED' : 'PARTIAL'
+    await tx.purchaseDocument.update({ where: { id: order.id }, data: { status } })
 
     await writeAudit(
       tx,
       ctx,
-      { entity: 'PurchaseDocument', entityId: orderId, action: 'UPDATE', after: { convertedTo: bill.number } },
+      {
+        entity: 'PurchaseDocument',
+        entityId: order.id,
+        action: 'UPDATE',
+        after: {
+          received: bill.number,
+          lines: receiving.size,
+          status,
+          outstanding: outstanding.toFixed(2),
+        },
+      },
       meta,
     )
 
-    return bill
+    return { ...bill, orderNumber: order.number, orderStatus: status }
+  })
+}
+
+/**
+ * Receive everything still outstanding in one go.
+ *
+ * The old "receive and bill" button, kept because most orders do arrive in one
+ * delivery and making that case take a form is a tax on the common path.
+ */
+export async function convertOrder(ctx: OrgContext, orderId: string, date: CalendarDate) {
+  const order = await receivableOrder(ctx, orderId)
+
+  return receiveOrder(ctx, {
+    orderId,
+    date,
+    lines: order.lines
+      .filter((line) => !new Decimal(line.remaining).isZero())
+      .map((line) => ({ lineId: line.lineId, quantity: line.remaining })),
   })
 }
 

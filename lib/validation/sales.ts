@@ -58,11 +58,6 @@ export const salesDocumentSchema = z.object({
 
 export type SalesDocumentInput = z.infer<typeof salesDocumentSchema>
 
-export const voidDocumentSchema = z.object({
-  id: cuid,
-  reason: requiredText('Reason', 300),
-})
-
 export const convertEstimateSchema = z.object({
   id: cuid,
   date: calendarDate,

@@ -95,7 +95,7 @@ export default async function TrialBalancePage({
                   <TableCell className="tabular text-muted-foreground">{row.code}</TableCell>
                   <TableCell>
                     <Link
-                      href={`/accounts/${row.accountId}?from=${from}&to=${to}`}
+                      href={`/reports/transaction-detail?account=${row.accountId}&period=custom&from=${from}&to=${to}&back=/reports/trial-balance`}
                       className="font-medium underline-offset-4 hover:underline"
                     >
                       {row.name}

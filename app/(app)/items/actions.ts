@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 
 import { formValues, toFormState, type FormState } from '@/components/forms/action-state'
-import { cuid } from '@/lib/validation/common'
+import { cuid, deleteRecordSchema } from '@/lib/validation/common'
 import { bulkSetActiveSchema, itemSchema } from '@/lib/validation/master-data'
 import { action } from '@/server/action'
 import * as itemService from '@/server/services/item.service'
@@ -33,6 +33,23 @@ export const setItemsActive = action
     const result = await itemService.setActive(ctx, input.ids, input.isActive)
     revalidatePath('/items')
     return result
+  })
+
+/**
+ * Delete an item.
+ *
+ * Guarded by `item:archive` rather than a new permission: whoever may take an
+ * item out of circulation may delete one.
+ */
+export const deleteItem = action
+  .requires('item:archive')
+  .input(deleteRecordSchema)
+  .handler(async (ctx, input) => {
+    const result = await itemService.remove(ctx, input.id, input.reason)
+    revalidatePath('/items')
+    revalidatePath('/inventory')
+    revalidatePath('/reports')
+    return { id: result.id, number: result.name }
   })
 
 export async function createItemForm(_prev: FormState, formData: FormData): Promise<FormState> {

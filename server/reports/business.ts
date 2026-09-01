@@ -67,6 +67,7 @@ export async function salesByCustomer(
       JOIN customers c ON c.id = d."customerId"
      WHERE d."orgId" = ${orgId}
        AND d.status NOT IN ('DRAFT', 'VOID')
+        AND d."deletedAt" IS NULL
        AND d.type IN ('INVOICE', 'SALES_RECEIPT', 'CREDIT_MEMO', 'REFUND_RECEIPT')
        AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
      GROUP BY c.id, c."displayName"
@@ -96,6 +97,7 @@ export async function salesByItem(
       JOIN items i ON i.id = l."itemId"
      WHERE d."orgId" = ${orgId}
        AND d.status NOT IN ('DRAFT', 'VOID')
+        AND d."deletedAt" IS NULL
        AND d.type IN ('INVOICE', 'SALES_RECEIPT', 'CREDIT_MEMO', 'REFUND_RECEIPT')
        AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
      GROUP BY i.id, i.name
@@ -127,6 +129,7 @@ export async function purchasesByVendor(
       JOIN vendors v ON v.id = d."vendorId"
      WHERE d."orgId" = ${orgId}
        AND d.status NOT IN ('DRAFT', 'VOID')
+        AND d."deletedAt" IS NULL
        AND d.type IN ('BILL', 'EXPENSE', 'VENDOR_CREDIT')
        AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
      GROUP BY v.id, v."displayName"
@@ -149,7 +152,7 @@ export async function expensesByCategory(
            COALESCE(SUM(l.debit - l.credit), 0) AS amount,
            COUNT(DISTINCT j.id)::int        AS count
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       JOIN ledger_accounts a ON a.id = l."accountId"
      WHERE l."orgId" = ${orgId}
        AND a.type = 'EXPENSE'

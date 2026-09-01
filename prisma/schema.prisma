@@ -297,6 +297,14 @@ enum JournalStatus {
   DRAFT
   POSTED
   REVERSED
+  /// Soft-deleted along with the transaction that produced it.
+  ///
+  /// The row stays. Nothing about the entry is changed and nothing is removed
+  /// from the database, so the history of what was once posted survives — but
+  /// every balance, statement, register and report excludes it, so it can no
+  /// longer affect a figure anybody reads. The one status the immutability
+  /// trigger accepts besides REVERSED, and only alongside the deletion stamp.
+  DELETED
 }
 
 /// What kind of business transaction produced this journal. Values beyond the
@@ -715,6 +723,12 @@ model Journal {
   postedAt    DateTime @default(now()) @db.Timestamptz(6)
   createdById String?
 
+  /// When this entry was deleted, and by whom. Set together with status DELETED
+  /// and never unset — see `server/accounting/deletion.ts`.
+  deletedAt   DateTime? @db.Timestamptz(6)
+  deletedById String?
+  deleteReason String?
+
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
@@ -735,6 +749,7 @@ model Journal {
 
 
   @@unique([orgId, journalNumber])
+  @@index([orgId, deletedAt])
   @@unique([orgId, idempotencyKey])
   /// Target for the composite foreign key on journal_lines (R9).
   @@unique([id, orgId])
@@ -1012,6 +1027,12 @@ model Item {
 
   isActive Boolean @default(true)
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdAt DateTime @default(now()) @db.Timestamptz(6)
   updatedAt DateTime @updatedAt @db.Timestamptz(6)
 
@@ -1032,6 +1053,7 @@ model Item {
   @@unique([orgId, sku])
   @@index([orgId, isActive, name])
   @@index([orgId, type])
+  @@index([orgId, deletedAt])
   @@map("items")
 }
 
@@ -1202,6 +1224,12 @@ model SalesDocument {
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
@@ -1226,6 +1254,7 @@ model SalesDocument {
   @@index([orgId, type, status, date(sort: Desc)])
   @@index([orgId, customerId, date(sort: Desc)])
   @@index([orgId, dueDate])
+  @@index([orgId, deletedAt])
   @@map("sales_documents")
 }
 
@@ -1300,6 +1329,12 @@ model CustomerPayment {
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
@@ -1315,6 +1350,7 @@ model CustomerPayment {
   @@unique([id, orgId])
   @@index([orgId, customerId, date(sort: Desc)])
   @@index([orgId, status])
+  @@index([orgId, deletedAt])
   @@map("customer_payments")
 }
 
@@ -1391,11 +1427,23 @@ model PurchaseDocument {
   journalId String?
   version   Int    @default(1)
 
-  /// Set on the bill a purchase order became.
-  convertedFromId String? @unique
+  /// Set on each bill raised against a purchase order.
+  ///
+  /// Not unique. An order is rarely filled in one delivery: half the pallets
+  /// arrive on Tuesday and the rest a fortnight later, and each arrival is its
+  /// own bill against the same order. Requiring one bill per order is what
+  /// forced the whole order to be received at once whether or not it had all
+  /// turned up.
+  convertedFromId String?
 
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
+
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
 
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
@@ -1408,8 +1456,9 @@ model PurchaseDocument {
   journal        Journal?               @relation(fields: [journalId], references: [id], onDelete: Restrict)
   lines          PurchaseDocumentLine[]
 
-  convertedFrom PurchaseDocument? @relation("OrderConversion", fields: [convertedFromId], references: [id], onDelete: SetNull)
-  convertedTo   PurchaseDocument? @relation("OrderConversion")
+  convertedFrom PurchaseDocument?  @relation("OrderConversion", fields: [convertedFromId], references: [id], onDelete: SetNull)
+  /// The bills raised against this order, oldest first.
+  convertedTo   PurchaseDocument[] @relation("OrderConversion")
 
   applications   PurchaseApplication[] @relation("AppliedToBill")
   creditsApplied PurchaseApplication[] @relation("AppliedFromVendorCredit")
@@ -1419,6 +1468,8 @@ model PurchaseDocument {
   @@index([orgId, type, status, date(sort: Desc)])
   @@index([orgId, vendorId, date(sort: Desc)])
   @@index([orgId, dueDate])
+  @@index([convertedFromId])
+  @@index([orgId, deletedAt])
   @@map("purchase_documents")
 }
 
@@ -1434,6 +1485,15 @@ model PurchaseDocumentLine {
 
   quantity  Decimal @default(1) @db.Decimal(19, 4)
   unitPrice Decimal @default(0) @db.Decimal(19, 4)
+
+  /// How much of this line has arrived. Only meaningful on a purchase order,
+  /// where it is what separates "ordered" from "still to come".
+  ///
+  /// It is kept on the order rather than derived from the bills raised against
+  /// it because a bill can be edited or voided after the fact, and an order that
+  /// silently re-opened itself when somebody corrected a bill would be worse
+  /// than one that never closed. The receiving service is the only writer.
+  quantityReceived Decimal @default(0) @db.Decimal(19, 4)
 
   discountPercent Decimal? @db.Decimal(9, 4)
 
@@ -1484,6 +1544,12 @@ model BillPayment {
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
@@ -1498,6 +1564,7 @@ model BillPayment {
   @@unique([id, orgId])
   @@index([orgId, vendorId, date(sort: Desc)])
   @@index([orgId, status])
+  @@index([orgId, deletedAt])
   @@map("bill_payments")
 }
 
@@ -1556,6 +1623,12 @@ model BankTransfer {
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
@@ -1567,6 +1640,7 @@ model BankTransfer {
 
   @@unique([orgId, number])
   @@index([orgId, date(sort: Desc)])
+  @@index([orgId, deletedAt])
   @@map("bank_transfers")
 }
 
@@ -1598,6 +1672,12 @@ model Deposit {
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
@@ -1610,6 +1690,7 @@ model Deposit {
   @@unique([orgId, number])
   @@unique([id, orgId])
   @@index([orgId, date(sort: Desc)])
+  @@index([orgId, deletedAt])
   @@map("deposits")
 }
 
@@ -1818,6 +1899,12 @@ model InventoryAdjustment {
   voidedAt   DateTime? @db.Timestamptz(6)
   voidReason String?
 
+  /// Soft deletion. The row stays and its journal stays; both are excluded from
+  /// every list, report, selector and balance. See `server/accounting/deletion.ts`.
+  deletedAt    DateTime? @db.Timestamptz(6)
+  deletedById  String?
+  deleteReason String?
+
   createdById String?
   createdAt   DateTime @default(now()) @db.Timestamptz(6)
   updatedAt   DateTime @updatedAt @db.Timestamptz(6)
@@ -1830,6 +1917,7 @@ model InventoryAdjustment {
   @@unique([orgId, number])
   @@unique([id, orgId])
   @@index([orgId, date(sort: Desc)])
+  @@index([orgId, deletedAt])
   @@map("inventory_adjustments")
 }
 

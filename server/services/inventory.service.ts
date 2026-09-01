@@ -11,7 +11,8 @@ import {
   valuation,
 } from '@/server/accounting/inventory'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
-import { postJournal, reverseJournal } from '@/server/accounting/posting'
+import { softDeleteDocument } from '@/server/accounting/deletion'
+import { postJournal } from '@/server/accounting/posting'
 import type { DraftLine } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
@@ -283,45 +284,36 @@ export async function createAdjustment(ctx: OrgContext, input: InventoryAdjustme
  * by their opposites rather than deleted, so the register still reads as "this
  * was counted, then it was undone", which is what an auditor needs to see.
  */
-export async function voidAdjustment(ctx: OrgContext, id: string, reason: string) {
-  const meta = await requestMeta()
-
+/**
+ * Delete a stock adjustment.
+ *
+ * The count it recorded is undone by appending the opposite movement — the stock
+ * ledger's running totals mean a row cannot simply stop counting — and its
+ * journal is withdrawn, so the Inventory Asset account and the stock ledger fall
+ * by the same amount and still agree.
+ *
+ * Nothing is physically removed. See `server/accounting/deletion.ts`.
+ */
+export async function removeAdjustment(ctx: OrgContext, id: string, reason?: string | null) {
   return db.$transaction(async (tx) => {
     const adjustment = await tx.inventoryAdjustment.findFirst({
-      where: { id, orgId: ctx.orgId },
-      select: { id: true, number: true, status: true, journalId: true },
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
+      select: { id: true, number: true, status: true, journalId: true, deletedAt: true },
     })
     if (!adjustment) throw notFound('Adjustment')
-    if (adjustment.status === 'VOID') {
-      throw precondition(`${adjustment.number} is already void.`)
-    }
+    if (adjustment.deletedAt) return { id, number: adjustment.number }
 
-    const reversal = adjustment.journalId
-      ? await reverseJournal(tx, ctx, adjustment.journalId, {
-          reason: `${adjustment.number} voided — ${reason}`,
-        })
-      : null
+    await reverseMovementsFor(tx, ctx, { sourceId: id })
 
-    await reverseMovementsFor(tx, ctx, { sourceId: id, journalId: reversal?.id ?? null })
-
-    await tx.inventoryAdjustment.update({
-      where: { id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
+    return softDeleteDocument(tx, ctx, {
+      mark: (stamp) => tx.inventoryAdjustment.update({ where: { id }, data: stamp }),
+      entity: 'InventoryAdjustment',
+      id,
+      number: adjustment.number,
+      journalIds: [adjustment.journalId],
+      reason,
+      before: { status: adjustment.status },
     })
-
-    await writeAudit(
-      tx,
-      ctx,
-      {
-        entity: 'InventoryAdjustment',
-        entityId: id,
-        action: 'REVERSE',
-        after: { status: 'VOID', reason },
-      },
-      meta,
-    )
-
-    return { id, number: adjustment.number }
   })
 }
 

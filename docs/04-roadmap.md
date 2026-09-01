@@ -231,7 +231,74 @@ remaining cost was: the accounting has been right since Phase 2.
 | 10.13 | Edit routes, row action menus, print, and CSV export on every list |
 | 10.14 | Separate category lines from item lines: purchases get both sections, sales get items only |
 
+| 10.15 | Aging reports read the control account by counterparty, so they agree with the ledger |
+| 10.16 | Manual journals reach the whole chart, with the customer or vendor the line requires |
+| 10.17 | One verb — Delete — on every list and record, actually removing the transaction ([ADR-0013](./decisions/0013-soft-delete-for-transactions.md)) |
+| 10.18 | Partial receiving against a purchase order, with its own page |
+| 10.19 | Transaction detail by account: reports drill to the transactions, and on to the document |
+| 10.20 | Journal form: entry number, a Name on every line, no preset menu |
+
 Carried forward, unbuilt: attachments on documents, full-text search, rate
 limiting, backup/restore runbook, multi-currency activation, and an end-to-end
 browser test suite covering a full accounting cycle from opening balances to
 year-end close.
+
+---
+
+## Phase 11 — The practical gaps
+
+**Not started.** Written on 2026-09-01 after reviewing the system against what
+QuickBooks Online and Desktop actually give a small trading business day to day.
+
+The selection rule was deliberate and narrow: **something a real business does
+every week, that this system either cannot do or makes somebody do by hand.** Not
+"QuickBooks has it". Payroll, time tracking, projects, budgeting, 1099s,
+multi-entity consolidation and app-store integrations are all deliberately out —
+they are a different product, and adding them would cost more than the whole of
+Phases 1–10.
+
+Ordered by what it costs to live without it.
+
+### 11a — Things people do weekly and currently cannot
+
+| # | Task | Why it earns a place |
+| --- | --- | --- |
+| 11.1 | **Attachments on documents** — the vendor's invoice, the delivery note, the receipt photograph, stored against the bill | The single most-used feature in QuickBooks that this has no answer for. A bill with no paperwork behind it is a bill somebody has to go and find a folder for. Carried forward from Phase 10 since the original sketch |
+| 11.2 | **Recurring transactions** — a template plus a schedule, for rent, subscriptions, standing bills and the monthly depreciation journal | Every business has a dozen entries that are identical every month. Re-keying them is where typos and omissions come from. QuickBooks calls these memorised transactions and they are used constantly |
+| 11.3 | **Email a document to a customer or vendor** — invoice, statement, purchase order | The `invoice:send` permission has existed since Phase 1 and nothing implements it. Today the only route out of the system is to print. The org already carries the pieces; what is missing is a transport and a template |
+| 11.4 | **Progress invoicing from an estimate** — invoice part of a quotation, track what is left | The exact mirror of the partial receiving built in 10.26, and its absence is now an asymmetry: a purchase order can be received in instalments and an estimate still becomes an invoice all at once or not at all |
+| 11.5 | **Billable expenses** — mark a cost as rechargeable to a customer and pull it onto their next invoice | A trading business that buys freight or a part on a customer's behalf currently has to remember, and re-key it. This is the feature that stops recharges being forgotten |
+| 11.6 | **Aged detail reports** — the aging broken down per document, not only per customer | The summary answers "who owes"; collecting money needs "which invoice, dated when". Today that means opening each customer in turn |
+
+### 11b — Control and correctness
+
+| # | Task | Why it earns a place |
+| --- | --- | --- |
+| 11.7 | **Enforce the customer credit limit** — warn, or block, when a new invoice would exceed it | `Customer.creditLimit` has been stored since Phase 3 and is read by nothing. A limit that is recorded and never checked is worse than none, because somebody believes it is working |
+| 11.8 | **Automatically reversing journals** — mark an accrual to reverse itself on the first day of the next period | Standard month-end practice. Doing it by hand means remembering, and the entries that get forgotten are the accruals that then double-count |
+| 11.9 | **Per-document change history** — surface the audit log on the record it belongs to | `AuditLog` has recorded every change since Phase 1 and is only visible as one long organisation-wide list. "Who changed this bill, and when" is a question asked about a specific bill |
+| 11.9a | **A "recently deleted" view** — list soft-deleted transactions with who deleted them and why, and restore one | Deleting is now one click and the record vanishes completely. The audit log holds the answer to "what happened to INV-00042" but somebody has to know to go and look, and there is no way back from a mis-click ([ADR-0013](./decisions/0013-soft-delete-for-transactions.md)) |
+| 11.10 | **Bank rules** — remember how an imported line was categorised and apply it next time | The matching engine suggests against existing documents. A recurring bank charge matches nothing and is re-categorised by hand every month |
+| 11.11 | **Duplicate warnings** — a second bill with the same vendor reference, a second payment of the same amount on the same day | Paying a vendor twice is the expensive mistake, and it is cheap to catch at entry |
+
+### 11c — Worth doing, lower cost of omission
+
+| # | Task | Why it earns a place |
+| --- | --- | --- |
+| 11.12 | **Classes or locations** — one optional dimension on every transaction, reportable | A trading business with two shops or two product lines wants a profit and loss per shop. One dimension covers most of it; QuickBooks' full class/location/project trio does not earn its complexity here |
+| 11.13 | **Item bundles** — a group of items sold as one line | Common for a goods business selling a kit. Purely a sales-side convenience; it moves the stock of its components |
+| 11.14 | **Customer price levels** — a percentage or a fixed price per customer | Trade versus retail pricing, currently re-typed on every invoice |
+| 11.15 | **Saved report settings** — name a report's date range, basis and comparison, and return to it | Every month-end runs the same five reports with the same settings. The URL already carries them; what is missing is somewhere to keep one |
+| 11.16 | **Reorder alerts on the dashboard** — the reorder report exists but nothing surfaces it | A stock-out is a lost sale, and the data to prevent it is already computed |
+| 11.17 | **Batch invoicing** — one screen, many customers, the same charge | Useful for recurring service charges; substantially covered by 11.2 if that lands first |
+
+### Deliberately excluded
+
+Payroll, time tracking and job costing, project profitability, budgets versus
+actual, fixed-asset registers with depreciation schedules, 1099/vendor tax
+filing, multi-entity consolidation, inventory assemblies with a bill of
+materials, sales-order and backorder management, an app marketplace, and a
+customer-facing portal.
+
+Each is a real QuickBooks feature. Each is also a subsystem rather than a
+feature, and none of them is what stops this system being used tomorrow morning.

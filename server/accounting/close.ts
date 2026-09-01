@@ -81,7 +81,7 @@ export async function closingPreview(
            COALESCE(SUM(l.debit - l.credit), 0) AS balance
       FROM ledger_accounts a
       JOIN journal_lines l ON l."accountId" = a.id AND l."journalDate" <= ${fiscalYear.endDate}
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE a."orgId" = ${ctx.orgId}
        AND a.type IN ('REVENUE', 'EXPENSE')
      GROUP BY a.id, a.code, a.name

@@ -40,6 +40,7 @@ export default async function JournalsPage({
   const linkParams = { q: query.q, sort: sort.sort, dir: sort.dir }
 
   const canPost = ctx.permissions.has('journal:post')
+  const canDelete = ctx.permissions.has('journal:reverse')
   const currency = ctx.organization.baseCurrency
 
   const newEntry = canPost ? (
@@ -157,7 +158,23 @@ export default async function JournalsPage({
                   </TableCell>
                   <TableCell className="print:hidden">
                     <RowActions
-                      actions={[{ label: 'Open', href: `/journals/${journal.id}`, icon: 'open' }]}
+                      actions={[
+                        { label: 'Open', href: `/journals/${journal.id}`, icon: 'open' },
+                        ...(journal.source.href
+                          ? [
+                              {
+                                label: 'Open source document',
+                                href: journal.source.href,
+                                icon: 'open' as const,
+                              },
+                            ]
+                          : []),
+                      ]}
+                      onDelete={
+                        canDelete
+                          ? { kind: 'journal', id: journal.id, number: journal.journalNumber }
+                          : undefined
+                      }
                     />
                   </TableCell>
                 </TableRow>

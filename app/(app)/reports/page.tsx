@@ -68,6 +68,13 @@ const GROUPS: { label: string; blurb: string; reports: Entry[] }[] = [
         icon: BookOpenIcon,
       },
       {
+        href: '/reports/transaction-detail',
+        title: 'Transaction detail by account',
+        description:
+          'Every transaction that touched one account, with the document behind each. Where every figure on every report leads.',
+        icon: ScrollTextIcon,
+      },
+      {
         href: '/reports/adjusting-entries',
         title: 'Adjusting entries',
         description: 'Accruals, depreciation and the year-end sweep, apart from the trading entries.',

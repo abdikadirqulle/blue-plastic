@@ -4,14 +4,12 @@ import { notFound } from 'next/navigation'
 import { ArrowLeftIcon, PackageIcon, PencilIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
-import { ReceiveOrderButton } from '@/components/purchases/purchase-actions'
-import { DisposeButton } from '@/components/data/document-disposal'
-import { dispositionOf } from '@/lib/document-disposition'
+import { DeleteButton } from '@/components/data/delete-record'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { formatDate, toCalendarDate } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
 import { purchaseBySlug } from '@/lib/purchase-types'
 import { STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
@@ -34,26 +32,23 @@ export default async function PurchaseDocumentPage({
   if (!document) notFound()
 
   const currency = ctx.organization.baseCurrency
-  // A draft or a purchase order can now be deleted, so the control shows for
-  // those too — what it does is decided by `disposition` below.
-  const canVoid = ctx.permissions.has('bill:void') && document.status !== 'VOID'
+  const isOrder = config.type === 'PURCHASE_ORDER'
+  // One control, one verb. A document already voided under the old scheme is
+  // left alone: its entry has been reversed and there is nothing left to remove.
+  const canDelete = ctx.permissions.has('bill:void') && document.status !== 'VOID'
 
   // The same rule the service enforces: no editing a voided document, or one
   // with a payment or credit already applied to it.
   const canEdit =
     ctx.permissions.has('bill:update') && document.status !== 'VOID' && document.applications.length === 0
+  // An order can be received against until nothing is outstanding. It used to be
+  // "until a bill exists", which meant a part delivery closed the order for good.
   const canReceive =
     config.type === 'PURCHASE_ORDER' &&
     ctx.permissions.has('bill:create') &&
-    !document.convertedTo &&
-    document.status !== 'VOID'
-
-  const disposition = dispositionOf({
-    status: document.status,
-    journalId: document.journalId,
-    convertedToId: document.convertedTo?.id ?? null,
-    appliedCount: document.applications.length,
-  })
+    document.status !== 'VOID' &&
+    document.status !== 'CLOSED' &&
+    document.status !== 'DRAFT'
 
   return (
     <>
@@ -70,11 +65,12 @@ export default async function PurchaseDocumentPage({
         actions={
           <>
             {canReceive ? (
-              <ReceiveOrderButton
-                id={id}
-                number={document.number}
-                today={today(ctx.organization.timeZone)}
-              />
+              <Link
+                href={`/purchases/purchase-orders/${id}/receive`}
+                className={buttonVariants({ size: 'sm' })}
+              >
+                <PackageIcon /> Receive items
+              </Link>
             ) : null}
             {canEdit ? (
               <Link
@@ -84,13 +80,12 @@ export default async function PurchaseDocumentPage({
                 <PencilIcon /> Edit
               </Link>
             ) : null}
-            {canVoid ? (
-              <DisposeButton
+            {canDelete ? (
+              <DeleteButton
                 kind="purchase"
                 id={id}
                 number={document.number}
-                disposition={disposition}
-                redirectTo={disposition.action === 'delete' ? `/purchases/${config.slug}` : undefined}
+                redirectTo={`/purchases/${config.slug}`}
               />
             ) : null}
           </>
@@ -137,17 +132,26 @@ export default async function PurchaseDocumentPage({
       {document.status === 'VOID' ? (
         <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
           Voided{document.voidReason ? ` — ${document.voidReason}` : ''}. Its entry was reversed; both
-          remain in the ledger.
+          remain in the ledger. Voiding was replaced by deleting — no new document reaches this
+          state.
         </div>
       ) : null}
 
-      {document.convertedTo ? (
+      {document.convertedTo.length > 0 ? (
         <div className="mb-4 rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-          Became bill{' '}
-          <Link href={`/purchases/bills/${document.convertedTo.id}`} className="font-medium underline underline-offset-4">
-            {document.convertedTo.number}
-          </Link>
-          .
+          {document.convertedTo.length === 1 ? 'Received on bill ' : 'Received on bills '}
+          {document.convertedTo.map((bill, index) => (
+            <span key={bill.id}>
+              {index > 0 ? ', ' : ''}
+              <Link
+                href={`/purchases/bills/${bill.id}`}
+                className="font-medium underline underline-offset-4"
+              >
+                {bill.number}
+              </Link>
+            </span>
+          ))}
+          {document.status === 'CLOSED' ? '. Everything ordered has arrived.' : '. Part of the order is still outstanding.'}
         </div>
       ) : null}
 
@@ -158,6 +162,8 @@ export default async function PurchaseDocumentPage({
               <TableHead>Description</TableHead>
               <TableHead>Category or product</TableHead>
               <TableHead className="numeric w-20">Qty</TableHead>
+              {isOrder ? <TableHead className="numeric w-24">Received</TableHead> : null}
+              {isOrder ? <TableHead className="numeric w-28">Outstanding</TableHead> : null}
               <TableHead className="numeric w-28">Cost</TableHead>
               <TableHead>Tax</TableHead>
               <TableHead className="numeric w-32">Amount</TableHead>
@@ -186,6 +192,20 @@ export default async function PurchaseDocumentPage({
                 <TableCell className="numeric tabular">
                   {line.item ? Number(line.quantity) : <span className="text-muted-foreground">—</span>}
                 </TableCell>
+                {isOrder ? (
+                  <TableCell className="numeric tabular text-muted-foreground">
+                    {Number(line.quantityReceived)}
+                  </TableCell>
+                ) : null}
+                {isOrder ? (
+                  <TableCell className="numeric tabular font-medium">
+                    {Number(line.quantityRemaining) === 0 ? (
+                      <Badge variant="secondary">complete</Badge>
+                    ) : (
+                      Number(line.quantityRemaining)
+                    )}
+                  </TableCell>
+                ) : null}
                 <TableCell className="numeric tabular">
                   {line.item ? (
                     formatMoney(line.unitPrice, currency)

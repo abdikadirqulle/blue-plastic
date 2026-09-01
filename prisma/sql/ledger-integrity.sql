@@ -83,10 +83,20 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 
 -- R4 -- A posted journal is immutable.
 --
--- The single permitted transition is POSTED -> REVERSED. Comparing the rest of
--- the row as jsonb catches every other field in one expression, including any
--- column added by a future migration -- an allow-list of column names would
--- silently stop protecting whatever is added next.
+-- Two transitions are permitted, and nothing else: POSTED -> REVERSED, and
+-- either of those -> DELETED. Comparing the rest of the row as jsonb catches
+-- every other field in one expression, including any column added by a future
+-- migration -- an allow-list of column names would silently stop protecting
+-- whatever is added next.
+--
+-- DELETED is a soft delete and is the only thing "delete this transaction" does
+-- to the ledger. The row is not removed, no amount changes, no line is touched;
+-- the entry is marked so that every balance, register and report leaves it out.
+-- The history of what was once posted survives in full, which is the whole
+-- reason the physical row is kept. The deletion stamp must be set in the same
+-- statement, so an entry can never be marked deleted without saying when and by
+-- whom -- and the reverse transition does not exist: an entry cannot be
+-- un-deleted by an UPDATE any more than it could be edited.
 CREATE OR REPLACE FUNCTION forbid_posted_journal_mutation() RETURNS trigger AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -96,6 +106,32 @@ BEGIN
         USING ERRCODE = 'check_violation';
     END IF;
     RETURN OLD;
+  END IF;
+
+  -- Marking an entry deleted. Permitted from POSTED and from REVERSED, and only
+  -- when the stamp is set and absolutely nothing else about the row moves.
+  IF NEW.status = 'DELETED' AND OLD.status IN ('POSTED', 'REVERSED') THEN
+    IF NEW."deletedAt" IS NULL THEN
+      RAISE EXCEPTION
+        'Journal % cannot be marked deleted without recording when.', OLD."journalNumber"
+        USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF (to_jsonb(NEW) - 'status' - 'updatedAt' - 'deletedAt' - 'deletedById' - 'deleteReason')
+       = (to_jsonb(OLD) - 'status' - 'updatedAt' - 'deletedAt' - 'deletedById' - 'deleteReason')
+    THEN
+      RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION
+      'Journal % cannot be changed while it is being deleted.', OLD."journalNumber"
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  IF OLD.status = 'DELETED' THEN
+    RAISE EXCEPTION
+      'Journal % has been deleted and cannot be changed.', OLD."journalNumber"
+      USING ERRCODE = 'check_violation';
   END IF;
 
   IF OLD.status = 'REVERSED' THEN
@@ -112,7 +148,7 @@ BEGIN
     END IF;
 
     RAISE EXCEPTION
-      'Journal % is posted and immutable. Post a reversal instead of editing it.', OLD."journalNumber"
+      'Journal % is posted and immutable.', OLD."journalNumber"
       USING ERRCODE = 'check_violation';
   END IF;
 

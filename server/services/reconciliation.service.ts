@@ -176,7 +176,7 @@ async function reconcilableLines(
            l.credit            AS "credit",
            (e.id IS NOT NULL)  AS "clearedElsewhere"
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       LEFT JOIN reconciliation_entries e ON e."journalLineId" = l.id
      WHERE l."orgId" = ${ctx.orgId}
        AND l."accountId" = ${accountId}

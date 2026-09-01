@@ -10,11 +10,13 @@ import {
   XCircleIcon,
 } from 'lucide-react'
 
+import { DeleteMenuItem, type DeleteTarget } from '@/components/data/delete-record'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 
@@ -46,14 +48,29 @@ export type RowAction = {
 /**
  * The menu at the end of a row.
  *
- * Only navigation lives here. Anything that changes the ledger — voiding a
- * document, undoing a reconciliation — keeps its own button on the record's own
- * page, where there is room to say what it will do before it does it. A
- * destructive action two clicks deep in a row menu, with a table of
- * near-identical rows around it, is how the wrong invoice gets voided.
+ * It used to hold navigation and nothing else, on the reasoning that a
+ * destructive action two clicks deep in a table of near-identical rows is how
+ * the wrong invoice gets voided. That reasoning was right about the risk and
+ * wrong about the remedy: what it produced was an application in which nothing
+ * could be deleted from any list, and the only way to undo a mistyped bill was
+ * to know that its own page had a button. People stopped correcting things.
+ *
+ * So Delete lives here now, but it is not a click. It is the last item,
+ * separated from the navigation, in the destructive colour, and it opens the
+ * same dialog as the record page — which names the record and says exactly what
+ * deleting it will take with it before anything happens.
  */
-export function RowActions({ actions, label = 'Actions' }: { actions: RowAction[]; label?: string }) {
-  if (actions.length === 0) return null
+export function RowActions({
+  actions,
+  onDelete,
+  label = 'Actions',
+}: {
+  actions: RowAction[]
+  /** The row's Delete entry, when it has one. */
+  onDelete?: DeleteTarget
+  label?: string
+}) {
+  if (actions.length === 0 && !onDelete) return null
 
   return (
     <DropdownMenu>
@@ -78,6 +95,9 @@ export function RowActions({ actions, label = 'Actions' }: { actions: RowAction[
             </DropdownMenuItem>
           )
         })}
+
+        {onDelete && actions.length > 0 ? <DropdownMenuSeparator /> : null}
+        {onDelete ? <DeleteMenuItem {...onDelete} /> : null}
       </DropdownMenuContent>
     </DropdownMenu>
   )

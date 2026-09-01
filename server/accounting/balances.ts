@@ -9,11 +9,19 @@ import { db, type Tx } from '@/server/db'
  * Every balance in the system is derived here, by aggregating posted journal
  * lines. There is no stored balance to drift, and no rebuild job to run.
  *
- * **Which journals count.** Everything except `DRAFT` — see the
- * `j.status <> 'DRAFT'` join condition in each query below. A `REVERSED` journal
- * is still historical fact: its reversal sits alongside it and the pair nets to
- * nothing. Excluding reversed journals while keeping their reversals would leave
- * every corrected entry counted once, backwards.
+ * **Which journals count.** Everything except `DRAFT` and `DELETED` — see the
+ * `j.status NOT IN ('DRAFT', 'DELETED')` join condition in each query below.
+ *
+ * A `REVERSED` journal is still historical fact: its reversal sits alongside it
+ * and the pair nets to nothing. Excluding reversed journals while keeping their
+ * reversals would leave every corrected entry counted once, backwards.
+ *
+ * A `DELETED` one is different. The transaction that produced it was deleted, so
+ * it is not history the business is claiming — it is an entry somebody withdrew.
+ * The row is kept so that what was once posted can still be seen, and it is
+ * excluded here so that it cannot reach a balance, a statement or a report. That
+ * exclusion lives in this join and in the equivalent filter on every other query
+ * that reads the ledger; there is no second definition of "counts".
  *
  * Each function takes an optional `client`. It defaults to the shared Prisma
  * client, and tests pass a transaction so a report can be exercised against real
@@ -103,7 +111,7 @@ export async function trialBalance(
         AND l."journalDate" <= ${to}
       LEFT JOIN journals j
         ON  j.id = l."journalId"
-       AND j.status <> 'DRAFT'
+       AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE a."orgId" = ${orgId}
        AND (l.id IS NULL OR j.id IS NOT NULL)
      GROUP BY a.id, a.code, a.name, a.type, a.subtype, a."parentId", a."isActive"
@@ -178,7 +186,7 @@ export async function balancesAsOf(
         AND l."journalDate" <= ${toDate(asOf)}
       LEFT JOIN journals j
         ON  j.id = l."journalId"
-       AND j.status <> 'DRAFT'
+       AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE a."orgId" = ${orgId}
        AND (l.id IS NULL OR j.id IS NOT NULL)
      GROUP BY a.id, a.type
@@ -205,6 +213,8 @@ export type LedgerEntry = {
   memo: string | null
   description: string | null
   sourceType: string
+  /** The document that produced the journal, so the register can link to it. */
+  sourceId: string | null
   status: string
   debit: Decimal
   credit: Decimal
@@ -212,6 +222,10 @@ export type LedgerEntry = {
   balance: Decimal
   /** The other accounts in the same journal — what a register shows in its "account" column. */
   contraAccounts: string
+  /** The customer or vendor the line was posted against, on a control account. */
+  customerId: string | null
+  vendorId: string | null
+  partyName: string | null
 }
 
 /**
@@ -236,7 +250,7 @@ export async function generalLedger(
   const [openingRow] = await client.$queryRaw<{ debit: string; credit: string }[]>`
     SELECT COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE l."orgId" = ${orgId}
        AND l."accountId" = ${accountId}
        AND l."journalDate" < ${toDate(range.from)}
@@ -253,10 +267,14 @@ export async function generalLedger(
       memo: string | null
       description: string | null
       sourceType: string
+      sourceId: string | null
       status: string
       debit: string
       credit: string
       contraAccounts: string | null
+      customerId: string | null
+      vendorId: string | null
+      partyName: string | null
     }[]
   >`
     SELECT l.id              AS "lineId",
@@ -266,9 +284,13 @@ export async function generalLedger(
            j.memo            AS "memo",
            l.description     AS "description",
            j."sourceType"::text AS "sourceType",
+           j."sourceId"      AS "sourceId",
            j.status::text    AS "status",
            l.debit           AS "debit",
            l.credit          AS "credit",
+           l."customerId"    AS "customerId",
+           l."vendorId"      AS "vendorId",
+           COALESCE(cu."displayName", ve."displayName") AS "partyName",
            (
              SELECT string_agg(DISTINCT ca.name, ', ' ORDER BY ca.name)
                FROM journal_lines cl
@@ -277,7 +299,9 @@ export async function generalLedger(
                 AND cl."accountId" <> l."accountId"
            ) AS "contraAccounts"
       FROM journal_lines l
-      JOIN journals j ON j.id = l."journalId" AND j.status <> 'DRAFT'
+      JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+      LEFT JOIN customers cu ON cu.id = l."customerId"
+      LEFT JOIN vendors   ve ON ve.id = l."vendorId"
      WHERE l."orgId" = ${orgId}
        AND l."accountId" = ${accountId}
        AND l."journalDate" >= ${toDate(range.from)}
@@ -299,11 +323,15 @@ export async function generalLedger(
       memo: row.memo,
       description: row.description,
       sourceType: row.sourceType,
+      sourceId: row.sourceId,
       status: row.status,
       debit,
       credit,
       balance: running,
       contraAccounts: row.contraAccounts ?? '—',
+      customerId: row.customerId,
+      vendorId: row.vendorId,
+      partyName: row.partyName,
     }
   })
 

@@ -5,14 +5,12 @@ import type { SalesDocumentType } from '@prisma/client'
 import { z } from 'zod'
 
 import { toFormState, type FormState } from '@/components/forms/action-state'
-import { cuid } from '@/lib/validation/common'
+import { cuid, deleteRecordSchema } from '@/lib/validation/common'
 import {
   applyCreditSchema,
   convertEstimateSchema,
   paymentSchema,
   salesDocumentSchema,
-  voidDocumentSchema,
-  voidPaymentSchema,
 } from '@/lib/validation/sales'
 import { action } from '@/server/action'
 import * as paymentService from '@/server/services/payment.service'
@@ -53,28 +51,18 @@ export const updateDocument = action
     return document
   })
 
-export const voidDocument = action
-  .requires('invoice:void')
-  .input(voidDocumentSchema)
-  .handler(async (ctx, input) => {
-    const document = await salesService.voidDocument(ctx, input.id, input.reason)
-    revalidateSales()
-    return document
-  })
-
 /**
- * Delete a document the ledger has never seen.
+ * Delete a sales document.
  *
- * Posted documents are refused here and voided instead — the service decides,
- * so a screen cannot offer something the server will not do. See
- * `lib/document-disposition.ts`.
+ * One action, whatever state the document is in. Nothing is offered instead.
  */
 export const deleteDocument = action
   .requires('invoice:void')
-  .input(z.object({ id: cuid }))
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const document = await salesService.remove(ctx, input.id)
+    const document = await salesService.remove(ctx, input.id, input.reason)
     revalidateSales()
+    revalidatePath('/reports')
     return document
   })
 
@@ -114,12 +102,13 @@ export const unapply = action
     return result
   })
 
-export const voidPayment = action
+export const deletePayment = action
   .requires('payment:void')
-  .input(voidPaymentSchema)
+  .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
-    const payment = await paymentService.voidPayment(ctx, input.id, input.reason)
+    const payment = await paymentService.remove(ctx, input.id, input.reason)
     revalidateSales()
+    revalidatePath('/banking')
     return payment
   })
 

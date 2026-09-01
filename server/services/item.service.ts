@@ -6,7 +6,8 @@ import { Decimal } from '@/lib/money'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { ItemInput } from '@/lib/validation/master-data'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
-import { positionsOf, recordMovement } from '@/server/accounting/inventory'
+import { positionOf, positionsOf, recordMovement } from '@/server/accounting/inventory'
+import { deletionStamp } from '@/server/accounting/deletion'
 import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
@@ -227,6 +228,97 @@ export async function setActive(ctx: OrgContext, ids: string[], isActive: boolea
     }
 
     return { count: result.count }
+  })
+}
+
+/**
+ * Delete an item.
+ *
+ * It leaves every list, every picker and every report. The row stays, because
+ * the documents that already name it — an invoice from March, a bill from last
+ * year — still have to read correctly, and a line pointing at nothing is not a
+ * correct document. Nothing about those documents changes; the item is simply no
+ * longer offered or listed anywhere.
+ *
+ * Stock is the one thing that has to be dealt with rather than hidden. An item
+ * deleted while holding stock would leave value in the Inventory Asset account
+ * belonging to something that no longer appears on the valuation report, so the
+ * stock is written off first, through the ordinary shrinkage account, in a
+ * journal that says what it was for.
+ */
+export async function remove(ctx: OrgContext, id: string, reason?: string | null) {
+  return db.$transaction(async (tx) => {
+    const item = await tx.item.findFirst({
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
+      select: { id: true, name: true, sku: true, type: true, deletedAt: true },
+    })
+    if (!item) throw notFound('Item')
+    if (item.deletedAt) return { id, name: item.name }
+
+    if (item.type === 'INVENTORY') {
+      await writeOffRemainingStock(tx, ctx, id, item.name, reason)
+    }
+
+    await tx.item.update({ where: { id }, data: deletionStamp(ctx, reason) })
+
+    await writeAudit(tx, ctx, {
+      entity: 'Item',
+      entityId: id,
+      action: 'DELETE',
+      before: { name: item.name, sku: item.sku, type: item.type },
+      after: { deleted: true, reason: reason?.trim() || null },
+    })
+
+    return { id, name: item.name }
+  })
+}
+
+/**
+ * Take a deleted item's remaining stock out of the books.
+ *
+ * Not silently: it is a movement in the stock ledger and a journal against
+ * inventory shrinkage, exactly as a write-off entered by hand would be, so the
+ * Inventory Asset account and the stock ledger still agree afterwards and the
+ * loss appears in the profit and loss where a loss belongs.
+ */
+async function writeOffRemainingStock(
+  tx: Tx,
+  ctx: OrgContext,
+  itemId: string,
+  itemName: string,
+  reason?: string | null,
+): Promise<void> {
+  const position = await positionOf(tx, itemId)
+  if (position.quantity.isZero() && position.value.isZero()) return
+
+  const date = today(ctx.organization.timeZone)
+  const memo = `Stock written off — "${itemName}" deleted${reason?.trim() ? ` (${reason.trim()})` : ''}`
+
+  const movement = await recordMovement(tx, ctx, {
+    itemId,
+    date,
+    type: 'ADJUSTMENT',
+    sourceType: 'MANUAL',
+    sourceId: itemId,
+    quantity: position.quantity.negated().toString(),
+  })
+
+  const [inventoryAccountId, shrinkageAccountId] = await Promise.all([
+    systemAccountId(tx, ctx.orgId, 'INVENTORY_ASSET'),
+    systemAccountId(tx, ctx.orgId, 'INVENTORY_SHRINKAGE'),
+  ])
+
+  const value = movement.value.abs()
+  if (value.isZero()) return
+
+  await postJournal(tx, ctx, {
+    date,
+    memo,
+    sourceType: 'MANUAL',
+    lines: [
+      { accountId: shrinkageAccountId, debit: value },
+      { accountId: inventoryAccountId, credit: value },
+    ],
   })
 }
 

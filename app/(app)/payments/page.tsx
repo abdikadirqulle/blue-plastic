@@ -12,9 +12,8 @@ import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { DisposeButton } from '@/components/data/document-disposal'
+import { DeleteButton } from '@/components/data/delete-record'
 import { formatDate, toCalendarDate } from '@/lib/date'
-import { dispositionOf } from '@/lib/document-disposition'
 import { formatMoney } from '@/lib/money'
 import { PAYMENT_METHOD_LABELS, STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
 import { parseListQuery } from '@/lib/validation/common'
@@ -114,16 +113,11 @@ export default async function PaymentsPage({
                   </TableCell>
                   <TableCell className="print:hidden">
                     {canVoid ? (
-                      <DisposeButton
+                      <DeleteButton
                         kind="customer-payment"
                         id={payment.id}
                         number={payment.number}
                         variant="ghost"
-                        disposition={dispositionOf({
-                          status: payment.status,
-                          // A payment is always posted, so this is always a void.
-                          journalId: payment.journalId,
-                        })}
                       />
                     ) : null}
                   </TableCell>

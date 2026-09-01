@@ -7,11 +7,13 @@ import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { PaymentInput } from '@/lib/validation/sales'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
 import { buildCustomerPaymentJournal } from '@/server/accounting/builders/sales'
-import { postJournal, reverseJournal } from '@/server/accounting/posting'
+import { softDeleteDocument } from '@/server/accounting/deletion'
+import { removeDepositWithin } from '@/server/services/banking.service'
+import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
 import { db, type Tx } from '@/server/db'
-import { conflict, notFound, precondition, validation } from '@/server/errors'
+import { notFound, precondition, validation } from '@/server/errors'
 import { nextDocumentNumber } from '@/server/sequences'
 import { outstandingBalances, refreshStatus } from '@/server/services/sales.service'
 
@@ -357,43 +359,60 @@ export async function unapply(ctx: OrgContext, applicationId: string) {
   })
 }
 
-/** Void a payment: reverse its journal, release everything it settled. */
-export async function voidPayment(ctx: OrgContext, id: string, reason: string) {
-  const meta = await requestMeta()
-
+/**
+ * Delete a payment: withdraw its journal, release everything it settled.
+ *
+ * The invoices it was paying go back to outstanding, which is what they are once
+ * the payment is gone. Nothing is physically removed — see
+ * `server/accounting/deletion.ts`.
+ */
+export async function remove(ctx: OrgContext, id: string, reason?: string | null) {
   return db.$transaction(async (tx) => {
     const payment = await tx.customerPayment.findFirst({
-      where: { id, orgId: ctx.orgId },
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
       select: {
-        id: true, number: true, status: true, journalId: true,
+        id: true, number: true, status: true, journalId: true, amount: true, deletedAt: true,
         applications: { select: { id: true, invoiceId: true } },
       },
     })
     if (!payment) throw notFound('Payment')
-    if (payment.status === 'VOID') throw conflict(`${payment.number} is already void.`)
+    if (payment.deletedAt) return { id, number: payment.number }
 
     const invoiceIds = payment.applications.map((application) => application.invoiceId)
     await tx.salesApplication.deleteMany({ where: { paymentId: id } })
 
-    if (payment.journalId) {
-      await reverseJournal(tx, ctx, payment.journalId, {
-        reason: `${payment.number} voided — ${reason}`,
-      })
+    // A payment already banked on a deposit takes the deposit with it.
+    //
+    // A deposit is one posted movement of one total from Undeposited Funds to the
+    // bank. There is no honest way to remove one payment from that total and
+    // leave the rest posted, so the whole deposit is withdrawn and the payments
+    // it banked go back to the undeposited list — which is exactly where they
+    // stand once one of them turns out not to exist. Deleting the deposit is
+    // done through banking's own service so the reconciliation guard applies.
+    const bankedOn = await tx.depositLine.findMany({
+      where: { customerPaymentId: id },
+      select: { depositId: true },
+    })
+
+    for (const depositId of new Set(bankedOn.map((line) => line.depositId))) {
+      await removeDepositWithin(tx, ctx, depositId, `Banked ${payment.number}, which was deleted`)
     }
 
-    await tx.customerPayment.update({
-      where: { id },
-      data: { status: 'VOID', voidedAt: new Date(), voidReason: reason },
+    await softDeleteDocument(tx, ctx, {
+      mark: (stamp) => tx.customerPayment.update({ where: { id }, data: stamp }),
+      entity: 'CustomerPayment',
+      id,
+      number: payment.number,
+      journalIds: [payment.journalId],
+      reason,
+      before: {
+        amount: payment.amount.toString(),
+        status: payment.status,
+        applicationsReleased: payment.applications.length,
+      },
     })
 
     for (const invoiceId of invoiceIds) await refreshStatus(tx, invoiceId)
-
-    await writeAudit(
-      tx,
-      ctx,
-      { entity: 'CustomerPayment', entityId: id, action: 'REVERSE', after: { status: 'VOID', reason } },
-      meta,
-    )
 
     return { id, number: payment.number }
   })

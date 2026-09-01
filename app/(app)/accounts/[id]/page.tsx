@@ -21,6 +21,7 @@ import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { generalLedger } from '@/server/accounting/balances'
 import { requireOrgContext } from '@/server/auth/context'
 import * as accountService from '@/server/services/account.service'
+import { resolveSources, sourceFor } from '@/server/services/journal-sources'
 import type { JournalSourceType } from '@prisma/client'
 
 const SORTABLE = ['date', 'entry', 'description', 'debit', 'credit'] as const
@@ -56,6 +57,21 @@ export default async function AccountRegisterPage({
   const to = typeof query.to === 'string' ? query.to : defaults.end
 
   const ledger = await generalLedger(ctx.orgId, id, { from, to })
+
+  // What produced each line, resolved in one batch per document family.
+  //
+  // This is the hop that makes a report answer its own question. A figure on the
+  // profit and loss led here, and here used to lead only to the journal — so
+  // tracing a number to the invoice that caused it took three screens, and the
+  // middle one was the least informative of the three. The document and the
+  // party it was with now sit on the register row itself.
+  const sources = await resolveSources(
+    ctx.orgId,
+    ledger.entries.map((entry) => ({
+      sourceType: entry.sourceType as JournalSourceType,
+      sourceId: entry.sourceId,
+    })),
+  )
 
   // The running balance column only means anything in date order, so it is shown
   // as computed and never re-derived from a different ordering.
@@ -122,6 +138,7 @@ export default async function AccountRegisterPage({
                 <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" />
                 <SortableHeader column="entry" label="Entry" state={sort} basePath={basePath} params={linkParams} className="w-28" />
                 <SortableHeader column="description" label="Description" state={sort} basePath={basePath} params={linkParams} />
+                <TableHead className="w-40">Document</TableHead>
                 <TableHead>Contra account</TableHead>
                 <SortableHeader column="debit" label="Debit" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
                 <SortableHeader column="credit" label="Credit" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
@@ -155,6 +172,17 @@ export default async function AccountRegisterPage({
                       {JOURNAL_SOURCE_LABELS[entry.sourceType as JournalSourceType] ?? entry.sourceType}
                     </span>
                   </TableCell>
+                  <TableCell>
+                    <SourceCell
+                      source={sourceFor(sources, {
+                        sourceType: entry.sourceType as JournalSourceType,
+                        sourceId: entry.sourceId,
+                      })}
+                      partyName={entry.partyName}
+                      customerId={entry.customerId}
+                      vendorId={entry.vendorId}
+                    />
+                  </TableCell>
                   <TableCell className="text-muted-foreground">{entry.contraAccounts}</TableCell>
                   <TableCell className="numeric tabular">
                     {entry.debit.isZero() ? '' : formatMoney(entry.debit, currency)}
@@ -170,7 +198,7 @@ export default async function AccountRegisterPage({
             </TableBody>
             <TableFooter>
               <TableRow>
-                <TableCell colSpan={6}>Closing balance</TableCell>
+                <TableCell colSpan={7}>Closing balance</TableCell>
                 <TableCell className="numeric tabular font-semibold">
                   {formatMoney(ledger.closing, currency)}
                 </TableCell>
@@ -179,6 +207,61 @@ export default async function AccountRegisterPage({
           </Table>
         </Card>
       )}
+    </>
+  )
+}
+
+/**
+ * The document behind a register line, and who it was with.
+ *
+ * A manual entry has neither, and says so rather than showing an empty cell that
+ * could equally mean "not loaded".
+ */
+function SourceCell({
+  source,
+  partyName,
+  customerId,
+  vendorId,
+}: {
+  source: { number: string | null; href: string | null; partyName: string | null; partyHref: string | null }
+  partyName: string | null
+  customerId: string | null
+  vendorId: string | null
+}) {
+  // A control-account line carries its own counterparty, which is more precise
+  // than the document's: a payment settling three invoices is one document with
+  // one customer, but the line says whose balance moved.
+  const name = partyName ?? source.partyName
+  const nameHref = customerId
+    ? `/customers/${customerId}`
+    : vendorId
+      ? `/vendors/${vendorId}`
+      : source.partyHref
+
+  if (!source.number && !name) {
+    return <span className="text-muted-foreground">—</span>
+  }
+
+  return (
+    <>
+      {source.number ? (
+        source.href ? (
+          <Link href={source.href} className="tabular block font-medium underline-offset-4 hover:underline">
+            {source.number}
+          </Link>
+        ) : (
+          <span className="tabular block font-medium">{source.number}</span>
+        )
+      ) : null}
+      {name ? (
+        nameHref ? (
+          <Link href={nameHref} className="block text-xs text-muted-foreground underline-offset-4 hover:underline">
+            {name}
+          </Link>
+        ) : (
+          <span className="block text-xs text-muted-foreground">{name}</span>
+        )
+      ) : null}
     </>
   )
 }
