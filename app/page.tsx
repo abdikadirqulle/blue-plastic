@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation'
 
+import { Landing } from '@/components/marketing/landing'
 import { auth } from '@/auth'
 import { needsSetup } from '@/server/services/setup.service'
 
@@ -13,6 +14,8 @@ export const dynamic = 'force-dynamic'
 export default async function RootPage() {
   if (await needsSetup()) redirect('/setup')
 
+  // Signed in or not, `/` is the company's public front page — the session only
+  // decides whether the header offers the books or the sign-in screen.
   const session = await auth()
-  redirect(session?.user ? '/dashboard' : '/sign-in')
+  return <Landing signedIn={Boolean(session?.user)} />
 }
