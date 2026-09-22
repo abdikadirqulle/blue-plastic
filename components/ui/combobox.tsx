@@ -132,13 +132,22 @@ export function Combobox({
 
     const below = window.innerHeight - rect.bottom
     const above = below < 280 && rect.top > below
-
-    setAnchor({
+    const next = {
       top: above ? rect.top - 4 : rect.bottom + 4,
       left: rect.left,
       width: rect.width,
       above,
-    })
+    }
+
+    setAnchor((prev) =>
+      prev &&
+      prev.top === next.top &&
+      prev.left === next.left &&
+      prev.width === next.width &&
+      prev.above === next.above
+        ? prev
+        : next,
+    )
   }, [])
 
   function close(refocus = true) {
@@ -158,17 +167,24 @@ export function Combobox({
 
     // Any scroll moves the input, so the list has to move with it — capture,
     // because the scroll is usually on an ancestor rather than on the window.
+    // Ignore the list's own scroll or choosing a row jumps the panel and the
+    // click never lands.
+    const onScroll = (event: Event) => {
+      if (panelRef.current?.contains(event.target as Node)) return
+      place()
+    }
+
     place()
     document.addEventListener('pointerdown', onPointerDown)
-    window.addEventListener('scroll', place, true)
+    window.addEventListener('scroll', onScroll, true)
     window.addEventListener('resize', place)
 
     return () => {
       document.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', place)
     }
-  })
+  }, [open, place])
 
   // Reset the highlight when the list changes, during render rather than in an
   // effect — an effect would paint the stale highlight once before correcting it.
@@ -179,8 +195,10 @@ export function Combobox({
     setActive(0)
   }
 
+  const keyboardNav = React.useRef(false)
   React.useEffect(() => {
-    if (!open) return
+    if (!open || !keyboardNav.current) return
+    keyboardNav.current = false
     listRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
   }, [active, open])
 
@@ -214,9 +232,11 @@ export function Combobox({
 
     if (event.key === 'ArrowDown') {
       event.preventDefault()
+      keyboardNav.current = true
       setActive((index) => Math.min(index + 1, rows.length - 1))
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
+      keyboardNav.current = true
       setActive((index) => Math.max(index - 1, 0))
     } else if (event.key === 'Enter') {
       event.preventDefault()
@@ -233,9 +253,11 @@ export function Combobox({
       onChange(null)
     } else if (event.key === 'Home') {
       event.preventDefault()
+      keyboardNav.current = true
       setActive(0)
     } else if (event.key === 'End') {
       event.preventDefault()
+      keyboardNav.current = true
       setActive(rows.length - 1)
     }
   }
@@ -304,7 +326,7 @@ export function Combobox({
                 width: Math.max(anchor.width, 224),
               }}
               className={cn(
-                'z-[60] overflow-hidden rounded-md border bg-popover shadow-lg',
+                'pointer-events-auto z-[60] overflow-hidden rounded-md border bg-popover shadow-lg',
                 'animate-in fade-in-0 zoom-in-95',
               )}
             >
@@ -326,7 +348,11 @@ export function Combobox({
                         type="button"
                         data-active={index === active}
                         onPointerEnter={() => setActive(index)}
-                        onClick={() => choose(row)}
+                        onPointerDown={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          choose(row)
+                        }}
                         className={cn(
                           'flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm font-medium text-primary',
                           index === active ? 'bg-accent' : '',
@@ -355,7 +381,11 @@ export function Combobox({
                         aria-selected={option.value === value}
                         data-active={index === active}
                         onPointerEnter={() => setActive(index)}
-                        onClick={() => choose(row)}
+                        onPointerDown={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          choose(row)
+                        }}
                         className={cn(
                           'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm',
                           index === active ? 'bg-accent text-accent-foreground' : '',
@@ -381,7 +411,9 @@ export function Combobox({
                 {clearable && value ? (
                   <button
                     type="button"
-                    onClick={() => {
+                    onPointerDown={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
                       onChange(null)
                       close()
                     }}

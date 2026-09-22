@@ -75,17 +75,22 @@ export function DateField({
       setOpen(false)
     }
 
+    const onScroll = (event: Event) => {
+      if (panelRef.current?.contains(event.target as Node)) return
+      place()
+    }
+
     place()
     document.addEventListener('pointerdown', onPointerDown)
-    window.addEventListener('scroll', place, true)
+    window.addEventListener('scroll', onScroll, true)
     window.addEventListener('resize', place)
 
     return () => {
       document.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('scroll', place, true)
+      window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', place)
     }
-  })
+  }, [open, place])
 
   /**
    * Accepts what people actually type: 2026-03-04, 04/03/2026, 4/3, or 4 for
@@ -183,7 +188,7 @@ export function DateField({
                 bottom: anchor.above ? window.innerHeight - anchor.top : undefined,
                 left: anchor.left,
               }}
-              className="z-[60] rounded-md border bg-popover shadow-md animate-in fade-in-0 zoom-in-95"
+              className="pointer-events-auto z-[60] rounded-md border bg-popover shadow-md animate-in fade-in-0 zoom-in-95"
             >
               <Calendar
                 value={isCalendarDate(value) ? value : null}
