@@ -1,6 +1,7 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
+import { z } from 'zod'
 
 import { toFormState, type FormState } from '@/components/forms/action-state'
 import { manualJournalSchema, reverseJournalSchema } from '@/lib/validation/accounting'
@@ -23,6 +24,18 @@ export const postManualJournal = action
     return { id: journal.id, journalNumber: journal.journalNumber, total: journal.total }
   })
 
+const journalSearch = z.object({
+  number: z.string().trim().max(40).optional(),
+  date: z.string().trim().max(10).optional(),
+  amount: z.string().trim().max(20).optional(),
+})
+
+/** Find opens a posted journal. An empty search lists the latest ones. */
+export const findJournals = action
+  .requires('journal:read')
+  .input(journalSearch)
+  .handler((ctx, input) => journalService.find(ctx, input))
+
 export const reverseJournalAction = action
   .requires('journal:reverse')
   .input(reverseJournalSchema)
@@ -43,12 +56,17 @@ export const deleteJournal = action
   .requires('journal:reverse')
   .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
+    if (!ctx.features.allowJournalDelete) {
+      const { precondition } = await import('@/server/errors')
+      throw precondition('Journal delete is turned off in Settings → Configuration.')
+    }
     const result = await journalService.remove(ctx, input.id, input.reason)
     revalidateLedger()
     revalidatePath('/sales')
     revalidatePath('/purchases')
-    revalidatePath('/banking')
-    revalidatePath('/inventory')
+    revalidatePath('/banking/accounts')
+    revalidatePath('/inventory/stock')
+    revalidatePath('/employees/payroll')
     return result
   })
 

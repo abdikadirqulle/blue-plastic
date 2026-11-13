@@ -1,0 +1,143 @@
+import 'server-only'
+
+import { Decimal } from '@/lib/money'
+import type { CalendarDate } from '@/lib/date'
+import type { DraftJournal } from '@/server/accounting/posting'
+
+/**
+ * POS cash-control journals (Odoo-style session and drawer moves).
+ */
+
+/** Cash put into / taken from the till against another money account. */
+export function buildPosCashMoveJournal(input: {
+  date: CalendarDate
+  kind: 'IN' | 'OUT'
+  movementId: string
+  registerAccountId: string
+  counterpartyAccountId: string
+  amount: Decimal.Value
+  registerName: string
+  reason?: string | null
+}): DraftJournal {
+  const amount = new Decimal(input.amount)
+  const label =
+    input.kind === 'IN'
+      ? `POS cash in · ${input.registerName}`
+      : `POS cash out · ${input.registerName}`
+  const memo = input.reason?.trim() || label
+
+  // IN:  Dr till, Cr source (cash arrives from bank / safe)
+  // OUT: Dr destination, Cr till (cash leaves the drawer)
+  const lines =
+    input.kind === 'IN'
+      ? [
+          { accountId: input.registerAccountId, debit: amount, description: label },
+          { accountId: input.counterpartyAccountId, credit: amount, description: label },
+        ]
+      : [
+          { accountId: input.counterpartyAccountId, debit: amount, description: label },
+          { accountId: input.registerAccountId, credit: amount, description: label },
+        ]
+
+  return {
+    date: input.date,
+    memo,
+    sourceType: 'POS_CASH_MOVE',
+    sourceId: input.movementId,
+    idempotencyKey: `pos-cash-move:${input.movementId}`,
+    lines,
+  }
+}
+
+/**
+ * Session close cash difference.
+ * Short (counted < expected): Dr cash short expense, Cr till.
+ * Over  (counted > expected): Dr till, Cr cash over income.
+ */
+export function buildPosSessionCloseJournal(input: {
+  date: CalendarDate
+  sessionId: string
+  registerAccountId: string
+  differenceAccountId: string
+  amount: Decimal.Value
+  registerName: string
+  over: boolean
+}): DraftJournal | null {
+  const amount = new Decimal(input.amount).abs()
+  if (amount.isZero()) return null
+
+  const label = input.over
+    ? `POS cash over · ${input.registerName}`
+    : `POS cash short · ${input.registerName}`
+
+  const lines = input.over
+    ? [
+        { accountId: input.registerAccountId, debit: amount, description: label },
+        { accountId: input.differenceAccountId, credit: amount, description: label },
+      ]
+    : [
+        { accountId: input.differenceAccountId, debit: amount, description: label },
+        { accountId: input.registerAccountId, credit: amount, description: label },
+      ]
+
+  return {
+    date: input.date,
+    memo: label,
+    sourceType: 'POS_SESSION_CLOSE',
+    sourceId: input.sessionId,
+    idempotencyKey: `pos-session-close:${input.sessionId}`,
+    lines,
+  }
+}
+
+/** Tip held for staff: Dr till/tender, Cr tip liability (not revenue). */
+export function buildPosTipJournal(input: {
+  date: CalendarDate
+  orderId: string
+  tenderAccountId: string
+  tipLiabilityAccountId: string
+  amount: Decimal.Value
+  registerName: string
+}): DraftJournal | null {
+  const amount = new Decimal(input.amount)
+  if (amount.isZero() || amount.isNegative()) return null
+
+  const label = `POS tip · ${input.registerName}`
+  return {
+    date: input.date,
+    memo: label,
+    sourceType: 'POS_TIP',
+    sourceId: input.orderId,
+    idempotencyKey: `pos-tip:${input.orderId}`,
+    lines: [
+      { accountId: input.tenderAccountId, debit: amount, description: label },
+      { accountId: input.tipLiabilityAccountId, credit: amount, description: label },
+    ],
+  }
+}
+
+/** Clear tip liability to bank/cash after night audit: Dr tip liability, Cr bank. */
+export function buildPosTipPayoutJournal(input: {
+  date: CalendarDate
+  nightAuditId: string
+  bankAccountId: string
+  tipLiabilityAccountId: string
+  amount: Decimal.Value
+  businessDate: string
+}): DraftJournal | null {
+  const amount = new Decimal(input.amount)
+  if (amount.isZero() || amount.isNegative()) return null
+
+  const label = `Tip payout · ${input.businessDate}`
+  return {
+    date: input.date,
+    memo: label,
+    sourceType: 'POS_TIP_PAYOUT',
+    sourceId: input.nightAuditId,
+    idempotencyKey: `pos-tip-payout:${input.nightAuditId}`,
+    lines: [
+      { accountId: input.tipLiabilityAccountId, debit: amount, description: label },
+      { accountId: input.bankAccountId, credit: amount, description: label },
+    ],
+  }
+}

@@ -1,6 +1,7 @@
 import 'server-only'
 
 import { toDate, type CalendarDate } from '@/lib/date'
+import type { VendorStatementKind } from '@/lib/vendor-statement'
 import { Decimal, ZERO } from '@/lib/money'
 import type { OrgContext } from '@/server/auth/context'
 import { db, type Tx } from '@/server/db'
@@ -10,6 +11,7 @@ import {
   emptyBuckets,
   OVERDUE_BUCKETS,
   type AgingBucket,
+  type StatementItem,
 } from '@/server/services/receivables.service'
 
 export { AGING_BUCKETS, BUCKET_LABELS, OVERDUE_BUCKETS }
@@ -174,7 +176,7 @@ export async function unpaidBills(ctx: OrgContext, asOf: CalendarDate) {
 
 export type VendorStatementEntry = {
   id: string
-  kind: 'BILL' | 'VENDOR_CREDIT' | 'PAYMENT' | 'EXPENSE'
+  kind: VendorStatementKind
   number: string
   date: Date
   dueDate: Date | null
@@ -183,7 +185,12 @@ export type VendorStatementEntry = {
   charge: Decimal
   /** What reduced it. */
   credit: Decimal
+  /** Still unpaid on this document. Zero when the row does not carry its own balance. */
+  openAmount: Decimal
+  /** Document total, before anything was applied. */
+  original: Decimal
   balance: Decimal
+  lines: StatementItem[]
   href: string
 }
 
@@ -209,11 +216,16 @@ export async function vendorStatement(
     SELECT COALESCE(SUM(l.credit - l.debit), 0) AS balance
       FROM journal_lines l
       JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+      JOIN ledger_accounts a ON a.id = l."accountId"
      WHERE l."orgId" = ${ctx.orgId}
        AND l."vendorId" = ${vendorId}
+       AND a.subtype::text = 'ACCOUNTS_PAYABLE'
        AND l."journalDate" < ${toDate(range.from)}
   `
   const opening = new Decimal(openingRow?.balance ?? '0')
+
+  const from = toDate(range.from)
+  const to = toDate(range.to)
 
   const [documents, payments] = await Promise.all([
     client.purchaseDocument.findMany({
@@ -221,54 +233,224 @@ export async function vendorStatement(
         orgId: ctx.orgId,
         vendorId,
         status: { notIn: ['DRAFT', 'VOID'] },
-        type: { in: ['BILL', 'VENDOR_CREDIT', 'EXPENSE'] },
-        date: { gte: toDate(range.from), lte: toDate(range.to) },
+        type: { in: ['BILL', 'VENDOR_CREDIT', 'EXPENSE', 'PURCHASE_ORDER'] },
+        date: { gte: from, lte: to },
       },
-      select: { id: true, type: true, number: true, date: true, dueDate: true, total: true, memo: true, reference: true },
+      select: {
+        id: true,
+        journalId: true,
+        type: true,
+        number: true,
+        date: true,
+        dueDate: true,
+        total: true,
+        taxTotal: true,
+        memo: true,
+        reference: true,
+        applications: { select: { amount: true } },
+        creditsApplied: { select: { amount: true } },
+        lines: {
+          orderBy: { lineNumber: 'asc' },
+          select: {
+            description: true,
+            quantity: true,
+            unitPrice: true,
+            amount: true,
+            item: { select: { name: true } },
+            expenseAccount: { select: { name: true } },
+          },
+        },
+      },
     }),
     client.billPayment.findMany({
       where: {
         orgId: ctx.orgId,
         vendorId,
         status: { not: 'VOID' },
-        date: { gte: toDate(range.from), lte: toDate(range.to) },
+        date: { gte: from, lte: to },
       },
-      select: { id: true, number: true, date: true, amount: true, memo: true, reference: true },
+      select: {
+        id: true,
+        journalId: true,
+        number: true,
+        date: true,
+        amount: true,
+        memo: true,
+        reference: true,
+        applications: { select: { amount: true } },
+      },
     }),
   ])
+
+  const [allDocumentLinks, allPaymentLinks] = await Promise.all([
+    client.purchaseDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        vendorId,
+        type: { in: ['BILL', 'VENDOR_CREDIT', 'EXPENSE', 'PURCHASE_ORDER'] },
+      },
+      select: { id: true, journalId: true },
+    }),
+    client.billPayment.findMany({
+      where: { orgId: ctx.orgId, vendorId },
+      select: { id: true, journalId: true },
+    }),
+  ])
+
+  const coveredJournalIds = [
+    ...allDocumentLinks.map((row) => row.journalId).filter((id): id is string => Boolean(id)),
+    ...allPaymentLinks.map((row) => row.journalId).filter((id): id is string => Boolean(id)),
+  ]
+  const coveredSourceIds = [
+    ...allDocumentLinks.map((row) => row.id),
+    ...allPaymentLinks.map((row) => row.id),
+  ]
+
+  // Prefer posted AP amounts over document/payment totals (same reason as AR).
+  const apByJournalId = new Map<string, Decimal>()
+  if (coveredJournalIds.length > 0) {
+    const apLines = await client.journalLine.findMany({
+      where: {
+        orgId: ctx.orgId,
+        vendorId,
+        journalId: { in: coveredJournalIds },
+        account: { subtype: 'ACCOUNTS_PAYABLE' },
+      },
+      select: { journalId: true, debit: true, credit: true },
+    })
+    for (const line of apLines) {
+      // Natural AP sign: credit increases what we owe.
+      const delta = new Decimal(line.credit.toString()).minus(line.debit.toString())
+      apByJournalId.set(
+        line.journalId,
+        (apByJournalId.get(line.journalId) ?? ZERO).plus(delta),
+      )
+    }
+  }
+
+  const journals = await client.journalLine.findMany({
+    where: {
+      orgId: ctx.orgId,
+      vendorId,
+      journalDate: { gte: from, lte: to },
+      account: { subtype: 'ACCOUNTS_PAYABLE' },
+      journal: {
+        // Same rule as receivables: the bill / expense / payment row is the statement line.
+        status: { notIn: ['DRAFT', 'DELETED', 'REVERSED'] },
+        purchaseDocuments: { none: {} },
+        billPayments: { none: {} },
+        ...(coveredJournalIds.length > 0 ? { id: { notIn: coveredJournalIds } } : {}),
+        ...(coveredSourceIds.length > 0
+          ? {
+              OR: [{ sourceId: null }, { sourceId: { notIn: coveredSourceIds } }],
+            }
+          : {}),
+        sourceType: {
+          notIn: ['BILL', 'VENDOR_CREDIT', 'EXPENSE', 'BILL_PAYMENT', 'REVERSAL'],
+        },
+      },
+    },
+    select: {
+      id: true,
+      debit: true,
+      credit: true,
+      description: true,
+      journalDate: true,
+      journal: { select: { id: true, journalNumber: true, memo: true } },
+    },
+  })
 
   const slug: Record<string, string> = {
     BILL: 'bills',
     VENDOR_CREDIT: 'vendor-credits',
     EXPENSE: 'expenses',
+    PURCHASE_ORDER: 'purchase-orders',
+    PURCHASE_REQUEST: 'purchase-requests',
+    RFQ: 'rfqs',
   }
 
   const entries: Omit<VendorStatementEntry, 'balance'>[] = [
     ...documents.map((document) => {
       const total = new Decimal(document.total.toString())
+      const applied = sumAmounts(document.applications)
+      const creditUsed = sumAmounts(document.creditsApplied)
+      const isBill = document.type === 'BILL'
+      const isCredit = document.type === 'VENDOR_CREDIT'
+      const posted = postedChargeCredit(
+        document.journalId ? apByJournalId.get(document.journalId) : undefined,
+        isBill ? total : ZERO,
+        isCredit ? total : ZERO,
+      )
+      const items: StatementItem[] = document.lines.map((line) => {
+        const name = line.item?.name ?? line.expenseAccount?.name
+        const note = line.description
+        const description = name && note && name !== note ? `${name} — ${note}` : name || note || 'Line'
+        return {
+          description,
+          quantity: line.quantity.toString(),
+          rate: line.unitPrice.toString(),
+          amount: line.amount.toString(),
+        }
+      })
+      const tax = new Decimal(document.taxTotal.toString())
+      if (!tax.isZero()) {
+        items.push({ description: 'Tax', quantity: '', rate: '', amount: tax.toString() })
+      }
       return {
         id: document.id,
-        kind: document.type as VendorStatementEntry['kind'],
+        kind: document.type as VendorStatementKind,
         number: document.number,
         date: document.date,
         dueDate: document.dueDate,
         description: document.memo ?? document.reference ?? labelFor(document.type),
-        charge: document.type === 'BILL' ? total : ZERO,
-        credit: document.type === 'VENDOR_CREDIT' ? total : ZERO,
+        charge: posted.charge,
+        credit: posted.credit,
+        openAmount: isBill ? total.minus(applied) : isCredit ? total.minus(creditUsed) : ZERO,
+        original: total,
+        lines: items,
         href: `/purchases/${slug[document.type] ?? 'bills'}/${document.id}`,
       }
     }),
-    ...payments.map((payment) => ({
-      id: payment.id,
-      kind: 'PAYMENT' as const,
-      number: payment.number,
-      date: payment.date,
-      dueDate: null,
-      description: payment.memo ?? payment.reference ?? 'Payment made',
-      charge: ZERO,
-      credit: new Decimal(payment.amount.toString()),
-      href: '/bill-payments',
-    })),
+    ...payments.map((payment) => {
+      const amount = new Decimal(payment.amount.toString())
+      const posted = postedChargeCredit(
+        payment.journalId ? apByJournalId.get(payment.journalId) : undefined,
+        ZERO,
+        amount,
+      )
+      return {
+        id: payment.id,
+        kind: 'PAYMENT' as const,
+        number: payment.number,
+        date: payment.date,
+        dueDate: null,
+        description: payment.memo ?? payment.reference ?? 'Payment made',
+        charge: posted.charge,
+        credit: posted.credit,
+        openAmount: amount.minus(sumAmounts(payment.applications)),
+        original: amount,
+        lines: [],
+        href: `/bill-payments?q=${encodeURIComponent(payment.number)}`,
+      }
+    }),
+    ...journals.map((line) => {
+      const debit = new Decimal(line.debit.toString())
+      const credit = new Decimal(line.credit.toString())
+      return {
+        id: line.id,
+        kind: 'JOURNAL' as const,
+        number: line.journal.journalNumber,
+        date: line.journalDate,
+        dueDate: null,
+        description: line.description ?? line.journal.memo ?? 'Journal entry',
+        charge: credit,
+        credit: debit,
+        openAmount: credit.minus(debit),
+        original: credit.minus(debit).abs(),
+        lines: [],
+        href: `/journals/${line.journal.id}`,
+      }
+    }),
   ].sort((a, b) => a.date.getTime() - b.date.getTime() || a.number.localeCompare(b.number))
 
   let running = opening
@@ -280,6 +462,21 @@ export async function vendorStatement(
   return { opening, entries: withBalances, closing: running }
 }
 
+function sumAmounts(rows: { amount: { toString(): string } }[]): Decimal {
+  return rows.reduce((sum, row) => sum.plus(row.amount.toString()), ZERO)
+}
+
+function postedChargeCredit(
+  posted: Decimal | undefined,
+  fallbackCharge: Decimal,
+  fallbackCredit: Decimal,
+): { charge: Decimal; credit: Decimal } {
+  if (posted === undefined) return { charge: fallbackCharge, credit: fallbackCredit }
+  if (posted.greaterThan(0)) return { charge: posted, credit: ZERO }
+  if (posted.lessThan(0)) return { charge: ZERO, credit: posted.abs() }
+  return { charge: ZERO, credit: ZERO }
+}
+
 function labelFor(type: string): string {
   switch (type) {
     case 'BILL':
@@ -288,6 +485,8 @@ function labelFor(type: string): string {
       return 'Vendor credit'
     case 'EXPENSE':
       return 'Expense'
+    case 'PURCHASE_ORDER':
+      return 'Purchase order'
     default:
       return type
   }

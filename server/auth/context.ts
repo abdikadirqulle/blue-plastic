@@ -3,9 +3,16 @@ import { cache } from 'react'
 import type { Role } from '@prisma/client'
 
 import { auth } from '@/auth'
+import { sessionCompanyId } from '@/lib/company-access'
+import {
+  DEFAULT_FEATURE_FLAGS,
+  parseFeatureFlags,
+  type OrgFeatureFlags,
+} from '@/lib/feature-flags'
 import { db } from '@/server/db'
 import { forbidden, unauthenticated } from '@/server/errors'
-import { type Permission, permissionsFor } from './permissions'
+import { loadCompanyAccess } from './company-access'
+import { type Permission, effectivePermissions } from './permissions'
 
 /**
  * The first argument to every service function. `orgId` originates from the
@@ -17,13 +24,35 @@ export type OrgContext = {
   userId: string
   role: Role
   permissions: ReadonlySet<Permission>
+  /** Odoo-style Configuration switches for this organisation. */
+  features: OrgFeatureFlags
   organization: {
     id: string
     name: string
+    legalName: string | null
     baseCurrency: string
     fiscalYearStartMonth: number
     timeZone: string
     allowNegativeStock: boolean
+    posTillLedgerMode: 'HOLD_OFF_CHART' | 'REGISTER_IN_CHART'
+    /** Null when this company is the group main / standalone. */
+    parentOrgId: string | null
+    addressLine1: string | null
+    addressLine2: string | null
+    city: string | null
+    region: string | null
+    postalCode: string | null
+    country: string | null
+    phone: string | null
+    email: string | null
+    website: string | null
+    brandMark: string | null
+    hasLogo: boolean
+    updatedAt: Date
+    accessRestricted: boolean
+    rentExpiresAt: Date | null
+    maxUsers: number | null
+    rentNote: string | null
   }
   user: {
     id: string
@@ -31,6 +60,20 @@ export type OrgContext = {
     email: string
     image: string | null
   }
+  /** Sees every company database and the consolidated reports. */
+  isSystemOwner: boolean
+  /** May use Connect to open another company. True for the system owner too. */
+  canConnect: boolean
+  /**
+   * True when the system owner is acting in a company without a membership row
+   * (assumed OWNER). Prefer joining as a real member when possible.
+   */
+  systemOwnerBreakGlass?: boolean
+  /**
+   * When role is CUSTOMER, the customer master this login is linked to.
+   * Null for staff, or for a CUSTOMER membership missing its portal link.
+   */
+  portalCustomerId: string | null
 }
 
 /**
@@ -41,42 +84,136 @@ export type OrgContext = {
  * `cache()` deduplicates this within a single render pass, so a layout, a page
  * and three server components share one lookup.
  */
+const ORGANIZATION_SELECT = {
+  id: true,
+  name: true,
+  legalName: true,
+  baseCurrency: true,
+  fiscalYearStartMonth: true,
+  timeZone: true,
+  allowNegativeStock: true,
+  posTillLedgerMode: true,
+  featureFlags: true,
+  parentOrgId: true,
+  addressLine1: true,
+  addressLine2: true,
+  city: true,
+  region: true,
+  postalCode: true,
+  country: true,
+  phone: true,
+  email: true,
+  website: true,
+  brandMark: true,
+  logoStorageKey: true,
+  updatedAt: true,
+  accessRestricted: true,
+  rentExpiresAt: true,
+  maxUsers: true,
+  rentNote: true,
+} as const
+
 export const getOrgContext = cache(async (): Promise<OrgContext | null> => {
   const session = await auth()
   if (!session?.user?.id || !session.user.orgId) return null
 
+  const access = await loadCompanyAccess(session.user.id)
+  if (!access) return null
+
+  const orgId = sessionCompanyId({
+    isSystemOwner: access.isSystemOwner,
+    maySwitch: access.maySwitch,
+    sessionOrgId: session.user.orgId,
+    homeOrgId: access.homeOrgId,
+    memberships: access.memberships,
+  })
+  if (!orgId) return null
+
   const membership = await db.membership.findUnique({
-    where: { orgId_userId: { orgId: session.user.orgId, userId: session.user.id } },
+    where: { orgId_userId: { orgId, userId: session.user.id } },
     select: {
       role: true,
       status: true,
       version: true,
-      organization: {
-        select: {
-          id: true,
-          name: true,
-          baseCurrency: true,
-          fiscalYearStartMonth: true,
-          timeZone: true,
-          allowNegativeStock: true,
-        },
-      },
+      permissionsOverride: true,
+      organization: { select: ORGANIZATION_SELECT },
       user: { select: { id: true, name: true, email: true, image: true } },
     },
   })
 
-  // Revoked, suspended, or holding a token issued before a role change (ADR-0007).
-  if (!membership) return null
-  if (membership.status !== 'ACTIVE') return null
-  if (membership.version !== session.user.membershipVersion) return null
+  const flags = {
+    isSystemOwner: access.isSystemOwner,
+    canConnect: access.maySwitch,
+  }
 
+  // Revoked, suspended, or holding a token issued before a role change (ADR-0007).
+  // A person who cannot switch is placed in their home company even when the
+  // token still names another one — that home membership's version is not the
+  // JWT's version (which still names the previous org), so we only compare when
+  // the JWT already points at this same org. Permissions always come from DB.
+  if (membership && membership.status === 'ACTIVE') {
+    const sameOrg = orgId === session.user.orgId
+    if (sameOrg && membership.version !== session.user.membershipVersion) return null
+    // JWT role claim can lag a same-org role change that also bumps version;
+    // version mismatch above already signs them out. When versions match, trust DB role.
+
+    const { featureFlags, logoStorageKey, ...organization } = membership.organization
+    let portalCustomerId: string | null = null
+    if (membership.role === 'CUSTOMER') {
+      const link = await db.customerPortalUser.findUnique({
+        where: { orgId_userId: { orgId, userId: membership.user.id } },
+        select: { customerId: true },
+      })
+      portalCustomerId = link?.customerId ?? null
+    }
+    return {
+      orgId: membership.organization.id,
+      userId: membership.user.id,
+      role: membership.role,
+      permissions: effectivePermissions(membership.role, membership.permissionsOverride),
+      features: parseFeatureFlags(featureFlags) ?? DEFAULT_FEATURE_FLAGS,
+      organization: {
+        ...organization,
+        hasLogo: Boolean(logoStorageKey),
+      },
+      user: membership.user,
+      portalCustomerId,
+      systemOwnerBreakGlass: false,
+      ...flags,
+    }
+  }
+
+  // The system owner may open a company they have not been added to. They
+  // enter it as owner; the books stay that company's own. Switch path audits
+  // BREAK_GLASS once in auth.ts jwt update.
+  if (!access.isSystemOwner) return null
+
+  const organization = await db.organization.findUnique({
+    where: { id: orgId },
+    select: ORGANIZATION_SELECT,
+  })
+  if (!organization) return null
+
+  const { featureFlags, logoStorageKey, ...orgFields } = organization
   return {
-    orgId: membership.organization.id,
-    userId: membership.user.id,
-    role: membership.role,
-    permissions: permissionsFor(membership.role),
-    organization: membership.organization,
-    user: membership.user,
+    orgId: organization.id,
+    userId: access.id,
+    role: 'OWNER',
+    permissions: effectivePermissions('OWNER', []),
+    features: parseFeatureFlags(featureFlags) ?? DEFAULT_FEATURE_FLAGS,
+    organization: {
+      ...orgFields,
+      hasLogo: Boolean(logoStorageKey),
+    },
+    user: {
+      id: access.id,
+      name: access.name,
+      email: access.email,
+      image: access.image,
+    },
+    portalCustomerId: null,
+    systemOwnerBreakGlass: true,
+    ...flags,
   }
 })
 
@@ -88,6 +225,17 @@ export async function requireOrgContext(permission?: Permission): Promise<OrgCon
     throw forbidden(`This action requires the "${permission}" permission.`)
   }
   return ctx
+}
+
+export type PortalContext = OrgContext & { portalCustomerId: string }
+
+/** Customer portal pages and APIs — role CUSTOMER with a linked customer. */
+export async function requirePortalContext(): Promise<PortalContext> {
+  const ctx = await requireOrgContext('portal:read')
+  if (ctx.role !== 'CUSTOMER' || !ctx.portalCustomerId) {
+    throw forbidden('This login is not linked to a customer portal.')
+  }
+  return ctx as PortalContext
 }
 
 export function assertPermission(ctx: OrgContext, permission: Permission): void {

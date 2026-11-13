@@ -1,8 +1,8 @@
-# Blue Plastic Center — Accounting System Documentation
+# SOM ERP — Accounting System Documentation
 
 A double-entry accounting platform (QuickBooks Online–class, excluding Payroll and
 Projects) built with Next.js, TypeScript, PostgreSQL, Prisma, NextAuth v5, Zod,
-Tailwind CSS, shadcn/ui and TanStack Query.
+Tailwind CSS, shadcn/ui and TanStack Query. Product brand: **SOM ERP**.
 
 ## Read in this order
 
@@ -14,6 +14,8 @@ Tailwind CSS, shadcn/ui and TanStack Query.
 | [03-database-design.md](./03-database-design.md) | Full data model across all phases |
 | [04-roadmap.md](./04-roadmap.md) | Phases, dependencies, exit criteria |
 | [05-conventions.md](./05-conventions.md) | Code conventions, error handling, testing, naming |
+| [06-erp-layers.md](./06-erp-layers.md) | World-ERP layer model (L0–L9) and how phases deepen them |
+| [07-universal-coverage-roadmap.md](./07-universal-coverage-roadmap.md) | Jadwal: every business / industry via core + packs (Phases 34–60) |
 | [progress.md](./progress.md) | Live status board — updated at the end of every phase |
 | [decisions/](./decisions/) | Architecture Decision Records (ADRs) |
 | [phases/](./phases/) | Task breakdown per phase |

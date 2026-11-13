@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { settleNumberInput } from '@/lib/money'
+
 import {
   calendarDate,
   countryCode,
@@ -34,15 +36,36 @@ const optionalDate = z
   .nullable()
   .optional()
 
+const optionalTime = z
+  .union([z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/, 'Use a time like 14:30'), z.literal('')])
+  .transform((v) => (v === '' ? null : v.slice(0, 5)))
+  .nullable()
+  .optional()
+
+const reminderDays = z
+  .union([z.literal(''), z.literal('3'), z.literal('5'), z.literal('7')])
+  .transform((value) => (value === '' ? null : Number(value)))
+  .nullable()
+  .optional()
+
 /* --- Payment terms -------------------------------------------------------- */
 
 export const paymentTermSchema = z.object({
   id: optionalId,
   name: requiredText('Name', 60),
   type: z.enum(['DUE_ON_RECEIPT', 'NET_DAYS', 'DAY_OF_MONTH']),
-  dueDays: z.coerce.number().int().min(0).max(365),
+  dueDays: z.preprocess(
+    (value) => (typeof value === 'string' ? (settleNumberInput(value.trim()) ?? value.trim()) : value),
+    z.coerce.number().int().min(0).max(365),
+  ),
   discountDays: z
-    .union([z.coerce.number().int().min(0).max(365), z.literal('')])
+    .union([
+      z.literal(''),
+      z.preprocess(
+        (value) => (typeof value === 'string' ? (settleNumberInput(value.trim()) ?? value.trim()) : value),
+        z.coerce.number().int().min(0).max(365),
+      ),
+    ])
     .transform((v) => (v === '' ? null : v))
     .nullable()
     .optional(),
@@ -51,6 +74,18 @@ export const paymentTermSchema = z.object({
 })
 
 export type PaymentTermInput = z.infer<typeof paymentTermSchema>
+
+export const trackingCategorySchema = z.object({
+  id: optionalId,
+  name: requiredText('Name', 80),
+})
+
+export type TrackingCategoryInput = z.infer<typeof trackingCategorySchema>
+
+export const trackingCategoryActiveSchema = z.object({
+  id: cuid,
+  isActive: z.coerce.boolean(),
+})
 
 /* --- Contacts ------------------------------------------------------------- */
 
@@ -83,14 +118,50 @@ export const customerSchema = z.object({
   shippingPostalCode: optionalText(30),
   shippingCountry: countryCode,
   creditLimit: optionalMoney,
+  /** Prefer this currency on new sales. Blank = organisation base. */
+  currencyCode: z
+    .union([
+      z
+        .string()
+        .trim()
+        .toUpperCase()
+        .length(3, 'Use a 3-letter ISO currency code'),
+      z.literal(''),
+    ])
+    .transform((v) => (v === '' ? null : v))
+    .nullable()
+    .optional(),
+  /** Retail charges the sales price. Wholesale charges the item wholesale price when set. */
+  priceLevel: z.enum(['RETAIL', 'WHOLESALE']).default('RETAIL'),
+  /** Printed on the invoice beside Sales person. */
+  salesPerson: optionalText(80),
 
   /**
-   * What the customer owed when the books started. Posts to Accounts Receivable
-   * against Opening Balance Equity — never written onto the customer as a number,
-   * because a receivable that is not in the ledger is not a receivable.
+   * Balance when the books started. Positive = they owe you; negative = a credit
+   * already on their account. Posts to Accounts Receivable against Opening Balance
+   * Equity — never written onto the customer as a number, because a receivable
+   * that is not in the ledger is not a receivable.
    */
   openingBalance: optionalMoney,
   openingBalanceDate: optionalDate,
+  /** The day the debt agreement was signed. */
+  agreementDate: optionalDate,
+  /** Clock time of the opening balance. */
+  balanceTime: optionalTime,
+  /** Days before the balance time that the top warning should appear. */
+  reminderDays,
+
+  /**
+   * When true (and the company portal is on), create an active portal login for
+   * this customer's email with a generated temporary password.
+   */
+  inviteToPortal: z
+    .union([z.literal('true'), z.literal('false'), z.literal('on'), z.boolean(), z.literal('')])
+    .optional()
+    .transform((value) => value === true || value === 'true' || value === 'on'),
+
+  /** Vendor that is the same party (supplier side). Empty clears the link. */
+  linkedVendorId: optionalId,
 })
 
 export type CustomerInput = z.infer<typeof customerSchema>
@@ -99,8 +170,29 @@ export const vendorSchema = z.object({
   id: optionalId,
   ...contactBase,
   defaultExpenseAccountId: optionalId,
+  /** Prefer this currency on new bills. Blank = organisation base. */
+  currencyCode: z
+    .union([
+      z
+        .string()
+        .trim()
+        .toUpperCase()
+        .length(3, 'Use a 3-letter ISO currency code'),
+      z.literal(''),
+    ])
+    .transform((v) => (v === '' ? null : v))
+    .nullable()
+    .optional(),
   openingBalance: optionalMoney,
   openingBalanceDate: optionalDate,
+  /** The day the payable agreement was signed. */
+  agreementDate: optionalDate,
+  /** Clock time of the opening balance. */
+  balanceTime: optionalTime,
+  /** Days before the balance time that the top warning should appear. */
+  reminderDays,
+  /** Customer that is the same party (receivable side). Empty clears the link. */
+  linkedCustomerId: optionalId,
 })
 
 export type VendorInput = z.infer<typeof vendorSchema>
@@ -111,14 +203,26 @@ export const itemSchema = z
   .object({
     id: optionalId,
     sku: optionalText(60),
+    barcode: optionalText(64),
     name: requiredText('Name', 160),
     description: optionalText(1000),
-    type: z.enum(['SERVICE', 'NON_INVENTORY', 'INVENTORY']),
+    type: z.enum([
+      'SERVICE',
+      'NON_INVENTORY',
+      'INVENTORY',
+      'INVENTORY_ASSEMBLY',
+      'OTHER_CHARGE',
+      'DISCOUNT',
+      'SUBTOTAL',
+      'GROUP',
+      'PAYMENT',
+    ]),
     categoryId: optionalId,
     unitOfMeasure: optionalText(20),
 
     salesDescription: optionalText(1000),
     salesPrice: optionalMoney,
+    wholesalePrice: optionalMoney,
     incomeAccountId: optionalId,
     isTaxable: z.coerce.boolean().default(true),
     salesTaxCodeId: optionalId,
@@ -131,6 +235,59 @@ export const itemSchema = z
     inventoryAccountId: optionalId,
     cogsAccountId: optionalId,
     reorderPoint: optionalMoney,
+    storeId: optionalId,
+    preferredVendorId: optionalId,
+    trackLots: z
+      .union([z.boolean(), z.enum(['true', 'false', 'on', 'off', ''])])
+      .optional()
+      .transform((value) => {
+        if (value === undefined || value === '') return false
+        if (value === true || value === 'true' || value === 'on') return true
+        return false
+      }),
+    trackSerials: z
+      .union([z.boolean(), z.enum(['true', 'false', 'on', 'off', ''])])
+      .optional()
+      .transform((value) => {
+        if (value === undefined || value === '') return false
+        if (value === true || value === 'true' || value === 'on') return true
+        return false
+      }),
+    pharmacyControlled: z
+      .union([z.boolean(), z.enum(['true', 'false', 'on', 'off', ''])])
+      .optional()
+      .transform((value) => {
+        if (value === undefined || value === '') return false
+        if (value === true || value === 'true' || value === 'on') return true
+        return false
+      }),
+
+    printGroupItems: z
+      .union([z.boolean(), z.enum(['true', 'false', 'on', 'off', ''])])
+      .optional()
+      .transform((value) => {
+        if (value === undefined || value === '') return true
+        if (value === true || value === 'true' || value === 'on') return true
+        return false
+      }),
+    itemPaymentMethod: z
+      .enum(['CASH', 'BANK_TRANSFER', 'CHEQUE', 'CARD', 'MOBILE_MONEY', 'OTHER'])
+      .optional()
+      .nullable(),
+    depositAccountId: optionalId,
+
+    /** JSON array: [{ itemId, quantity }] for GROUP / INVENTORY_ASSEMBLY. */
+    componentsJson: optionalText(20_000),
+
+    /** Shown on the point-of-sale product grid. On by default for every item. */
+    availableInPos: z
+      .union([z.boolean(), z.enum(['true', 'false', 'on', 'off', ''])])
+      .optional()
+      .transform((value) => {
+        if (value === undefined || value === '') return true
+        if (value === true || value === 'true' || value === 'on') return true
+        return false
+      }),
 
     /**
      * Stock the business already has when the item is created.
@@ -145,18 +302,30 @@ export const itemSchema = z
     openingDate: optionalDate,
   })
   .superRefine((item, ctx) => {
-    // Posting is driven by these mappings, so the rule is stated here as well as
-    // in the database — a form should say which field is missing, not quote a
-    // constraint name.
-    if (!item.incomeAccountId) {
+    const stockTracked = item.type === 'INVENTORY' || item.type === 'INVENTORY_ASSEMBLY'
+    // GROUP is sold as one kit line, so it needs an income account like a product.
+    const needsIncome = !['SUBTOTAL', 'PAYMENT'].includes(item.type)
+
+    if (needsIncome && !item.incomeAccountId) {
       ctx.addIssue({
         code: 'custom',
         path: ['incomeAccountId'],
-        message: 'Choose the income account this item is sold into',
+        message:
+          item.type === 'DISCOUNT'
+            ? 'Choose an income or expense account this discount posts to'
+            : 'Choose the income account this item is sold into',
       })
     }
 
-    if (item.type === 'INVENTORY') {
+    if (item.type === 'PAYMENT' && !item.depositAccountId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['depositAccountId'],
+        message: 'Choose Undeposited Funds or the bank account this payment deposits to',
+      })
+    }
+
+    if (stockTracked) {
       if (!item.inventoryAccountId) {
         ctx.addIssue({
           code: 'custom',
@@ -171,8 +340,6 @@ export const itemSchema = z
           message: 'A tracked item needs a cost of goods sold account',
         })
       }
-      // Opening stock has to be valued. Received quantity with no cost has no
-      // defensible figure to put in the inventory account.
       if (item.openingQuantity && Number(item.openingQuantity) > 0 && !item.openingUnitCost) {
         ctx.addIssue({
           code: 'custom',
@@ -184,7 +351,7 @@ export const itemSchema = z
       ctx.addIssue({
         code: 'custom',
         path: ['openingQuantity'],
-        message: 'Only an inventory product carries stock',
+        message: 'Only an inventory or assembly item carries stock',
       })
     }
   })
@@ -214,9 +381,18 @@ export const taxAgencySchema = z.object({
 export const percentToFraction = z
   .string()
   .trim()
-  .regex(/^\d{1,3}(\.\d{1,7})?$/, 'Enter a percentage, for example 16 or 7.5')
-  .refine((v) => Number(v) <= 100, 'A tax rate cannot exceed 100%')
-  .transform((v) => (Number(v) / 100).toFixed(9))
+  .transform((value, ctx) => {
+    const next = settleNumberInput(value) ?? value
+    if (!/^\d{1,3}(\.\d{1,7})?$/.test(next)) {
+      ctx.addIssue({ code: 'custom', message: 'Enter a percentage, for example 16 or 7.5' })
+      return z.NEVER
+    }
+    if (Number(next) > 100) {
+      ctx.addIssue({ code: 'custom', message: 'A tax rate cannot exceed 100%' })
+      return z.NEVER
+    }
+    return (Number(next) / 100).toFixed(9)
+  })
 
 export const taxRateSchema = z.object({
   id: optionalId,
@@ -262,5 +438,7 @@ export const bulkSetActiveSchema = z.object({
 })
 
 export const csvImportSchema = z.object({
-  csv: z.string().min(1, 'Paste or upload a CSV first').max(2_000_000),
+  csv: z.string().max(8_000_000).optional(),
+  /** Base64 .xlsx, the file QuickBooks Online writes from Export. */
+  workbook: z.string().max(12_000_000).optional(),
 })

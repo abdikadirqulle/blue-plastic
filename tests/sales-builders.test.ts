@@ -97,6 +97,154 @@ describe('invoice', () => {
   })
 })
 
+describe('invoice with construction retention', () => {
+  const journal = buildInvoiceJournal({
+    ...base,
+    retention: { accountId: 'acct-retention', amount: new Decimal('30') },
+  })
+
+  it('keeps AR at the net invoice total and adds retention receivable', () => {
+    expect(journal.lines.find((l) => l.accountId === 'acct-ar')?.debit?.toString()).toBe('290')
+    expect(journal.lines.find((l) => l.accountId === 'acct-retention')?.debit?.toString()).toBe(
+      '30',
+    )
+  })
+
+  it('credits extra income for the held slice and still balances', () => {
+    const retentionIncome = journal.lines.filter(
+      (l) => l.accountId === 'acct-sales' && l.credit && String(l.credit) === '30',
+    )
+    expect(retentionIncome.length).toBe(1)
+    const { debit, credit } = totals(journal.lines)
+    expect(debit.toString()).toBe(credit.toString())
+    expect(debit.toString()).toBe('320')
+  })
+})
+
+describe('invoice with a discount item', () => {
+  const pricedWithDiscount = priceDocument(
+    [
+      { quantity: '1', unitPrice: '2000', incomeAccountId: 'acct-sales' },
+      {
+        quantity: '1',
+        unitPrice: '100',
+        isDiscount: true,
+        incomeAccountId: 'acct-discounts',
+      },
+    ],
+    new Map(),
+    'USD',
+  )
+  const journal = buildInvoiceJournal({
+    ...base,
+    priced: pricedWithDiscount,
+  })
+
+  it('reduces what the customer owes', () => {
+    expect(pricedWithDiscount.total.toString()).toBe('1900')
+    expect(journal.lines.find((line) => line.accountId === 'acct-ar')?.debit?.toString()).toBe('1900')
+  })
+
+  it('debits the discount account instead of crediting a negative', () => {
+    const discount = journal.lines.find((line) => line.accountId === 'acct-discounts')
+    expect(discount?.debit?.toString()).toBe('100')
+    expect(discount?.credit).toBeUndefined()
+  })
+
+  it('still credits goods income in full', () => {
+    expect(journal.lines.find((line) => line.accountId === 'acct-sales')?.credit?.toString()).toBe(
+      '2000',
+    )
+  })
+
+  it('balances', () => {
+    const { debit, credit } = totals(journal.lines)
+    expect(debit.toString()).toBe(credit.toString())
+    expect(debit.toString()).toBe('2000')
+  })
+})
+
+describe('invoice with a payment item', () => {
+  const pricedWithPayment = priceDocument(
+    [
+      { quantity: '1', unitPrice: '100', incomeAccountId: 'acct-sales' },
+      {
+        quantity: '1',
+        unitPrice: '40',
+        isPayment: true,
+        depositAccountId: 'acct-undeposited',
+      },
+    ],
+    new Map(),
+    'USD',
+  )
+  const journal = buildInvoiceJournal({
+    ...base,
+    priced: pricedWithPayment,
+  })
+
+  it('reduces receivables to what is still owed', () => {
+    expect(pricedWithPayment.total.toString()).toBe('60')
+    expect(journal.lines.find((line) => line.accountId === 'acct-ar')?.debit?.toString()).toBe('60')
+  })
+
+  it('debits the payment deposit account for the amount taken', () => {
+    const payment = journal.lines.find((line) => line.accountId === 'acct-undeposited')
+    expect(payment?.debit?.toString()).toBe('40')
+  })
+
+  it('still credits full goods income', () => {
+    expect(journal.lines.find((line) => line.accountId === 'acct-sales')?.credit?.toString()).toBe(
+      '100',
+    )
+  })
+
+  it('balances', () => {
+    const { debit, credit } = totals(journal.lines)
+    expect(debit.toString()).toBe(credit.toString())
+    expect(debit.toString()).toBe('100')
+  })
+})
+
+describe('sales receipt with a payment item', () => {
+  const priced = priceDocument(
+    [
+      { quantity: '1', unitPrice: '100', incomeAccountId: 'acct-sales' },
+      {
+        quantity: '1',
+        unitPrice: '40',
+        isPayment: true,
+        depositAccountId: 'acct-undeposited',
+      },
+    ],
+    new Map(),
+    'USD',
+  )
+  const journal = buildSalesReceiptJournal({
+    ...base,
+    priced,
+    depositAccountId: 'acct-bank',
+  })
+
+  it('debits the receipt deposit for what is still due', () => {
+    expect(priced.total.toString()).toBe('60')
+    expect(journal.lines.find((line) => line.accountId === 'acct-bank')?.debit?.toString()).toBe('60')
+  })
+
+  it('debits the payment item deposit separately', () => {
+    expect(journal.lines.find((line) => line.accountId === 'acct-undeposited')?.debit?.toString()).toBe(
+      '40',
+    )
+  })
+
+  it('credits full goods income and balances', () => {
+    expect(journal.lines.find((line) => line.accountId === 'acct-sales')?.credit?.toString()).toBe('100')
+    const { debit, credit } = totals(journal.lines)
+    expect(debit.toString()).toBe(credit.toString())
+    expect(debit.toString()).toBe('100')
+  })
+})
+
 describe('sales receipt', () => {
   const journal = buildSalesReceiptJournal({ ...base, depositAccountId: 'acct-bank' })
 
@@ -112,6 +260,64 @@ describe('sales receipt', () => {
 
   it('refuses to build without somewhere for the money to go', () => {
     expect(() => buildSalesReceiptJournal(base)).toThrow(/which account the money went to/i)
+  })
+
+  it('splits the debit across several till accounts', () => {
+    const journal = buildSalesReceiptJournal({
+      ...base,
+      depositAccountId: 'acct-bank',
+      paymentSplits: [
+        { accountId: 'acct-evc', amount: new Decimal('150'), description: 'EVC' },
+        { accountId: 'acct-edahab', amount: new Decimal('140'), description: 'Edahab' },
+      ],
+    })
+    expect(journal.lines.find((l) => l.accountId === 'acct-evc')?.debit?.toString()).toBe('150')
+    expect(journal.lines.find((l) => l.accountId === 'acct-edahab')?.debit?.toString()).toBe('140')
+    const { debit, credit } = totals(journal.lines)
+    expect(debit.toString()).toBe(credit.toString())
+  })
+
+  it('debits the cash handed over and credits the wallet the change left', () => {
+    const sale = priceDocument(
+      [{ quantity: '1', unitPrice: '87', incomeAccountId: 'acct-sales' }],
+      new Map(),
+      'USD',
+    )
+    const journal = buildSalesReceiptJournal({
+      ...base,
+      number: 'SR-87',
+      priced: sale,
+      depositAccountId: 'acct-cash',
+      paymentSplits: [{ accountId: 'acct-cash', amount: new Decimal('100'), description: 'Cash' }],
+      changeReturns: [{ accountId: 'acct-evc', amount: new Decimal('13'), description: 'Change · EVC' }],
+    })
+    expect(journal.lines.find((line) => line.accountId === 'acct-cash')?.debit?.toString()).toBe('100')
+    expect(journal.lines.find((line) => line.accountId === 'acct-evc')?.credit?.toString()).toBe('13')
+    expect(journal.lines.find((line) => line.accountId === 'acct-sales')?.credit?.toString()).toBe('87')
+    const { debit, credit } = totals(journal.lines)
+    expect(debit.toString()).toBe(credit.toString())
+    expect(debit.toString()).toBe('100')
+  })
+
+  it('nets change returned from the same cash account', () => {
+    const sale = priceDocument(
+      [{ quantity: '1', unitPrice: '87', incomeAccountId: 'acct-sales' }],
+      new Map(),
+      'USD',
+    )
+    const journal = buildSalesReceiptJournal({
+      ...base,
+      priced: sale,
+      depositAccountId: 'acct-cash',
+      paymentSplits: [{ accountId: 'acct-cash', amount: new Decimal('100'), description: 'Cash' }],
+      changeReturns: [{ accountId: 'acct-cash', amount: new Decimal('13'), description: 'Change · Cash' }],
+    })
+    const cashLines = journal.lines.filter((line) => line.accountId === 'acct-cash')
+    const debit = cashLines.reduce((sum, line) => sum.plus(String(line.debit ?? 0)), new Decimal(0))
+    const credit = cashLines.reduce((sum, line) => sum.plus(String(line.credit ?? 0)), new Decimal(0))
+    expect(debit.minus(credit).toString()).toBe('87')
+    const { debit: allDebit, credit: allCredit } = totals(journal.lines)
+    expect(allDebit.toString()).toBe(allCredit.toString())
   })
 })
 

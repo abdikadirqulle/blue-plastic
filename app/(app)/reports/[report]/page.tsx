@@ -1,13 +1,16 @@
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 
+import { PrintButton } from '@/app/(app)/sales/[type]/[id]/print/print-button'
 import { PageHeader } from '@/components/data/page-header'
+import { ReportEntityFilters } from '@/components/reports/report-entity-filters'
 import { ReportTable } from '@/components/reports/report-table'
 import { formatDate } from '@/lib/date'
 import { PERIOD_LABELS } from '@/lib/report-periods'
 import { requireOrgContext } from '@/server/auth/context'
 import { tableReport, TABLE_REPORTS } from '@/server/reports/catalogue'
-import { readSettings, type SearchParams } from '../params'
+import { loadFilterOptions } from '../filter-options'
+import { readEntityFilters, readSettings, type SearchParams } from '../params'
 import { ReportControls } from '../report-controls'
 
 /**
@@ -44,12 +47,23 @@ export default async function TableReportPage({
   if (!definition) notFound()
 
   const ctx = await requireOrgContext('report:read')
-  const settings = readSettings(await searchParams, ctx.organization)
-  const table = await definition.build({ ctx, range: settings.range, asOf: settings.asOf })
+  const query = await searchParams
+  const settings = readSettings(query, ctx.organization)
+  const filters = readEntityFilters(query)
+  const table = await definition.build({
+    ctx,
+    range: settings.range,
+    asOf: settings.asOf,
+    filters,
+  })
+
+  const kinds = definition.filterKinds ?? []
+  const filterOptions = kinds.length > 0 ? await loadFilterOptions(ctx.orgId, kinds) : null
 
   return (
     <>
       <PageHeader
+        organization={ctx.organization}
         title={definition.title}
         description={
           definition.mode === 'asOf'
@@ -57,6 +71,15 @@ export default async function TableReportPage({
             : `${definition.description} ${formatDate(settings.range.from)} to ${formatDate(
                 settings.range.to,
               )}${settings.period === 'custom' ? '' : ` — ${PERIOD_LABELS[settings.period]}`}.`
+        }
+        actions={
+          <div className="flex flex-wrap items-center gap-2 print:hidden">
+            <PrintButton
+              paper={definition.title}
+              defaultSubject={`${definition.title} — ${ctx.organization.name}`}
+              defaultBody={`${definition.title}\n${ctx.organization.name}`}
+            />
+          </div>
         }
       />
 
@@ -68,9 +91,19 @@ export default async function TableReportPage({
         basis={settings.basis}
         comparison={settings.comparison}
         controls={{ mode: definition.mode, exportAs: definition.key }}
+        memorizeTitle={definition.title}
       />
 
-      <ReportTable table={table} currency={ctx.organization.baseCurrency} />
+      {filterOptions ? (
+        <ReportEntityFilters kinds={kinds} values={filters} options={filterOptions} />
+      ) : null}
+
+      <ReportTable
+        table={table}
+        currency={ctx.organization.baseCurrency}
+        timeZone={ctx.organization.timeZone}
+        storageKey={`bp-report-${definition.key}`}
+      />
     </>
   )
 }

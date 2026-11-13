@@ -1,7 +1,15 @@
 'use client'
 
+import { SessionProvider } from 'next-auth/react'
 import { ThemeProvider } from 'next-themes'
 import { Toaster } from 'sonner'
+
+import { UiFontProvider } from '@/components/appearance/ui-font-provider'
+import { WebsiteLookProvider } from '@/components/appearance/website-look-provider'
+import { PrintInkSync } from '@/components/print/print-ink-sync'
+import { ReportStyleProvider } from '@/components/reports/report-style-provider'
+import { ForbiddenWatcher } from '@/components/system/forbidden-watcher'
+import { THEME_IDS } from '@/lib/themes'
 
 /**
  * The only global client boundary in the application. Everything below it is a
@@ -13,9 +21,22 @@ import { Toaster } from 'sonner'
  */
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      {children}
-      <Toaster richColors closeButton position="bottom-right" />
-    </ThemeProvider>
+    <SessionProvider refetchOnWindowFocus={false}>
+      <ThemeProvider
+        attribute="class"
+        defaultTheme="som"
+        enableSystem={false}
+        themes={[...THEME_IDS]}
+        disableTransitionOnChange
+      >
+        <ReportStyleProvider />
+        <WebsiteLookProvider />
+        <UiFontProvider />
+        <PrintInkSync />
+        {children}
+        <ForbiddenWatcher />
+        <Toaster richColors closeButton position="bottom-right" style={{ zIndex: 400 }} />
+      </ThemeProvider>
+    </SessionProvider>
   )
 }

@@ -2,8 +2,11 @@ import type { LucideIcon } from 'lucide-react'
 import {
   BanknoteIcon,
   BookOpenIcon,
+  CalendarRangeIcon,
   CircleHelpIcon,
-  LayoutDashboardIcon,
+  ClipboardListIcon,
+  DatabaseIcon,
+  LayoutGridIcon,
   PackageIcon,
   ReceiptIcon,
   SettingsIcon,
@@ -40,45 +43,68 @@ export type NavModule = {
 }
 
 /**
- * Nine modules, and everything else is a tab inside one of them.
+ * Top-level modules; everything else is a tab inside one of them.
  *
- * The sidebar used to list twenty-two destinations under five headings, which is
- * a table of contents rather than a navigation. A person doing the books thinks
- * in terms of *sales* or *purchases*; which document they need is the second
- * question, and the second question belongs on the page, not in the chrome.
+ * A person doing the books thinks in terms of *sales* or *purchases*; which
+ * document they need is the second question, and belongs on the page, not in
+ * the chrome.
  */
 export const MODULES: NavModule[] = [
   {
     key: 'dashboard',
-    label: 'Dashboard',
+    label: 'Apps',
     href: '/dashboard',
-    icon: LayoutDashboardIcon,
+    icon: LayoutGridIcon,
     owns: ['/dashboard'],
   },
   {
     key: 'sales',
     label: 'Sales',
-    href: '/sales/invoices',
+    href: '/sales',
     icon: ReceiptIcon,
     permission: 'invoice:read',
     owns: ['/sales', '/payments', '/customers'],
     tabs: [
-      { label: 'Invoices', href: '/sales/invoices', permission: 'invoice:read' },
+      { label: 'Home', href: '/sales' },
       { label: 'Estimates', href: '/sales/estimates', permission: 'invoice:read' },
+      { label: 'Quotations', href: '/sales/quotations', permission: 'invoice:read' },
+      { label: 'Sales orders', href: '/sales/sales-orders', permission: 'invoice:read' },
+      { label: 'Invoices', href: '/sales/invoices?status=open', permission: 'invoice:read' },
+      { label: 'Subscriptions', href: '/sales/subscriptions', permission: 'invoice:read' },
       { label: 'Sales receipts', href: '/sales/sales-receipts', permission: 'invoice:read' },
+      { label: 'Delivery', href: '/sales/delivery', permission: 'invoice:read' },
       { label: 'Credit memos', href: '/sales/credit-memos', permission: 'invoice:read' },
       { label: 'Payments', href: '/payments', permission: 'payment:read' },
       { label: 'Customers', href: '/customers', permission: 'customer:read' },
+      { label: 'Pipeline', href: '/customers/pipeline', permission: 'customer:read' },
+      { label: 'Tickets', href: '/customers/tickets', permission: 'customer:read' },
+      { label: 'Portal users', href: '/customers/portal-users', permission: 'customer:read' },
+      { label: 'Reports', href: '/sales/reports', permission: 'report:read' },
+    ],
+  },
+  {
+    key: 'projects',
+    label: 'Projects',
+    href: '/projects',
+    icon: ClipboardListIcon,
+    permission: 'project:read',
+    owns: ['/projects'],
+    tabs: [
+      { label: 'Overview', href: '/projects' },
+      { label: 'All projects', href: '/projects/list', permission: 'project:read' },
+      { label: 'New', href: '/projects/new', permission: 'project:create' },
+      { label: 'Reports', href: '/projects/reports', permission: 'report:read' },
     ],
   },
   {
     key: 'purchases',
     label: 'Purchases',
-    href: '/purchases/bills',
+    href: '/purchases',
     icon: ShoppingCartIcon,
     permission: 'bill:read',
     owns: ['/purchases', '/bill-payments', '/vendors'],
     tabs: [
+      { label: 'Home', href: '/purchases' },
       { label: 'Bills', href: '/purchases/bills', permission: 'bill:read' },
       {
         label: 'Expenses & receipts',
@@ -88,8 +114,25 @@ export const MODULES: NavModule[] = [
       },
       { label: 'Vendor credits', href: '/purchases/vendor-credits', permission: 'bill:read' },
       { label: 'Purchase orders', href: '/purchases/purchase-orders', permission: 'bill:read' },
+      {
+        label: 'Purchase requests',
+        href: '/purchases/purchase-requests',
+        permission: 'bill:read',
+      },
+      { label: 'RFQs', href: '/purchases/rfqs', permission: 'bill:read' },
+      {
+        label: 'Delivery',
+        href: '/purchases/delivery',
+        permission: 'bill:read',
+        also: [
+          '/purchases/delivery/outstanding',
+          '/purchases/delivery/received',
+          '/purchases/delivery/report',
+        ],
+      },
       { label: 'Bill payments', href: '/bill-payments', permission: 'expense:read' },
       { label: 'Vendors', href: '/vendors', permission: 'vendor:read' },
+      { label: 'Reports', href: '/purchases/reports', permission: 'report:read' },
     ],
   },
   {
@@ -103,41 +146,60 @@ export const MODULES: NavModule[] = [
       // Reconciling starts from an account rather than from a list, so there is
       // no /banking/reconcile index to link to — only a reconciliation in
       // progress has a page of its own.
-      { label: 'Accounts', href: '/banking', permission: 'bank:read' },
+      { label: 'Home', href: '/banking', permission: 'bank:read' },
+      { label: 'Accounts', href: '/banking/accounts', permission: 'bank:read' },
       { label: 'New transfer', href: '/banking/transfers/new', permission: 'bank:transact' },
       { label: 'New deposit', href: '/banking/deposits/new', permission: 'bank:transact' },
       { label: 'Import a statement', href: '/banking/import', permission: 'bank:import' },
+      { label: 'Reports', href: '/banking/reports', permission: 'report:read' },
     ],
   },
   {
     key: 'inventory',
     label: 'Inventory',
-    // The products list is the front door. Stock is a *property of an item*, not
-    // a separate register kept beside it: an inventory product is created with
-    // its opening quantity, its accounts and its reorder point in one dialog,
-    // and the list shows what is on hand. "Stock on hand" is then the valuation
-    // view of the same records — not a different system with its own vocabulary.
-    href: '/items',
+    href: '/inventory',
     icon: PackageIcon,
     permission: 'item:read',
-    owns: ['/inventory', '/items'],
+    owns: ['/inventory', '/items', '/stores', '/barcodes'],
     tabs: [
+      { label: 'Home', href: '/inventory' },
       { label: 'Products & services', href: '/items', permission: 'item:read' },
-      { label: 'Stock on hand', href: '/inventory', permission: 'inventory:read' },
+      { label: 'Stock on hand', href: '/inventory/stock', permission: 'inventory:read' },
+      { label: 'Stores', href: '/stores', permission: 'inventory:read' },
+      { label: 'Barcodes', href: '/barcodes', permission: 'item:read' },
       { label: 'Adjust stock', href: '/inventory/adjustments/new', permission: 'inventory:adjust' },
+      { label: 'Build assemblies', href: '/inventory/builds/new', permission: 'inventory:adjust' },
+      { label: 'Work orders', href: '/inventory/work-orders', permission: 'inventory:read' },
+      { label: 'Materials plan', href: '/inventory/mrp', permission: 'inventory:read' },
+      { label: 'Bins & picks', href: '/inventory/bins', permission: 'inventory:read' },
+      { label: 'Reports', href: '/inventory/reports', permission: 'report:read' },
     ],
   },
   {
     key: 'accounting',
     label: 'Accounting',
-    href: '/accounts',
+    href: '/accounting',
     icon: BookOpenIcon,
     permission: 'account:read',
-    owns: ['/accounts', '/journals', '/periods'],
+    owns: ['/accounting', '/accounts', '/journals', '/periods'],
     tabs: [
+      { label: 'Home', href: '/accounting' },
       { label: 'Chart of accounts', href: '/accounts', permission: 'account:read' },
       { label: 'Journal entries', href: '/journals', permission: 'journal:read' },
       { label: 'Periods & year-end', href: '/periods', permission: 'period:read' },
+    ],
+  },
+  {
+    key: 'analytics',
+    label: 'Analytics',
+    href: '/analytics',
+    icon: TrendingUpIcon,
+    permission: 'report:overview',
+    owns: ['/analytics'],
+    tabs: [
+      { label: 'Board', href: '/analytics', permission: 'report:overview' },
+      { label: 'Business overview', href: '/reports/business-overview', permission: 'report:overview' },
+      { label: 'All reports', href: '/reports', permission: 'report:read' },
     ],
   },
   {
@@ -153,30 +215,62 @@ export const MODULES: NavModule[] = [
     // it answers, which is a better way to find one than a list of names.
     tabs: [
       { label: 'All reports', href: '/reports' },
-      { label: 'Profit & loss', href: '/reports/profit-loss' },
-      { label: 'Balance sheet', href: '/reports/balance-sheet' },
-      { label: 'Cash flow', href: '/reports/cash-flow' },
-      { label: 'Trial balance', href: '/reports/trial-balance' },
-      { label: 'Statements', href: '/reports/statements/customer', also: ['/reports/statements'] },
-      { label: 'General ledger', href: '/reports/general-ledger' },
-      { label: 'Transaction detail', href: '/reports/transaction-detail' },
+      { label: 'Business overview', href: '/reports/business-overview', permission: 'report:overview' },
+      { label: 'Profit and Loss', href: '/reports/profit-loss' },
+      { label: 'Balance Sheet', href: '/reports/balance-sheet' },
+      { label: 'Statement of Cash Flows', href: '/reports/cash-flow' },
+      { label: 'Trial Balance', href: '/reports/trial-balance' },
+      { label: 'Customer Balance Detail', href: '/reports/statements/customer', also: ['/reports/statements'] },
+      { label: 'General Ledger', href: '/reports/general-ledger' },
+      { label: 'Transaction Detail by Account', href: '/reports/transaction-detail' },
+    ],
+  },
+  {
+    key: 'calendar',
+    label: 'Calendar',
+    href: '/calendar',
+    icon: CalendarRangeIcon,
+    permission: 'calendar:read',
+    owns: ['/calendar'],
+  },
+  {
+    key: 'databases',
+    label: 'Databases',
+    href: '/databases',
+    icon: DatabaseIcon,
+    permission: 'org:update',
+    owns: ['/databases', '/settings/backup'],
+    tabs: [
+      { label: 'Home', href: '/databases' },
+      { label: 'Apps', href: '/databases/apps' },
+      { label: 'System users', href: '/databases/users' },
+      { label: 'Platform billing', href: '/databases/billing' },
     ],
   },
   {
     key: 'settings',
     label: 'Settings',
-    href: '/settings/organization',
+    href: '/settings',
     icon: SettingsIcon,
     permission: 'org:read',
-    owns: ['/settings'],
+    owns: ['/settings', '/billing'],
     tabs: [
+      { label: 'Home', href: '/settings' },
       { label: 'Organisation', href: '/settings/organization' },
+      { label: 'Billing', href: '/billing', permission: 'org:read' },
+      { label: 'Apps & features', href: '/settings/features', permission: 'org:update' },
+      { label: 'Marketplace', href: '/settings/marketplace', permission: 'org:update' },
+      { label: 'Price lists & promos', href: '/settings/pricing', permission: 'item:update' },
       { label: 'Default accounts', href: '/settings/accounts', permission: 'account:read' },
       { label: 'Payment terms', href: '/settings/payment-terms' },
+      { label: 'Classes', href: '/settings/classes' },
       { label: 'Tax', href: '/settings/tax', permission: 'tax:read' },
-      { label: 'Users', href: '/settings/users', permission: 'user:read' },
+      { label: 'Company users', href: '/settings/users', permission: 'user:read' },
+      { label: 'User history', href: '/settings/user-history', permission: 'user:read' },
+      { label: 'Templates', href: '/settings/templates', permission: 'org:read' },
+      { label: 'Appearance', href: '/settings/appearance' },
       { label: 'Your profile', href: '/settings/profile' },
-      { label: 'Activity log', href: '/settings/activity', permission: 'audit:read' },
+      { label: 'Trash', href: '/settings/activity', permission: 'audit:read' },
     ],
   },
   {
@@ -186,7 +280,10 @@ export const MODULES: NavModule[] = [
     icon: CircleHelpIcon,
     owns: ['/help'],
     tabs: [
-      { label: 'Guide', href: '/help' },
+      { label: 'Home', href: '/help' },
+      { label: 'Guide', href: '/help/guide' },
+      { label: 'Hagitaan', href: '/help/guide-so' },
+      { label: 'User manual', href: '/help/manual' },
       { label: 'Keyboard shortcuts', href: '/help/shortcuts' },
       { label: 'How the ledger works', href: '/help/ledger' },
     ],
@@ -210,11 +307,14 @@ export function moduleFor(pathname: string): NavModule | undefined {
 
 /** The tab a path belongs to, by longest matching prefix. */
 export function tabFor(section: NavModule, pathname: string): NavTab | undefined {
+  const path = pathname.split(/[?#]/)[0] || pathname
   let best: { tab: NavTab; length: number } | undefined
 
   for (const tab of section.tabs ?? []) {
-    for (const prefix of [tab.href, ...(tab.also ?? [])]) {
-      if (pathname === prefix || pathname.startsWith(`${prefix}/`)) {
+    for (const raw of [tab.href, ...(tab.also ?? [])]) {
+      // Tab hrefs may carry a default query (`?status=open`); match on the path only.
+      const prefix = raw.split(/[?#]/)[0] || raw
+      if (path === prefix || path.startsWith(`${prefix}/`)) {
         if (!best || prefix.length > best.length) best = { tab, length: prefix.length }
       }
     }

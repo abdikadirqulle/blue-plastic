@@ -12,19 +12,49 @@
 | 8 — Reporting               | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-08-reporting.md) · no migration — reports read the ledger · 51 integrity objects · 272 tests · [ADR-0010](./decisions/0010-no-balance-rollup-table.md)                                          |
 | 9 — Period Close & Year-End | ✅ Complete            | 2026-08-29 · [detail](./phases/phase-09-period-close.md) · migration written, not yet applied · 56 integrity objects · [ADR-0011](./decisions/0011-closing-entries-excluded-from-the-profit-and-loss.md)                                |
 | 10 — Interface & Hardening  | ✅ Complete            | 2026-09-01 · [detail](./phases/phase-10-hardening.md) · migrations `receiving`, `soft_delete` · [ADR-0012](./decisions/0012-owned-combobox-and-dialog.md), [ADR-0013](./decisions/0013-soft-delete-for-transactions.md) · 304 tests · 56 integrity objects · second pass 10.12–10.22; third pass 10.23–10.28: aging agrees with the ledger, whole-chart journals, one-verb Delete everywhere, partial receiving, transaction detail by account · not clicked through in a browser |
-| 11 — The practical gaps     | ⛔ Not started         | Scoped 2026-09-01 from a review against QuickBooks — [roadmap](./04-roadmap.md#phase-11--the-practical-gaps). Seventeen tasks in three bands, and an explicit list of what is excluded |
+| 11 — The practical gaps     | ✅ Complete            | Started 2026-10-16 · finished 2026-11-01 · [detail](./phases/phase-11-practical-gaps.md) · [roadmap](./04-roadmap.md#phase-11--the-practical-gaps) · 11.1–11.17 done |
+| 12 — Depth (Wave B)         | ✅ Complete            | Started/finished 2026-11-01 · [detail](./phases/phase-12-depth.md) · FX day-to-day, credit warn, timesheets, POS/KPI/equity lite; HRIS suite deferred |
+| 13 — Ledger depth           | ✅ Complete            | 2026-11-02 · [detail](./phases/phase-13-ledger-depth.md) · fixed assets, FX open AR/AP, rate limit, invite email |
+| 14 — Equity & groups lite   | ✅ Complete            | 2026-11-02 · [detail](./phases/phase-14-equity.md) · shareholders, equity events, owners equity statement |
+| 15 — HRIS lite              | ✅ Complete            | 2026-11-02 · [detail](./phases/phase-15-hris.md) · lifecycle, recruitment, appraisals |
+| 16 — Collab apps lite       | ✅ Complete            | 2026-11-02 · [detail](./phases/phase-16-collab.md) · Sign, Appointments, Discuss, Planning, Surveys |
+| 17 — Insight & SME close    | ✅ Complete            | 2026-11-02 · [detail](./phases/phase-17-insight.md) · KPI pins, cycle smoke doc, roadmap |
+| 18 — Lite → ERP depth       | ✅ Complete            | 2026-11-04 · [detail](./phases/phase-18-erp-depth.md) · Sign token, ATS stages, CRM pipeline, BOM explode, cap table, group BS |
+| 19 — Remaining gaps         | ✅ Complete            | 2026-11-04 · [detail](./phases/phase-19-full-erp.md) · MRP page, sign email, notify gateway, tickets, home KPIs, IC journals, backup extras |
+| 20 — Operating close        | ✅ Complete            | 2026-11-04 · [detail](./phases/phase-20-operating-close.md) · backup restore extras, portal quotes, appointment types |
+| 21 — Legal layers           | ✅ Complete            | 2026-11-04 · [detail](./phases/phase-21-legal-layers.md) · hedge docs, kitchen display, first-party marketplace, bins/picks, sign certificate, training, payroll backup |
+| 22 — Platform + AI surface  | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-22-platform-ai.md) · [layers](./06-erp-layers.md) · API keys, OpenAPI, capabilities, MCP mirror · [ADR-0014](./decisions/0014-machine-api-single-service.md) |
+| 23 — Hard 3-way match       | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-23-three-way-match.md) · MATCH_HOLD + variance approve · migration `20261105200000_phase23_three_way_match` |
+| 24 — Lot / serial           | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-24-lot-serial.md) · receive/issue lots & serials · stock by lot · migration `20261105210000_phase24_lot_serial` |
+| 25 — Project profitability  | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-25-project-profitability.md) · job P&L from sales, purchases, COGS, timesheets |
+| 26 — Report packs           | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-26-report-packs.md) · scheduled packs · migration `20261105220000_phase26_report_packs` |
+| 27 — Statutory payroll+VAT  | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-27-statutory.md) · payroll CSV/JSON + one-jurisdiction VAT return |
+| 28 — Manufacturing WOs      | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-28-work-orders.md) · SME work orders → assembly posting |
+| 29 — WMS picks post stock   | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-29-wms-picks.md) · pick completion issues inventory |
+| 30 — SME BI dashboards      | ✅ Complete            | 2026-11-05 · [detail](./phases/phase-30-dashboards.md) · KPI/report tiles · migration `20261105230000_phase28_30_work_orders_wms_dashboards` |
+| 31 — WMS enterprise         | ✅ Complete            | 2026-11-06 · [detail](./phases/phase-31-wms-enterprise.md) · bin qty + putaway + waves |
+| 32 — BI enterprise          | ✅ Complete            | 2026-11-06 · [detail](./phases/phase-32-bi-enterprise.md) · metric snapshots + pack email harden |
+| 33 — Close enterprise UX    | ✅ Complete            | 2026-11-06 · [detail](./phases/phase-33-close-enterprise.md) · close pack + hard gates · migration `20261106200000_phase31_33_wms_bi_close` |
+| 34 — Industry pack framework | ✅ Framework complete | 2026-11-07 · [detail](./phases/phase-34-industry-packs.md) · 16 packs, installPack, Help Coverage, migration `20261107220000_phase34_industry_packs` |
+| Hospitality ERP (restaurant + hotel) | ✅ Complete | 2026-11-07 · [detail](./phases/phase-hospitality-erp.md) · tables, tips, night audit, kitchen link; rooms/folio→invoice · migration `20261107230000_phase_hospitality` |
+| P2–P5 institution verticals | ✅ Complete | 2026-11-08 · pharmacy, school/university, hospital billing, NGO/services/construction/mfg/distribution |
+| P6 Coverage gate + P7 Wizard | ✅ Complete | 2026-11-08 · [detail](./phases/phase-p6-p7-onboarding.md) · all packs ready · `/onboarding` · Settings Setup · migration `20261108120000_phase_p6_p7_onboarding` |
+| P8–P11 Vertical lite → full | ✅ Complete | 2026-11-08 · [detail](./phases/phase-p8-p11-vertical-full.md) · ASN receive, WIP bill, retention GL, work-center capacity · migration `20261108130000_phase_p8_p11_vertical_full` |
+| Platform polish + vertical deepen | ✅ Complete | 2026-11-10 · [detail](./phases/phase-platform-polish-deepen.md) · Apps Grant-to-all · pharmacy/education/hospital/NGO/WIP/progress/ASN/routing/hospitality deepen |
+| Lite vertical close Pass 1 | ✅ Complete | 2026-11-11 · [detail](./phases/phase-lite-close-pass1.md) · tip payout, nightly folio, lot disposal, term batch bill, claim stamp, fund BS, WIP write-up/down, site store, weekday capacity, ASN dock, price lists/promos · migration `20261111120000_phase_lite_close_pass1` |
+| 35 — Multi-entity & IC harden | ✅ Complete | 2026-11-11 · [detail](./phases/phase-35-multi-entity.md) · ownership %, IntercompanyMatch, group close checklist, consol NCI · migration `20261111140000_phase35_multi_entity` |
+| 36 — Subscriptions & recurring revenue | ✅ Complete | 2026-11-11 · [detail](./phases/phase-36-subscriptions.md) · AR INVOICE schedules, Unearned Revenue, deferred recognition · migration `20261111220000_phase36_subscriptions` |
 
 Phases advance only on explicit instruction from the owner.
+
+**SME loops 1–21, layer waves 22–30, and enterprise WMS/BI/close 31–33 are complete.** Remaining non-goals: hardware, trademarks, untrusted plugins.
 
 ## Open items carried forward
 
 | Item                                                                                  | Phase it lands in |
 | ------------------------------------------------------------------------------------- | ----------------- |
-| Email delivery for invitations (currently the inviter sets a temporary password)      | 10                |
-| Multi-currency behaviour — the schema is already currency-aware                       | 10                |
-| Rate limiting on the sign-in endpoint                                                 | 10                |
-| An end-to-end test through `voidDocument` asserting `stockAgreesWithLedger`           | 10                |
-| End-to-end browser tests — nothing in Phase 10 has been clicked through                | 10                |
+| Qualified eIDAS / DocuSign trademark, untrusted plugins, robot/PLC, IoT printers      | out               |
+| Browser Playwright suite beyond documented vitest cycle smoke                         | optional          |
 
 ## Third pass over Phase 10 — 2026-09-01
 

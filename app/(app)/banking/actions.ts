@@ -7,8 +7,18 @@ import { toFormState, type FormState } from '@/components/forms/action-state'
 import { cuid, deleteRecordSchema } from '@/lib/validation/common'
 import {
   depositSchema,
+  createBankRuleSchema,
+  deleteBankRuleSchema,
+  setBankRuleActiveSchema,
+  updateBankRuleSchema,
   excludeTransactionSchema,
   finishReconciliationSchema,
+  matchFeedBillSchema,
+  matchFeedInvoiceSchema,
+  postFeedLinesSchema,
+  registerEntrySchema,
+  saveFeedLineSchema,
+  undoFeedLineSchema,
   importStatementSchema,
   matchTransactionSchema,
   startReconciliationSchema,
@@ -19,10 +29,12 @@ import {
 import { action } from '@/server/action'
 import * as bankingService from '@/server/services/banking.service'
 import * as reconciliationService from '@/server/services/reconciliation.service'
+import * as feedService from '@/server/services/bank-feed.service'
 import * as importService from '@/server/services/statement-import.service'
+import { assertDocumentDeleteAllowed } from '@/server/feature-guards'
 
 function revalidateBanking() {
-  revalidatePath('/banking')
+  revalidatePath('/banking/accounts')
   revalidatePath('/banking/transfers')
   revalidatePath('/banking/deposits')
   revalidatePath('/accounts')
@@ -51,6 +63,7 @@ export const deleteTransfer = action
   .requires('bank:transact')
   .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
+    assertDocumentDeleteAllowed(ctx)
     const result = await bankingService.removeTransfer(ctx, input.id, input.reason)
     revalidateBanking()
     return result
@@ -60,6 +73,7 @@ export const deleteDeposit = action
   .requires('bank:transact')
   .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
+    assertDocumentDeleteAllowed(ctx)
     const result = await bankingService.removeDeposit(ctx, input.id, input.reason)
     revalidateBanking()
     return result
@@ -90,6 +104,137 @@ export const matchTransaction = action
     return result
   })
 
+export const saveFeedLine = action
+  .requires('bank:import')
+  .input(saveFeedLineSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.saveLine(ctx, {
+      id: input.id,
+      categoryAccountId: input.categoryAccountId ?? null,
+      vendorId: input.vendorId ?? null,
+      customerId: input.customerId ?? null,
+      payeeName: input.payeeName ?? null,
+    })
+    revalidatePath('/banking/import')
+    return result
+  })
+
+export const postFeedLines = action
+  .requires('bank:import')
+  .input(postFeedLinesSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.postLines(ctx, input.ids)
+    revalidateBanking()
+    revalidatePath('/banking/import')
+    return result
+  })
+
+export const matchFeedInvoice = action
+  .requires('bank:import')
+  .input(matchFeedInvoiceSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.matchInvoice(ctx, input.importedId, input.invoiceId)
+    revalidateBanking()
+    revalidatePath('/banking/import')
+    revalidatePath('/payments')
+    return result
+  })
+
+export const matchFeedBill = action
+  .requires('bank:import')
+  .input(matchFeedBillSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.matchBill(ctx, input.importedId, input.billId)
+    revalidateBanking()
+    revalidatePath('/banking/import')
+    revalidatePath('/bill-payments')
+    return result
+  })
+
+export const undoFeedLine = action
+  .requires('bank:import')
+  .input(undoFeedLineSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.undoLine(ctx, input.id)
+    revalidateBanking()
+    revalidatePath('/banking/import')
+    return result
+  })
+
+export const createBankRule = action
+  .requires('bank:import')
+  .input(createBankRuleSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.createRule(ctx, {
+      name: input.name,
+      contains: input.contains,
+      accountId: input.accountId ?? null,
+      categoryAccountId: input.categoryAccountId,
+      vendorId: input.vendorId ?? null,
+      customerId: input.customerId ?? null,
+    })
+    revalidatePath('/banking/import')
+    revalidatePath('/banking/rules')
+    return result
+  })
+
+export const updateBankRule = action
+  .requires('bank:import')
+  .input(updateBankRuleSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.updateRule(ctx, input.id, {
+      name: input.name,
+      contains: input.contains,
+      accountId: input.accountId ?? null,
+      categoryAccountId: input.categoryAccountId,
+      vendorId: input.vendorId ?? null,
+      customerId: input.customerId ?? null,
+      active: input.active,
+    })
+    revalidatePath('/banking/import')
+    revalidatePath('/banking/rules')
+    return result
+  })
+
+export const setBankRuleActive = action
+  .requires('bank:import')
+  .input(setBankRuleActiveSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.setRuleActive(ctx, input.id, input.active)
+    revalidatePath('/banking/import')
+    revalidatePath('/banking/rules')
+    return result
+  })
+
+export const deleteBankRule = action
+  .requires('bank:import')
+  .input(deleteBankRuleSchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.deleteRule(ctx, input.id)
+    revalidatePath('/banking/import')
+    revalidatePath('/banking/rules')
+    return result
+  })
+
+export const enterOnRegister = action
+  .requires('bank:transact')
+  .input(registerEntrySchema)
+  .handler(async (ctx, input) => {
+    const result = await feedService.recordOnAccount(ctx, {
+      accountId: input.accountId,
+      direction: input.direction,
+      date: input.date,
+      amount: input.amount,
+      categoryAccountId: input.categoryAccountId,
+      vendorId: input.vendorId ?? null,
+      payeeName: input.payeeName ?? null,
+      memo: input.memo ?? null,
+    })
+    revalidateBanking()
+    revalidatePath(`/accounts/${input.accountId}`)
+    return result
+  })
+
 export const excludeTransaction = action
   .requires('bank:reconcile')
   .input(excludeTransactionSchema)
@@ -116,6 +261,20 @@ export async function suggestionsFor(importedId: string) {
   }))
 }
 
+/** Bank feed only — document attachments use `/attachments/actions`. */
+export async function attachLedgerFile(formData: FormData) {
+  const { requireOrgContext } = await import('@/server/auth/context')
+  const { storeLedgerFile } = await import('@/server/files/ledger-files')
+  const ctx = await requireOrgContext('bank:import')
+  const file = formData.get('file')
+  if (!(file instanceof File) || file.size === 0) return
+  const text = (value: FormDataEntryValue | null) => (typeof value === 'string' && value ? value : undefined)
+  const importedTransactionId = text(formData.get('importedTransactionId'))
+  if (!importedTransactionId) return
+  await storeLedgerFile(ctx, file, { importedTransactionId })
+  revalidatePath('/banking/import')
+}
+
 /* --- Reconciliation ------------------------------------------------------- */
 
 export const startReconciliation = action
@@ -123,7 +282,7 @@ export const startReconciliation = action
   .input(startReconciliationSchema)
   .handler(async (ctx, input) => {
     const result = await reconciliationService.start(ctx, input)
-    revalidatePath('/banking')
+    revalidatePath('/banking/accounts')
     return result
   })
 
@@ -150,7 +309,7 @@ export const finishReconciliation = action
   .input(finishReconciliationSchema)
   .handler(async (ctx, input) => {
     const result = await reconciliationService.finish(ctx, input.reconciliationId, input.notes)
-    revalidatePath('/banking')
+    revalidatePath('/banking/accounts')
     revalidatePath(`/banking/reconcile/${input.reconciliationId}`)
     return result
   })
@@ -160,7 +319,7 @@ export const undoReconciliation = action
   .input(undoReconciliationSchema)
   .handler(async (ctx, input) => {
     const result = await reconciliationService.undo(ctx, input.id, input.reason)
-    revalidatePath('/banking')
+    revalidatePath('/banking/accounts')
     return result
   })
 

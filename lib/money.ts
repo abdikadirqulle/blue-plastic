@@ -10,6 +10,12 @@ export type Money = Decimal
 /** Storage scale. Unit prices and rates need more than 2 decimals; postings do not. */
 export const STORAGE_SCALE = 4
 
+/**
+ * What a person may type after the radix point on money / quantity fields.
+ * Hard-capped in the input guard; the wire schema matches.
+ */
+export const INPUT_DECIMAL_SCALE = 5
+
 /** Minor units per currency, for rounding amounts that will be posted. */
 const MINOR_UNITS: Record<string, number> = {
   USD: 2, EUR: 2, GBP: 2, KES: 2, AED: 2, CAD: 2, AUD: 2, CHF: 2, ZAR: 2, INR: 2,
@@ -58,19 +64,118 @@ export function toMoneyString(value: Decimal.Value, decimals = STORAGE_SCALE): s
 }
 
 /**
- * Parse user input. Accepts thousands separators and a leading currency symbol,
- * and rejects anything else rather than guessing — a silently-misparsed amount is
- * worse than a validation message.
+ * Parse user input. Accepts thousands separators, a leading currency symbol,
+ * and the four arithmetic signs: 120-10, 2*50, 100/4, 10+5.
+ * Anything else is rejected rather than guessed — a silently-misparsed amount
+ * is worse than a validation message.
  */
 export function parseMoneyInput(input: string): Money | null {
-  const cleaned = input.trim().replace(/[\s,]/g, '').replace(/^[^\d\-+.]+/, '')
-  if (cleaned === '' || !/^[-+]?\d*\.?\d*$/.test(cleaned)) return null
-  try {
-    const d = new Decimal(cleaned)
-    return d.isFinite() ? d : null
-  } catch {
-    return null
+  const cleaned = input.trim().replace(/[\s,]/g, '').replace(/^[^\d\-+.(]+/, '')
+  if (cleaned === '') return null
+  const value = evaluateArithmetic(cleaned)
+  return value && value.isFinite() ? value : null
+}
+
+/** True when the text is a sum, difference, product, or quotient rather than a plain number. */
+export function hasArithmetic(input: string): boolean {
+  const cleaned = input.trim().replace(/[\s,]/g, '').replace(/^[^\d\-+.(]+/, '')
+  return /[+\-*/()]/.test(cleaned.replace(/^[+-]/, ''))
+}
+
+/**
+ * The number an arithmetic entry settles to, written without trailing zeros.
+ * A plain number is left alone, so typing 10.50 is not rewritten on the way out.
+ */
+export function settleNumberInput(input: string): string | null {
+  if (!hasArithmetic(input)) return null
+  const value = parseMoneyInput(input)
+  if (!value) return null
+  return value
+    .toDecimalPlaces(INPUT_DECIMAL_SCALE, Decimal.ROUND_HALF_UP)
+    .toFixed(INPUT_DECIMAL_SCALE)
+    .replace(/(\.\d*?)0+$/, '$1')
+    .replace(/\.$/, '')
+}
+
+/**
+ * + and - bind looser than * and /. Parentheses and a leading minus are allowed.
+ * An unfinished sum such as "120-" is rejected so the field can keep being typed.
+ */
+function evaluateArithmetic(source: string): Decimal | null {
+  let index = 0
+
+  const peek = () => source[index]
+
+  function number(): Decimal | null {
+    const start = index
+    if (peek() === '.') {
+      index += 1
+      while (index < source.length && source[index]! >= '0' && source[index]! <= '9') index += 1
+    } else {
+      while (index < source.length && source[index]! >= '0' && source[index]! <= '9') index += 1
+      if (peek() === '.') {
+        index += 1
+        while (index < source.length && source[index]! >= '0' && source[index]! <= '9') index += 1
+      }
+    }
+    const raw = source.slice(start, index)
+    if (raw === '' || raw === '.') return null
+    try {
+      return new Decimal(raw)
+    } catch {
+      return null
+    }
   }
+
+  function unary(): Decimal | null {
+    if (peek() === '+') {
+      index += 1
+      return unary()
+    }
+    if (peek() === '-') {
+      index += 1
+      const value = unary()
+      return value ? value.negated() : null
+    }
+    if (peek() === '(') {
+      index += 1
+      const value = sum()
+      if (peek() !== ')' || !value) return null
+      index += 1
+      return value
+    }
+    return number()
+  }
+
+  function product(): Decimal | null {
+    let left = unary()
+    if (!left) return null
+    while (peek() === '*' || peek() === '/') {
+      const operator = peek()
+      index += 1
+      const right = unary()
+      if (!right || (operator === '/' && right.isZero())) return null
+      left = operator === '*' ? left.times(right) : left.dividedBy(right)
+    }
+    return left
+  }
+
+  function sum(): Decimal | null {
+    let left = product()
+    if (!left) return null
+    while (peek() === '+' || peek() === '-') {
+      const operator = peek()
+      index += 1
+      const right = product()
+      if (!right) return null
+      left = operator === '+' ? left.plus(right) : left.minus(right)
+    }
+    return left
+  }
+
+  const value = sum()
+  if (!value || index !== source.length) return null
+  return value
 }
 
 export function formatMoney(
@@ -96,6 +201,17 @@ export function formatMoney(
 export function formatSigned(value: Decimal.Value, currency = 'USD'): string {
   const d = new Decimal(value)
   return d.isNegative() ? `(${formatMoney(d.abs(), currency)})` : formatMoney(d, currency)
+}
+
+/**
+ * Quantity change on a stock/activity line: + for stock in, − for stock out,
+ * plain 0.00 when nothing moved.
+ */
+export function formatSignedQuantity(value: Decimal.Value, decimals = 2): string {
+  const d = new Decimal(value)
+  const abs = d.abs().toFixed(decimals)
+  if (d.isZero()) return abs
+  return d.isNegative() ? `-${abs}` : `+${abs}`
 }
 
 /**

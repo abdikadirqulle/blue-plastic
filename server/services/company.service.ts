@@ -1,0 +1,542 @@
+import 'server-only'
+
+import type { Prisma } from '@prisma/client'
+
+import { companyLimitStatus } from '@/lib/company-limits'
+import { MAX_SUB_COMPANIES } from '@/lib/company-group'
+import { normalizeOwnershipPercent } from '@/lib/erp/consolidation-ownership'
+import {
+  featureFlagsWithModules,
+  grantModuleOnFlags,
+  MODULE_FLAG_LABELS,
+  modulesFromFormValues,
+  parseFeatureFlags,
+  type ModuleFlag,
+} from '@/lib/feature-flags'
+import type {
+  AttachSubCompanyInput,
+  CreateCompanyInput,
+  DeleteCompanyInput,
+  GrantModuleToAllInput,
+  UpdateCompanyLimitsInput,
+} from '@/lib/validation/company'
+import { seedChartOfAccounts } from '@/server/accounting/chart-of-accounts'
+import { seedDefaultOffice } from '@/server/accounting/default-office'
+import type { OrgContext } from '@/server/auth/context'
+import { wipeCompanyBooks } from '@/server/company-wipe'
+import { db } from '@/server/db'
+import { conflict, forbidden, notFound, precondition, validation } from '@/server/errors'
+import { createDefaultSequences } from '@/server/sequences'
+import { countSubCompanies } from '@/server/services/company-group.service'
+
+/**
+ * Start another company on this instance. The signed-in user becomes its owner.
+ * Books stay separate — each company has its own ledger, contacts, and stock.
+ * Optionally nest under a main company (max 2 subs).
+ */
+export async function createCompany(ctx: OrgContext, input: CreateCompanyInput) {
+  if (!ctx.isSystemOwner) {
+    throw forbidden('Only the system owner can add a company.')
+  }
+
+  const name = input.name.trim()
+  const taken = await db.organization.findFirst({
+    where: { name: { equals: name, mode: 'insensitive' } },
+    select: { id: true },
+  })
+  if (taken) throw conflict('A company with that name already exists.')
+
+  const parentOrgId = input.parentOrgId?.trim() || null
+  let parentName: string | null = null
+  if (parentOrgId) {
+    const parent = await db.organization.findUnique({
+      where: { id: parentOrgId },
+      select: { id: true, name: true, parentOrgId: true },
+    })
+    if (!parent) throw notFound('Main company')
+    if (parent.parentOrgId) {
+      throw validation('A sub-company cannot be a main. Choose a main company.')
+    }
+    const childCount = await countSubCompanies(parent.id)
+    if (childCount >= MAX_SUB_COMPANIES) {
+      throw precondition(
+        `A main company can have at most ${MAX_SUB_COMPANIES} sub-companies.`,
+      )
+    }
+    parentName = parent.name
+  }
+
+  const modules = modulesFromFormValues(input as Record<string, unknown>)
+
+  return db.$transaction(async (tx) => {
+    const trialEnds = new Date()
+    trialEnds.setUTCDate(trialEnds.getUTCDate() + 14)
+
+    const organization = await tx.organization.create({
+      data: {
+        name,
+        baseCurrency: input.baseCurrency,
+        fiscalYearStartMonth: input.fiscalYearStartMonth,
+        timeZone: ctx.organization.timeZone,
+        parentOrgId,
+        rentExpiresAt: trialEnds,
+        rentNote: 'Free trial',
+        featureFlags: featureFlagsWithModules(modules) as unknown as Prisma.InputJsonValue,
+        // Databases create already chose apps — do not force the wizard.
+        onboardingCompletedAt: new Date(),
+      },
+      select: { id: true, name: true, baseCurrency: true, parentOrgId: true },
+    })
+
+    await tx.membership.create({
+      data: {
+        orgId: organization.id,
+        userId: ctx.userId,
+        role: 'OWNER',
+        status: 'ACTIVE',
+        acceptedAt: new Date(),
+      },
+    })
+
+    // Main company OWNER/ADMIN staff can open the sub and see its work.
+    if (parentOrgId) {
+      const mainAdmins = await tx.membership.findMany({
+        where: {
+          orgId: parentOrgId,
+          status: 'ACTIVE',
+          role: { in: ['OWNER', 'ADMIN'] },
+          userId: { not: ctx.userId },
+        },
+        select: { userId: true, role: true, canConnect: true },
+      })
+      for (const admin of mainAdmins) {
+        await tx.membership.create({
+          data: {
+            orgId: organization.id,
+            userId: admin.userId,
+            role: admin.role === 'OWNER' ? 'ADMIN' : admin.role,
+            status: 'ACTIVE',
+            canConnect: true,
+            acceptedAt: new Date(),
+          },
+        })
+      }
+      // Creator can switch between main and subs.
+      await tx.membership.update({
+        where: { orgId_userId: { orgId: organization.id, userId: ctx.userId } },
+        data: { canConnect: true },
+      })
+      await tx.membership.updateMany({
+        where: {
+          orgId: parentOrgId,
+          userId: ctx.userId,
+          status: 'ACTIVE',
+        },
+        data: { canConnect: true },
+      })
+    }
+
+    await createDefaultSequences(tx, organization.id)
+
+    if (input.seedChart) {
+      await seedChartOfAccounts(tx, organization.id)
+    }
+    await seedDefaultOffice(tx, organization.id)
+
+    await tx.auditLog.create({
+      data: {
+        orgId: organization.id,
+        actorId: ctx.userId,
+        entity: 'Organization',
+        entityId: organization.id,
+        action: 'CREATE',
+        after: {
+          name: organization.name,
+          createdAsAdditionalCompany: true,
+          parentOrgId,
+          parentName,
+        },
+      },
+    })
+
+    return organization
+  })
+}
+
+/**
+ * Put an existing standalone company under a main (system owner).
+ * The company must not already have a parent or its own children.
+ */
+export async function attachSubCompany(ctx: OrgContext, input: AttachSubCompanyInput) {
+  if (!ctx.isSystemOwner) {
+    throw forbidden('Only the system owner can attach a sub-company.')
+  }
+  if (input.orgId === input.parentOrgId) {
+    throw validation('A company cannot be a sub of itself.')
+  }
+
+  const [org, parent] = await Promise.all([
+    db.organization.findUnique({
+      where: { id: input.orgId },
+      select: {
+        id: true,
+        name: true,
+        parentOrgId: true,
+        _count: { select: { children: true } },
+      },
+    }),
+    db.organization.findUnique({
+      where: { id: input.parentOrgId },
+      select: { id: true, name: true, parentOrgId: true },
+    }),
+  ])
+  if (!org) throw notFound('Company')
+  if (!parent) throw notFound('Main company')
+  if (org.parentOrgId) throw conflict('That company is already a sub-company.')
+  if (org._count.children > 0) {
+    throw precondition('A main company with sub-companies cannot become a sub.')
+  }
+  if (parent.parentOrgId) {
+    throw validation('A sub-company cannot be a main. Choose a main company.')
+  }
+
+  const childCount = await countSubCompanies(parent.id)
+  if (childCount >= MAX_SUB_COMPANIES) {
+    throw precondition(
+      `A main company can have at most ${MAX_SUB_COMPANIES} sub-companies.`,
+    )
+  }
+
+  const ownershipPercent = normalizeOwnershipPercent(input.ownershipPercent)
+
+  await db.$transaction(async (tx) => {
+    await tx.organization.update({
+      where: { id: org.id },
+      data: { parentOrgId: parent.id, ownershipPercent },
+    })
+
+    const mainAdmins = await tx.membership.findMany({
+      where: {
+        orgId: parent.id,
+        status: 'ACTIVE',
+        role: { in: ['OWNER', 'ADMIN'] },
+      },
+      select: { userId: true, role: true },
+    })
+    for (const admin of mainAdmins) {
+      await tx.membership.upsert({
+        where: { orgId_userId: { orgId: org.id, userId: admin.userId } },
+        create: {
+          orgId: org.id,
+          userId: admin.userId,
+          role: admin.role === 'OWNER' ? 'ADMIN' : admin.role,
+          status: 'ACTIVE',
+          canConnect: true,
+          acceptedAt: new Date(),
+        },
+        update: { status: 'ACTIVE', canConnect: true },
+      })
+    }
+
+    await tx.auditLog.create({
+      data: {
+        orgId: org.id,
+        actorId: ctx.userId,
+        entity: 'Organization',
+        entityId: org.id,
+        action: 'UPDATE',
+        after: {
+          parentOrgId: parent.id,
+          parentName: parent.name,
+          attachedAsSub: true,
+          ownershipPercent: ownershipPercent.toFixed(4),
+        },
+      },
+    })
+  })
+
+  return {
+    orgId: org.id,
+    name: org.name,
+    parentOrgId: parent.id,
+    parentName: parent.name,
+    ownershipPercent: ownershipPercent.toFixed(4),
+  }
+}
+
+/** Set parent ownership % of a sub-company (group main admin or system owner). */
+export async function setSubOwnershipPercent(
+  ctx: OrgContext,
+  input: { orgId: string; ownershipPercent: string },
+) {
+  const org = await db.organization.findUnique({
+    where: { id: input.orgId },
+    select: { id: true, name: true, parentOrgId: true },
+  })
+  if (!org) throw notFound('Company')
+  if (!org.parentOrgId) {
+    throw validation('Ownership percent applies only to sub-companies.')
+  }
+
+  if (!ctx.isSystemOwner) {
+    if (ctx.role !== 'OWNER' && ctx.role !== 'ADMIN') {
+      throw forbidden('Group admin required.')
+    }
+    const mainMembership = await db.membership.findUnique({
+      where: { orgId_userId: { orgId: org.parentOrgId, userId: ctx.userId } },
+      select: { role: true, status: true },
+    })
+    const ok =
+      mainMembership?.status === 'ACTIVE' &&
+      (mainMembership.role === 'OWNER' || mainMembership.role === 'ADMIN')
+    if (!ok) throw forbidden('Only a main-company admin can set ownership.')
+  }
+
+  const ownershipPercent = normalizeOwnershipPercent(input.ownershipPercent)
+  await db.organization.update({
+    where: { id: org.id },
+    data: { ownershipPercent },
+  })
+  return {
+    orgId: org.id,
+    name: org.name,
+    ownershipPercent: ownershipPercent.toFixed(4),
+  }
+}
+
+/**
+ * Permanently remove a company database and all cascaded books.
+ * Soft-delete → Trash for individual records is unchanged. System owner only;
+ * type the company name to confirm. Sub-companies must be deleted or detached first.
+ */
+export async function deleteCompany(
+  ctx: OrgContext,
+  input: DeleteCompanyInput,
+): Promise<{ deletedName: string; switchToOrgId: string | null }> {
+  if (!ctx.isSystemOwner) {
+    throw forbidden('Only the system owner can delete a company database.')
+  }
+
+  const organization = await db.organization.findUnique({
+    where: { id: input.orgId },
+    select: {
+      id: true,
+      name: true,
+      _count: { select: { children: true } },
+    },
+  })
+  if (!organization) throw notFound('Company')
+
+  const typed = input.confirmName.trim().toLowerCase()
+  if (typed !== organization.name.trim().toLowerCase()) {
+    throw validation('Type the company name exactly to confirm delete.', {
+      confirmName: ['Type the company name exactly to confirm delete.'],
+    })
+  }
+
+  if (organization._count.children > 0) {
+    throw precondition(
+      'This company still has sub-companies. Delete or detach them first.',
+    )
+  }
+
+  const otherMembership = await db.membership.findFirst({
+    where: {
+      userId: ctx.userId,
+      orgId: { not: organization.id },
+      status: 'ACTIVE',
+      role: { not: 'CUSTOMER' },
+    },
+    select: { orgId: true },
+    orderBy: { acceptedAt: 'desc' },
+  })
+
+  await db.$transaction(
+    async (tx) => {
+      await wipeCompanyBooks(tx, organization.id)
+      await tx.organization.delete({ where: { id: organization.id } })
+    },
+    { timeout: 120_000 },
+  )
+
+  return {
+    deletedName: organization.name,
+    switchToOrgId:
+      ctx.orgId === organization.id ? (otherMembership?.orgId ?? null) : null,
+  }
+}
+
+const LIMIT_SELECT = {
+  id: true,
+  name: true,
+  accessRestricted: true,
+  rentExpiresAt: true,
+  maxUsers: true,
+  rentNote: true,
+  featureFlags: true,
+} as const
+
+/**
+ * Set lock / rent end / max users / apps for a company database.
+ * Only the system owner manages these limits.
+ */
+export async function updateCompanyLimits(ctx: OrgContext, input: UpdateCompanyLimitsInput) {
+  if (!ctx.isSystemOwner) {
+    throw forbidden('Only the system owner can set company limits.')
+  }
+
+  const organization = await db.organization.findUnique({
+    where: { id: input.orgId },
+    select: LIMIT_SELECT,
+  })
+  if (!organization) throw notFound('Company')
+
+  const activeUsers = await db.membership.count({
+    where: { orgId: organization.id, status: 'ACTIVE' },
+  })
+  if (input.maxUsers != null && input.maxUsers < activeUsers) {
+    throw validation(
+      `This company already has ${activeUsers} users. Raise the limit or remove users first.`,
+    )
+  }
+
+  const current = parseFeatureFlags(organization.featureFlags)
+  const modules = modulesFromFormValues(input as Record<string, unknown>)
+  // Limits is the grant desk: what you tick becomes both granted and on.
+  const nextFlags = {
+    ...current,
+    grantedModules: modules,
+    modules,
+  }
+
+  const updated = await db.organization.update({
+    where: { id: organization.id },
+    data: {
+      accessRestricted: input.accessRestricted,
+      rentExpiresAt: input.rentExpiresAt ? new Date(input.rentExpiresAt) : null,
+      maxUsers: input.maxUsers,
+      rentNote: input.rentNote,
+      featureFlags: nextFlags as unknown as Prisma.InputJsonValue,
+    },
+    select: {
+      ...LIMIT_SELECT,
+      _count: { select: { memberships: { where: { status: 'ACTIVE' } } } },
+    },
+  })
+
+  const status = companyLimitStatus(updated)
+  return {
+    orgId: updated.id,
+    name: updated.name,
+    ...status,
+    activeUsers: updated._count.memberships,
+    modules: parseFeatureFlags(updated.featureFlags).modules,
+  }
+}
+
+/**
+ * Grant one catalog app to every company that does not already have it.
+ * System owner only. Turns the module on for those companies.
+ */
+export async function grantModuleToAllCompanies(
+  ctx: OrgContext,
+  input: GrantModuleToAllInput,
+) {
+  if (!ctx.isSystemOwner) {
+    throw forbidden('Only the system owner can grant an app to all companies.')
+  }
+
+  const moduleFlag = input.module as ModuleFlag
+  const label = MODULE_FLAG_LABELS[moduleFlag]?.label ?? moduleFlag
+
+  const organizations = await db.organization.findMany({
+    orderBy: { name: 'asc' },
+    select: { id: true, name: true, featureFlags: true },
+  })
+
+  const updated: { orgId: string; name: string }[] = []
+  const skipped: { orgId: string; name: string }[] = []
+
+  for (const org of organizations) {
+    const current = parseFeatureFlags(org.featureFlags)
+    const next = grantModuleOnFlags(current, moduleFlag)
+    if (!next.changed) {
+      skipped.push({ orgId: org.id, name: org.name })
+      continue
+    }
+    await db.organization.update({
+      where: { id: org.id },
+      data: { featureFlags: next.flags as unknown as Prisma.InputJsonValue },
+      select: { id: true },
+    })
+    updated.push({ orgId: org.id, name: org.name })
+  }
+
+  return {
+    module: moduleFlag,
+    label,
+    companyTotal: organizations.length,
+    updatedCount: updated.length,
+    skippedCount: skipped.length,
+    updated,
+    skipped,
+  }
+}
+
+/** Confirm the user may open this company, then the client updates the session. */
+export async function assertCanOpenCompany(ctx: OrgContext, orgId: string) {
+  if (ctx.isSystemOwner) {
+    const organization = await db.organization.findUnique({
+      where: { id: orgId },
+      select: { id: true, name: true },
+    })
+    if (!organization) throw notFound('Company')
+    return { orgId: organization.id, name: organization.name, role: 'OWNER' as const, membershipVersion: 0 }
+  }
+
+  if (!ctx.canConnect && orgId !== ctx.orgId) {
+    throw forbidden('Connect is only available to an admin who has been allowed to switch companies.')
+  }
+
+  const membership = await db.membership.findUnique({
+    where: { orgId_userId: { orgId, userId: ctx.userId } },
+    select: {
+      status: true,
+      role: true,
+      version: true,
+      organization: {
+        select: {
+          id: true,
+          name: true,
+          accessRestricted: true,
+          rentExpiresAt: true,
+          maxUsers: true,
+          rentNote: true,
+        },
+      },
+    },
+  })
+  if (!membership || membership.status !== 'ACTIVE') {
+    throw notFound('Company')
+  }
+  if (membership.organization.id !== orgId) throw forbidden()
+
+  const limits = companyLimitStatus(membership.organization)
+  if (limits.openBlocked) {
+    // OWNER/ADMIN may still open when only rent expired so they can reach /billing.
+    const billingRescue =
+      limits.rentExpired &&
+      !membership.organization.accessRestricted &&
+      (membership.role === 'OWNER' || membership.role === 'ADMIN')
+    if (!billingRescue) {
+      throw forbidden(limits.blockReason ?? 'This company cannot be opened right now.')
+    }
+  }
+
+  return {
+    orgId: membership.organization.id,
+    name: membership.organization.name,
+    role: membership.role,
+    membershipVersion: membership.version,
+  }
+}

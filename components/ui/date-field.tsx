@@ -4,9 +4,14 @@ import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { CalendarIcon } from 'lucide-react'
 
+import { floatingPanelZIndex } from '@/lib/dialog-stack'
 import { formatDate, isCalendarDate, type CalendarDate } from '@/lib/date'
+import { filterDateInput } from '@/lib/input-guards'
 import { cn } from '@/lib/utils'
 import { Calendar } from './calendar'
+
+const CALENDAR_MAX_PX = 380
+const VIEWPORT_PAD = 8
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/
 
@@ -33,6 +38,7 @@ export function DateField({
   min,
   max,
   className,
+  placeholder = 'Choose a date',
   'aria-invalid': invalid,
   'aria-describedby': describedBy,
 }: {
@@ -47,6 +53,7 @@ export function DateField({
   min?: string
   max?: string
   className?: string
+  placeholder?: string
   'aria-invalid'?: boolean
   'aria-describedby'?: string
 }) {
@@ -54,16 +61,28 @@ export function DateField({
   const [typed, setTyped] = React.useState<string | null>(null)
 
   const rootRef = React.useRef<HTMLDivElement>(null)
+  const hiddenRef = React.useRef<HTMLInputElement>(null)
   const panelRef = React.useRef<HTMLDivElement>(null)
-  const [anchor, setAnchor] = React.useState<{ top: number; left: number; above: boolean }>()
+  const [anchor, setAnchor] = React.useState<{
+    top: number
+    left: number
+    above: boolean
+    zIndex: number
+  }>()
 
   const place = React.useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect()
     if (!rect) return
 
-    const below = window.innerHeight - rect.bottom
-    const above = below < 340 && rect.top > below
-    setAnchor({ top: above ? rect.top - 4 : rect.bottom + 4, left: rect.left, above })
+    const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_PAD
+    const spaceAbove = rect.top - VIEWPORT_PAD
+    const above = spaceBelow < CALENDAR_MAX_PX && spaceAbove > spaceBelow
+    setAnchor({
+      top: above ? rect.top - 4 : rect.bottom + 4,
+      left: rect.left,
+      above,
+      zIndex: floatingPanelZIndex(),
+    })
   }, [])
 
   React.useEffect(() => {
@@ -122,16 +141,29 @@ export function DateField({
 
   function commit() {
     if (typed === null) return
-    const parsed = parse(typed)
+    const text = typed.trim()
     setTyped(null)
-    if (parsed && isCalendarDate(parsed) && !Number.isNaN(Date.parse(parsed))) onChange(parsed)
+    // Write the hidden field now. Apply is a click, and blur runs first — the
+    // submitted value has to be the date just typed, not the one still in React.
+    if (!text) {
+      if (hiddenRef.current) hiddenRef.current.value = ''
+      onChange('')
+      return
+    }
+    const parsed = parse(text)
+    if (parsed && isCalendarDate(parsed) && !Number.isNaN(Date.parse(parsed))) {
+      if (hiddenRef.current) hiddenRef.current.value = parsed
+      onChange(parsed)
+    }
   }
 
   const display = typed ?? (isCalendarDate(value) ? formatDate(value) : '')
 
   return (
     <div ref={rootRef} className={cn('relative', className)}>
-      {name ? <input type="hidden" name={name} value={value} required={required} /> : null}
+      {name ? (
+        <input ref={hiddenRef} type="hidden" name={name} value={value} required={required} />
+      ) : null}
 
       <div
         data-invalid={invalid ? 'true' : undefined}
@@ -150,7 +182,8 @@ export function DateField({
           aria-describedby={describedBy}
           aria-required={required}
           value={display}
-          onChange={(event) => setTyped(event.target.value)}
+          placeholder={placeholder}
+          onChange={(event) => setTyped(filterDateInput(event.target.value))}
           onBlur={commit}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
@@ -162,8 +195,7 @@ export function DateField({
               setOpen(false)
             }
           }}
-          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[0.8125rem] outline-none placeholder:text-muted-foreground"
-          placeholder="Choose a date"
+          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[0.8125rem] text-foreground outline-none placeholder:text-muted-foreground"
         />
 
         <button
@@ -187,8 +219,9 @@ export function DateField({
                 top: anchor.above ? undefined : anchor.top,
                 bottom: anchor.above ? window.innerHeight - anchor.top : undefined,
                 left: anchor.left,
+                zIndex: anchor.zIndex,
               }}
-              className="pointer-events-auto z-[60] rounded-md border bg-popover shadow-md animate-in fade-in-0 zoom-in-95"
+              className="pointer-events-auto overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-[0_8px_28px_-12px_rgba(15,23,42,0.28)] animate-in fade-in-0 zoom-in-95"
             >
               <Calendar
                 value={isCalendarDate(value) ? value : null}

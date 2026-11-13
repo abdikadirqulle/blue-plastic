@@ -2,9 +2,18 @@
 
 import * as React from 'react'
 import { createPortal } from 'react-dom'
+import type { AccountType } from '@prisma/client'
 import { CheckIcon, ChevronDownIcon, PlusIcon } from 'lucide-react'
 
+import { AccountTypeIcon } from '@/components/accounts/account-type-icon'
+import { floatingPanelZIndex } from '@/lib/dialog-stack'
+import { focusNextField, moveInLineGrid } from '@/lib/keyboard'
 import { cn } from '@/lib/utils'
+
+/** Tallest list we allow — matches former `max-h-72`. */
+const LIST_MAX_PX = 288
+const LIST_MIN_PX = 120
+const VIEWPORT_PAD = 8
 
 /**
  * A record picker that is a text box.
@@ -23,8 +32,8 @@ import { cn } from '@/lib/utils'
  * this application logic, not a generic widget. See ADR-0012.
  *
  * Keyboard behaviour is the point of it, so it is explicit: type to filter, ↑/↓
- * to move, Enter to choose, Escape to close and restore, Tab to leave,
- * Backspace on an empty box to clear the selection.
+ * to move, Enter to choose, Escape to close and restore, Tab to take the
+ * highlighted match and move on, Backspace on an empty box to clear the selection.
  */
 export type ComboboxOption = {
   value: string
@@ -33,6 +42,8 @@ export type ComboboxOption = {
   hint?: string
   disabled?: boolean
   group?: string
+  /** Chart-of-accounts type mark, when the option is an account. */
+  accountType?: AccountType
 }
 
 export type ComboboxProps = {
@@ -59,6 +70,24 @@ export type ComboboxProps = {
 }
 
 const normalise = (value: string) => value.toLowerCase().normalize('NFKD')
+
+/**
+ * A few letters should land on the name that starts with them. "ca" means Cash,
+ * not an account that merely contains those letters later on.
+ */
+function matchScore(option: ComboboxOption, needle: string): number {
+  const label = normalise(option.label)
+  const hint = option.hint ? normalise(option.hint) : ''
+  const parts = label.split(' — ')
+  const code = parts.length > 1 ? parts[0]! : ''
+  const name = parts.length > 1 ? parts.slice(1).join(' — ') : label
+  const words = name.split(/[\s/]+/)
+
+  if (label.startsWith(needle) || code.startsWith(needle) || name.startsWith(needle)) return 0
+  if (words.some((word) => word.startsWith(needle))) return 1
+  if (hint.startsWith(needle)) return 2
+  return 3
+}
 
 type Row = { kind: 'option'; option: ComboboxOption } | { kind: 'create' }
 
@@ -92,12 +121,21 @@ export function Combobox({
   const filtered = React.useMemo(() => {
     const needle = normalise(query.trim())
     if (!needle) return options
-    return options.filter(
-      (option) =>
-        normalise(option.label).includes(needle) ||
-        (option.hint ? normalise(option.hint).includes(needle) : false),
-    )
-  }, [options, query])
+    // Opening with the current choice still in the box must show every option —
+    // otherwise Deposit to / account pickers look locked to one bank.
+    if (selected && normalise(selected.label) === needle) return options
+    return options
+      .map((option, index) => ({ option, index }))
+      .filter(
+        ({ option }) =>
+          normalise(option.label).includes(needle) ||
+          (option.hint ? normalise(option.hint).includes(needle) : false),
+      )
+      .sort(
+        (a, b) => matchScore(a.option, needle) - matchScore(b.option, needle) || a.index - b.index,
+      )
+      .map(({ option }) => option)
+  }, [options, query, selected])
 
   const canCreate =
     Boolean(onCreate) &&
@@ -124,19 +162,31 @@ export function Combobox({
     left: number
     width: number
     above: boolean
+    maxHeight: number
+    zIndex: number
   }>()
 
   const place = React.useCallback(() => {
     const rect = rootRef.current?.getBoundingClientRect()
     if (!rect) return
 
-    const below = window.innerHeight - rect.bottom
-    const above = below < 280 && rect.top > below
+    const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_PAD
+    const spaceAbove = rect.top - VIEWPORT_PAD
+    // Prefer below; flip when the list would not fit and there is more room up.
+    const above = spaceBelow < LIST_MAX_PX && spaceAbove > spaceBelow
+    const available = above ? spaceAbove : spaceBelow
+    const maxHeight = Math.min(LIST_MAX_PX, Math.max(LIST_MIN_PX, available))
+    // The box on the form is often a narrow column (e.g. inside a dialog). The
+    // list must be wide enough for long customer names to wrap and read in full.
+    const width = Math.min(Math.max(rect.width, 520), window.innerWidth - 16)
+    const left = Math.min(rect.left, Math.max(8, window.innerWidth - width - 8))
     const next = {
       top: above ? rect.top - 4 : rect.bottom + 4,
-      left: rect.left,
-      width: rect.width,
+      left,
+      width,
       above,
+      maxHeight,
+      zIndex: floatingPanelZIndex(),
     }
 
     setAnchor((prev) =>
@@ -144,7 +194,9 @@ export function Combobox({
       prev.top === next.top &&
       prev.left === next.left &&
       prev.width === next.width &&
-      prev.above === next.above
+      prev.above === next.above &&
+      prev.maxHeight === next.maxHeight &&
+      prev.zIndex === next.zIndex
         ? prev
         : next,
     )
@@ -152,8 +204,38 @@ export function Combobox({
 
   function close(refocus = true) {
     setOpen(false)
+    // Always clear the search box. When a value is chosen the closed field shows
+    // the option label; when nothing is chosen an empty box must stay empty —
+    // leaving typed-but-unchosen text looks like a registered pick and has
+    // posted sales with no itemId (Uncategorised Income, no stock).
     setQuery('')
-    if (refocus) inputRef.current?.focus()
+    if (refocus) {
+      // Keep focus on this control after the list closes — never drop to <body>,
+      // or the next Tab starts again at the top of the form.
+      queueMicrotask(() => inputRef.current?.focus())
+    }
+  }
+
+  /** Accept a row, then move to the next field (Enter / Tab) or stay put (click). */
+  function choose(row: Row, advance: 0 | 1 | -1 = 0) {
+    if (row.kind === 'option') {
+      onChange(row.option.value)
+      setOpen(false)
+      setQuery('')
+      queueMicrotask(() => {
+        const input = inputRef.current
+        if (!input) return
+        if (advance !== 0) focusNextField(input, advance)
+        else input.focus()
+      })
+      return
+    }
+
+    if (!onCreate) return
+    const label = query.trim()
+    setOpen(false)
+    setQuery('')
+    onCreate(label)
   }
 
   React.useEffect(() => {
@@ -175,6 +257,7 @@ export function Combobox({
     }
 
     place()
+    inputRef.current?.focus()
     document.addEventListener('pointerdown', onPointerDown)
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('resize', place)
@@ -186,13 +269,28 @@ export function Combobox({
     }
   }, [open, place])
 
+  const needle = normalise(query.trim())
+  const showingAll =
+    !needle || (selected != null && normalise(selected.label) === needle)
+
   // Reset the highlight when the list changes, during render rather than in an
   // effect — an effect would paint the stale highlight once before correcting it.
   const listKey = `${open}|${query}`
   const [lastListKey, setLastListKey] = React.useState(listKey)
   if (listKey !== lastListKey) {
     setLastListKey(listKey)
-    setActive(0)
+    // Reopening a chosen name shows the whole list. Land on that row so the
+    // list does not jump back to the first name.
+    const selectedIndex = showingAll
+      ? rows.findIndex((row) => row.kind === 'option' && row.option.value === value)
+      : -1
+    if (selectedIndex >= 0) {
+      setActive(selectedIndex)
+    } else {
+      // The match is the default, not "Add …", so Tab takes the name they started.
+      const preferred = rows.findIndex((row) => row.kind === 'option')
+      setActive(preferred < 0 ? 0 : preferred)
+    }
   }
 
   const keyboardNav = React.useRef(false)
@@ -202,30 +300,56 @@ export function Combobox({
     listRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
   }, [active, open])
 
+  React.useLayoutEffect(() => {
+    if (!open || !value || !showingAll) return
+    listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [open, value, showingAll, rows.length])
+
   function openList() {
     if (disabled || open) return
-    setQuery('')
+    // Seed with the chosen name (or leave what they already typed). Never clear
+    // on focus — they delete characters themselves when they want a new search.
+    setQuery((current) => (current.trim() ? current : (selected?.label ?? '')))
     setOpen(true)
-  }
-
-  function choose(row: Row) {
-    if (row.kind === 'option') {
-      onChange(row.option.value)
-      close()
-      return
-    }
-
-    if (!onCreate) return
-    const label = query.trim()
-    close(false)
-    onCreate(label)
+    // Select the seeded label so the next keystroke replaces it and filters,
+    // while the full list stays visible until they type.
+    queueMicrotask(() => inputRef.current?.select())
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (!open) {
-      if (event.key === 'ArrowDown' || event.key === 'Enter') {
+      const vertical = event.key === 'ArrowDown' || event.key === 'ArrowUp'
+      const horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+      // Down still opens the list when nothing is chosen. Once a name is set,
+      // the arrows move between the line cells.
+      if (
+        (horizontal || (vertical && value)) &&
+        inputRef.current &&
+        (event.key === 'ArrowLeft' ||
+          event.key === 'ArrowRight' ||
+          event.key === 'ArrowUp' ||
+          event.key === 'ArrowDown') &&
+        moveInLineGrid(inputRef.current, event.key)
+      ) {
+        event.preventDefault()
+        return
+      }
+      if (event.key === 'ArrowDown') {
         event.preventDefault()
         openList()
+      } else if (event.key === 'Enter') {
+        // On a document line, Enter advances like a grid when a name is already set.
+        if (value && inputRef.current && focusNextField(inputRef.current, 1)) {
+          event.preventDefault()
+          return
+        }
+        event.preventDefault()
+        openList()
+      } else if (event.key === 'Backspace' && value && query === '') {
+        onChange(null)
+      } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        setQuery(event.key)
+        setOpen(true)
       }
       return
     }
@@ -241,12 +365,32 @@ export function Combobox({
     } else if (event.key === 'Enter') {
       event.preventDefault()
       const row = rows[active]
-      if (row) choose(row)
+      if (row) choose(row, 1)
     } else if (event.key === 'Escape') {
       event.preventDefault()
       close()
     } else if (event.key === 'Tab') {
-      close(false)
+      // Typed letters + Tab → take the highlighted match. Bare Tab through an
+      // already-chosen name keeps it. Always preventDefault so focus cannot fall
+      // to the document start when the list closes.
+      const direction: 1 | -1 = event.shiftKey ? -1 : 1
+      const needle = query.trim()
+      const highlighted = rows[active]
+      const choice =
+        highlighted?.kind === 'option'
+          ? highlighted
+          : rows.find((row) => row.kind === 'option')
+      if (needle && choice?.kind === 'option') {
+        event.preventDefault()
+        choose(choice, direction)
+        return
+      }
+      event.preventDefault()
+      setOpen(false)
+      setQuery('')
+      queueMicrotask(() => {
+        if (inputRef.current) focusNextField(inputRef.current, direction)
+      })
     } else if (event.key === 'Backspace' && query === '' && value) {
       // Backspacing an empty box clears the selection, which is what every other
       // text field does and what makes this one feel like one.
@@ -272,12 +416,19 @@ export function Combobox({
       <div
         data-invalid={aria['aria-invalid'] ? 'true' : undefined}
         className={cn(
-          'flex h-8 w-full items-center rounded-md border border-input bg-card transition-[color,box-shadow]',
+          'flex min-h-8 w-full items-stretch rounded-md border border-input bg-card transition-[color,box-shadow]',
           'focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25',
           'data-[invalid=true]:border-destructive data-[invalid=true]:ring-destructive/20',
           disabled && 'cursor-not-allowed opacity-50',
         )}
       >
+        {selected?.accountType && !open ? (
+          <span className="grid place-items-center pl-1.5">
+            <AccountTypeIcon type={selected.accountType} size="sm" />
+          </span>
+        ) : null}
+        {/* Always an input — swapping to a button after pick drops focus and
+            sends the next Tab back to the top of the form. */}
         <input
           ref={inputRef}
           id={id}
@@ -289,17 +440,20 @@ export function Combobox({
           aria-required={required}
           disabled={disabled}
           autoComplete="off"
-          // Open: what is being typed. Closed: what is chosen.
-          value={open ? query : (selected?.label ?? '')}
-          placeholder={open && selected ? selected.label : placeholder}
+          title={selected && !open ? selected.label : undefined}
+          value={open || !selected ? query : selected.label}
+          placeholder={placeholder}
           onChange={(event) => {
             if (!open) setOpen(true)
             setQuery(event.target.value)
+            // Typing over a chosen name starts a new search — clear the pick so
+            // the box shows what they type rather than snapping back to the label.
+            if (selected && event.target.value !== selected.label) onChange(null)
           }}
           onFocus={openList}
           onClick={openList}
           onKeyDown={onKeyDown}
-          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[0.8125rem] outline-none placeholder:text-muted-foreground"
+          className="h-8 min-w-0 flex-1 truncate bg-transparent px-2.5 text-[0.8125rem] outline-none placeholder:text-muted-foreground"
         />
 
         <button
@@ -318,15 +472,17 @@ export function Combobox({
         ? createPortal(
             <div
               ref={panelRef}
+              data-slot="combobox-panel"
               style={{
                 position: 'fixed',
                 top: anchor.above ? undefined : anchor.top,
                 bottom: anchor.above ? window.innerHeight - anchor.top : undefined,
                 left: anchor.left,
-                width: Math.max(anchor.width, 224),
+                width: anchor.width,
+                zIndex: anchor.zIndex,
               }}
               className={cn(
-                'pointer-events-auto z-[60] overflow-hidden rounded-md border bg-popover shadow-lg',
+                'pointer-events-auto overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-lg print:hidden',
                 'animate-in fade-in-0 zoom-in-95',
               )}
             >
@@ -334,7 +490,8 @@ export function Combobox({
                 ref={listRef}
                 id={`${id ?? name ?? 'combobox'}-list`}
                 role="listbox"
-                className="max-h-72 overflow-y-auto p-1"
+                style={{ maxHeight: anchor.maxHeight }}
+                className="overflow-y-auto p-1"
               >
                 {rows.length === 0 ? (
                   <p className="px-2 py-6 text-center text-sm text-muted-foreground">{emptyMessage}</p>
@@ -351,15 +508,17 @@ export function Combobox({
                         onPointerDown={(event) => {
                           event.preventDefault()
                           event.stopPropagation()
-                          choose(row)
+                          choose(row, 0)
                         }}
                         className={cn(
                           'flex w-full items-center gap-2 rounded-sm px-2 py-2 text-left text-sm font-medium text-primary',
                           index === active ? 'bg-accent' : '',
                         )}
                       >
-                        <PlusIcon className="size-4 shrink-0" />
-                        <span className="truncate">{createLabel(query.trim())}</span>
+                        <PlusIcon className="mt-0.5 size-4 shrink-0" />
+                        <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">
+                          {createLabel(query.trim())}
+                        </span>
                       </button>
                     )
                   }
@@ -384,25 +543,35 @@ export function Combobox({
                         onPointerDown={(event) => {
                           event.preventDefault()
                           event.stopPropagation()
-                          choose(row)
+                          choose(row, 0)
                         }}
                         className={cn(
-                          'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm',
+                          'flex w-full items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-popover-foreground',
                           index === active ? 'bg-accent text-accent-foreground' : '',
                         )}
                       >
                         <CheckIcon
                           className={cn(
-                            'size-4 shrink-0',
+                            'mt-0.5 size-4 shrink-0',
                             option.value === value ? 'opacity-100' : 'opacity-0',
                           )}
                         />
-                        <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                        {option.hint ? (
-                          <span className="shrink-0 text-xs tabular text-muted-foreground">
-                            {option.hint}
-                          </span>
+                        {option.accountType ? (
+                          <AccountTypeIcon type={option.accountType} size="sm" />
                         ) : null}
+                        <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">
+                          <span className="block whitespace-normal break-words">{option.label}</span>
+                          {option.hint ? (
+                            <span
+                              className={cn(
+                                'mt-0.5 block whitespace-normal break-words text-xs',
+                                index === active ? 'text-accent-foreground/80' : 'text-muted-foreground',
+                              )}
+                            >
+                              {option.hint}
+                            </span>
+                          ) : null}
+                        </span>
                       </button>
                     </React.Fragment>
                   )

@@ -1,12 +1,25 @@
 import 'server-only'
 import type { AccountType, Prisma } from '@prisma/client'
 
+import { isDebitNormalType } from '@/lib/accounting-labels'
+import {
+  ACCOUNT_NAME_CANNOT_STAND_ALONE,
+  accountNameClashAction,
+  type AccountNameParty,
+} from '@/lib/account-name'
 import type { AccountChoice } from '@/lib/account-options'
-import { Decimal, toMoneyString } from '@/lib/money'
+import { Decimal, ZERO, toMoneyString } from '@/lib/money'
 import { today } from '@/lib/date'
+import { linkColonParents, planColonHierarchyRepairs } from '@/lib/chart-tree'
+import { rollupParentBalances } from '@/lib/pos-till-ledger'
 import type { AccountCreateInput, AccountUpdateInput } from '@/lib/validation/accounting'
 import { balancesAsOf } from '@/server/accounting/balances'
-import { seedChartOfAccounts, systemAccountId } from '@/server/accounting/chart-of-accounts'
+import {
+  listedOnOriginalChart,
+  seedChartOfAccounts,
+  systemAccountId,
+} from '@/server/accounting/chart-of-accounts'
+import { OFFICE_NAME, seedDefaultOffice } from '@/server/accounting/default-office'
 import { seedPaymentTerms } from '@/server/services/tax.service'
 import { postJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
@@ -21,6 +34,7 @@ const ACCOUNT_SELECT = {
   description: true,
   type: true,
   subtype: true,
+  detailType: true,
   parentId: true,
   systemKey: true,
   isSystem: true,
@@ -44,7 +58,7 @@ export type AccountRow = Prisma.LedgerAccountGetPayload<{ select: typeof ACCOUNT
  */
 export async function list(
   ctx: OrgContext,
-  options: { includeInactive?: boolean; q?: string } = {},
+  options: { includeInactive?: boolean; q?: string; originalChart?: boolean } = {},
 ): Promise<AccountRow[]> {
   const accounts = await db.ledgerAccount.findMany({
     where: {
@@ -59,18 +73,23 @@ export async function list(
           }
         : {}),
     },
-    select: ACCOUNT_SELECT,
+    select: { ...ACCOUNT_SELECT, createdAt: true },
     orderBy: [{ type: 'asc' }, { code: 'asc' }],
   })
 
+  const chartAccounts = accounts.filter((account) => account.isSystem || account.name !== OFFICE_NAME)
   const balances = await balancesAsOf(ctx.orgId, today(ctx.organization.timeZone))
+  // Imported QBO charts often use "Parent:Child" names without parentId. Persist
+  // those links (and short child names) once so the tree stays clear forever.
+  const linked = await persistColonHierarchy(ctx.orgId, chartAccounts)
+  const visible = options.originalChart ? linked.filter((account) => listedOnOriginalChart(account)) : linked
   const childCount = new Map<string, number>()
-  for (const account of accounts) {
+  for (const account of visible) {
     if (account.parentId) childCount.set(account.parentId, (childCount.get(account.parentId) ?? 0) + 1)
   }
 
-  const byId = new Map(accounts.map((account) => [account.id, account]))
-  const depthOf = (account: (typeof accounts)[number]): number => {
+  const byId = new Map(visible.map((account) => [account.id, account]))
+  const depthOf = (account: (typeof visible)[number]): number => {
     let depth = 0
     let current = account.parentId
     while (current && depth < 8) {
@@ -80,9 +99,15 @@ export async function list(
     return depth
   }
 
-  return accounts.map((account) => ({
+  const withBalances = visible.map((account) => ({
     ...account,
-    balance: toMoneyString(balances.get(account.id)?.natural ?? 0, 2),
+    balance: new Decimal(balances.get(account.id)?.natural ?? 0),
+  }))
+  const rolled = rollupParentBalances(withBalances)
+
+  return withBalances.map(({ createdAt: _createdAt, ...account }) => ({
+    ...account,
+    balance: toMoneyString(rolled.get(account.id) ?? account.balance ?? ZERO, 2),
     hasChildren: (childCount.get(account.id) ?? 0) > 0,
     depth: depthOf(account),
   }))
@@ -110,6 +135,7 @@ export async function installDefaultChart(ctx: OrgContext) {
 
   return db.$transaction(async (tx) => {
     const result = await seedChartOfAccounts(tx, ctx.orgId)
+    await seedDefaultOffice(tx, ctx.orgId)
     // The standard terms come with the standard chart: nobody should have to
     // type "Net 30" before they can raise their first invoice.
     await seedPaymentTerms(tx, ctx.orgId)
@@ -143,6 +169,7 @@ export async function create(ctx: OrgContext, input: AccountCreateInput) {
     })
   }
 
+  await assertAccountNameAvailable(ctx, input.name)
   await assertParentIsUsable(ctx, input.parentId ?? null, input.type)
 
   return db.$transaction(async (tx) => {
@@ -154,6 +181,8 @@ export async function create(ctx: OrgContext, input: AccountCreateInput) {
         description: input.description ?? null,
         type: input.type,
         subtype: input.subtype,
+        detailType: input.detailType ?? null,
+        currencyCode: input.currencyCode ?? null,
         parentId: input.parentId ?? null,
       },
       select: ACCOUNT_SELECT,
@@ -221,6 +250,23 @@ export async function update(ctx: OrgContext, input: AccountUpdateInput) {
     }
   }
 
+  const nameChanged =
+    before.name.localeCompare(input.name, undefined, { sensitivity: 'accent' }) !== 0
+  await assertAccountNameAvailable(
+    ctx,
+    input.name,
+    {
+      id: before.id,
+      type: before.type,
+      isSystem: before.isSystem,
+      systemKey: before.systemKey,
+    },
+    // A name that did not change only blocks when this account can be merged
+    // into the one that already has it. The account that cannot be merged
+    // (a system account, a different type) can still be edited.
+    { unchanged: !nameChanged },
+  )
+
   if (input.parentId !== before.parentId) {
     await assertParentIsUsable(ctx, input.parentId ?? null, before.type, input.id)
   }
@@ -232,6 +278,8 @@ export async function update(ctx: OrgContext, input: AccountUpdateInput) {
         code: input.code,
         name: input.name,
         description: input.description ?? null,
+        detailType: input.detailType ?? null,
+        currencyCode: input.currencyCode ?? null,
         parentId: input.parentId ?? null,
       },
       select: ACCOUNT_SELECT,
@@ -310,6 +358,46 @@ export async function setActive(ctx: OrgContext, id: string, isActive: boolean) 
   })
 }
 
+/**
+ * Write durable parentId (+ short child name) for QBO-style `Parent:Child`
+ * rows that still only nest in memory. Idempotent — no-op when already linked.
+ */
+async function persistColonHierarchy<
+  T extends {
+    id: string
+    name: string
+    type: AccountType
+    parentId: string | null
+  },
+>(orgId: string, accounts: T[]): Promise<T[]> {
+  const repairs = planColonHierarchyRepairs(accounts)
+  if (repairs.length === 0) return linkColonParents(accounts)
+
+  await db.$transaction(
+    repairs.map((repair) =>
+      db.ledgerAccount.update({
+        where: { id: repair.id },
+        data: {
+          parentId: repair.parentId,
+          ...(repair.name ? { name: repair.name } : {}),
+        },
+      }),
+    ),
+  )
+
+  const byId = new Map(accounts.map((account) => [account.id, account]))
+  for (const repair of repairs) {
+    const row = byId.get(repair.id)
+    if (!row) continue
+    byId.set(repair.id, {
+      ...row,
+      parentId: repair.parentId,
+      ...(repair.name ? { name: repair.name } : {}),
+    })
+  }
+  return [...byId.values()]
+}
+
 /** Accounts that can actually receive a posting: active, and not a grouping heading. */
 export async function postableAccounts(ctx: OrgContext) {
   const accounts = await db.ledgerAccount.findMany({
@@ -320,8 +408,99 @@ export async function postableAccounts(ctx: OrgContext) {
     orderBy: [{ code: 'asc' }],
   })
 
-  const parents = new Set(accounts.map((a) => a.parentId).filter(Boolean) as string[])
-  return accounts.filter((account) => !parents.has(account.id))
+  // Persist any leftover QBO `Parent:Child` names so every type nests the same way.
+  const linked = await persistColonHierarchy(ctx.orgId, accounts)
+  const byId = new Map(linked.map((account) => [account.id, account]))
+  const parents = new Set(linked.map((a) => a.parentId).filter(Boolean) as string[])
+
+  return linked
+    .filter((account) => !parents.has(account.id))
+    .map((account) => ({
+      ...account,
+      parentName: account.parentId ? (byId.get(account.parentId)?.name ?? null) : null,
+    }))
+}
+
+/**
+ * Account names are unique on the chart. Giving an account a name that already
+ * exists either offers to merge into that account, or refuses the name when
+ * the two cannot be merged.
+ */
+async function assertAccountNameAvailable(
+  ctx: OrgContext,
+  name: string,
+  self?: AccountNameParty,
+  options?: { unchanged?: boolean },
+) {
+  const existing = await db.ledgerAccount.findFirst({
+    where: {
+      orgId: ctx.orgId,
+      name: { equals: name, mode: 'insensitive' },
+      ...(self ? { NOT: { id: self.id } } : {}),
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      type: true,
+      parentId: true,
+      isSystem: true,
+      systemKey: true,
+      isActive: true,
+    },
+  })
+  if (!existing) return
+
+  const mergingIntoDescendant = self
+    ? await accountSitsUnder(ctx.orgId, existing.parentId, self.id)
+    : false
+  const action = accountNameClashAction(
+    self ?? null,
+    {
+      id: existing.id,
+      type: existing.type,
+      isSystem: existing.isSystem,
+      systemKey: existing.systemKey,
+    },
+    mergingIntoDescendant,
+  )
+
+  if (options?.unchanged && action !== 'merge') return
+
+  const label = `${existing.code} ${existing.name}${existing.isActive ? '' : ' (inactive)'}`
+  if (action === 'merge') {
+    throw conflict(
+      `Another account is already called "${existing.name}". Merge into that one, or pick a different name.`,
+      {
+        clashId: [existing.id],
+        clashName: [label],
+        merge: ['true'],
+      },
+    )
+  }
+
+  throw validation(
+    `Another account is already called "${existing.name}" (${existing.code}). ${ACCOUNT_NAME_CANNOT_STAND_ALONE}`,
+    { name: [`Already used by ${label}. ${ACCOUNT_NAME_CANNOT_STAND_ALONE}`] },
+  )
+}
+
+/** True when `startParentId` walks up to `ancestorId`. */
+async function accountSitsUnder(orgId: string, startParentId: string | null, ancestorId: string) {
+  let parentId = startParentId
+  const seen = new Set<string>()
+  while (parentId) {
+    if (parentId === ancestorId) return true
+    if (seen.has(parentId)) return false
+    seen.add(parentId)
+    const parent = await db.ledgerAccount.findFirst({
+      where: { id: parentId, orgId },
+      select: { parentId: true },
+    })
+    if (!parent) return false
+    parentId = parent.parentId
+  }
+  return false
 }
 
 async function assertParentIsUsable(
@@ -367,7 +546,7 @@ async function assertParentIsUsable(
   }
 }
 
-const isDebitNormal = (type: AccountType) => type === 'ASSET' || type === 'EXPENSE'
+const isDebitNormal = isDebitNormalType
 
 /**
  * The chart as a picker offers it: every postable account, with its kind and —
@@ -395,6 +574,54 @@ export async function selectableAccounts(
     type: account.type,
     subtype: account.subtype,
     systemKey: account.systemKey,
+    parentId: account.parentId,
+    parentName: account.parentName,
     balance: balances ? toMoneyString(balances.get(account.id)?.natural ?? 0, 2) : null,
   }))
+}
+
+/**
+ * Bring a chart in from a spreadsheet.
+ *
+ * Columns: code, name, type, subtype, and optionally detail, description,
+ * openingBalance, openingBalanceDate. `type` is ASSET, LIABILITY, EQUITY,
+ * REVENUE, COGS or EXPENSE. `subtype` is the detail type the reports already group
+ * on, such as OPERATING_EXPENSE or INCOME. Each row is created through the
+ * same path as the New account dialog, including its opening balance journal.
+ */
+export async function importChart(ctx: OrgContext, csv: string) {
+  const { parseCsv, pick } = await import('@/lib/csv')
+  const { accountCreateSchema } = await import('@/lib/validation/accounting')
+  const { rows } = parseCsv(csv)
+  const issues: { row: number; message: string }[] = []
+  let created = 0
+
+  for (const [index, row] of rows.entries()) {
+    const subtype = (pick(row, 'subtype', 'detailType') || '').trim().toUpperCase().replace(/[\s-]+/g, '_')
+    const parsed = accountCreateSchema.safeParse({
+      code: pick(row, 'code', 'number', 'accountNumber'),
+      name: pick(row, 'name', 'account'),
+      type: (pick(row, 'type') || '').trim().toUpperCase(),
+      subtype,
+      detailType: pick(row, 'detail', 'furtherDetail'),
+      description: pick(row, 'description'),
+      openingBalance: pick(row, 'openingBalance', 'balance'),
+      openingBalanceDate: pick(row, 'openingBalanceDate', 'asAt', 'date'),
+    })
+    if (!parsed.success) {
+      issues.push({ row: index + 2, message: parsed.error.issues[0]?.message ?? 'Could not read this row' })
+      continue
+    }
+    try {
+      await create(ctx, parsed.data)
+      created += 1
+    } catch (error) {
+      issues.push({
+        row: index + 2,
+        message: error instanceof Error ? error.message : 'Could not create this account',
+      })
+    }
+  }
+
+  return { created, issues, total: rows.length }
 }

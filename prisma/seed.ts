@@ -24,6 +24,8 @@ const DEFAULT_PREFIX: Record<DocumentType, string> = {
   JOURNAL: 'JE-',
   INVOICE: 'INV-',
   ESTIMATE: 'EST-',
+  QUOTATION: 'QUO-',
+  SALES_ORDER: 'SO-',
   SALES_RECEIPT: 'SR-',
   CREDIT_MEMO: 'CM-',
   CUSTOMER_PAYMENT: 'PMT-',
@@ -33,9 +35,17 @@ const DEFAULT_PREFIX: Record<DocumentType, string> = {
   EXPENSE: 'EXP-',
   VENDOR_CREDIT: 'VC-',
   PURCHASE_ORDER: 'PO-',
+  PURCHASE_REQUEST: 'PR-',
+  RFQ: 'RFQ-',
   TRANSFER: 'TRF-',
   DEPOSIT: 'DEP-',
   INVENTORY_ADJUSTMENT: 'ADJ-',
+  STORE_TRANSFER: 'STX-',
+  STORE_TICKET: 'TKT-',
+  DELIVERY_NOTE: 'DN-',
+  ASSEMBLY_BUILD: 'BLD-',
+  WORK_ORDER: 'WO-',
+  PROJECT: 'PRJ-',
 }
 
 const connectionString = process.env.DIRECT_URL || process.env.DATABASE_URL
@@ -54,14 +64,14 @@ async function main() {
     return
   }
 
-  const orgName = process.env.SEED_ORG_NAME ?? 'Blue Plastic Center'
+  const orgName = process.env.SEED_ORG_NAME ?? 'Demo Company'
   const ownerEmail = (process.env.SEED_OWNER_EMAIL ?? 'owner@blueplasticcenter.test').toLowerCase()
   const ownerName = process.env.SEED_OWNER_NAME ?? 'Owner'
   const password = process.env.SEED_OWNER_PASSWORD
 
-  if (!password || password.length < 12) {
+  if (!password || password.length < 6) {
     throw new Error(
-      'Set SEED_OWNER_PASSWORD in .env to at least 12 characters before seeding.\n' +
+      'Set SEED_OWNER_PASSWORD in .env to at least 6 characters before seeding.\n' +
         'There is no default password: an accounting system should never ship with one.',
     )
   }
@@ -79,7 +89,14 @@ async function main() {
     })
 
     const user = await tx.user.create({
-      data: { email: ownerEmail, name: ownerName, passwordHash, emailVerified: new Date() },
+      data: {
+        email: ownerEmail,
+        name: ownerName,
+        passwordHash,
+        emailVerified: new Date(),
+        isSystemOwner: true,
+        homeOrgId: organization.id,
+      },
       select: { id: true, email: true },
     })
 

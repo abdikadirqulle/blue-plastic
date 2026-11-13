@@ -45,7 +45,13 @@ BEGIN
       RAISE EXCEPTION 'The income account does not belong to this organisation.'
         USING ERRCODE = 'foreign_key_violation';
     END IF;
-    IF v_type <> 'REVENUE' THEN
+    -- Discount may post to contra-income or to a dedicated expense account.
+    IF NEW.type = 'DISCOUNT' THEN
+      IF v_type NOT IN ('REVENUE', 'EXPENSE') THEN
+        RAISE EXCEPTION 'A discount account must be an income or expense account, not %.', lower(v_type)
+          USING ERRCODE = 'check_violation';
+      END IF;
+    ELSIF v_type <> 'REVENUE' THEN
       RAISE EXCEPTION 'An item''s income account must be an income account, not %.', lower(v_type)
         USING ERRCODE = 'check_violation';
     END IF;
@@ -58,8 +64,8 @@ BEGIN
       RAISE EXCEPTION 'The expense account does not belong to this organisation.'
         USING ERRCODE = 'foreign_key_violation';
     END IF;
-    IF v_type <> 'EXPENSE' THEN
-      RAISE EXCEPTION 'An item''s expense account must be an expense account, not %.', lower(v_type)
+    IF v_type NOT IN ('EXPENSE', 'COGS') THEN
+      RAISE EXCEPTION 'An item''s expense account must be an expense or cost of goods sold account, not %.', lower(v_type)
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;
@@ -67,8 +73,8 @@ BEGIN
   IF NEW."cogsAccountId" IS NOT NULL THEN
     SELECT type::text INTO v_type FROM ledger_accounts
       WHERE id = NEW."cogsAccountId" AND "orgId" = NEW."orgId";
-    IF v_type IS DISTINCT FROM 'EXPENSE' THEN
-      RAISE EXCEPTION 'The cost of goods sold account must be an expense account.'
+    IF v_type IS DISTINCT FROM 'COGS' THEN
+      RAISE EXCEPTION 'The cost of goods sold account must be a cost of goods sold account.'
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;
@@ -83,8 +89,8 @@ BEGIN
   END IF;
 
   -- A tracked item that cannot value its stock or its cost of sale is not a
-  -- tracked item.
-  IF NEW.type = 'INVENTORY' THEN
+  -- tracked item. Assemblies follow the same account rules as inventory parts.
+  IF NEW.type IN ('INVENTORY', 'INVENTORY_ASSEMBLY') THEN
     IF NEW."incomeAccountId" IS NULL OR NEW."inventoryAccountId" IS NULL OR NEW."cogsAccountId" IS NULL THEN
       RAISE EXCEPTION
         'A tracked inventory item needs an income account, an inventory account and a cost of goods sold account.'
@@ -94,7 +100,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_item_account_mapping ON items;
 CREATE TRIGGER trg_item_account_mapping

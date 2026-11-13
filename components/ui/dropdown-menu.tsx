@@ -2,6 +2,7 @@
 
 import * as DropdownMenuPrimitive from '@radix-ui/react-dropdown-menu'
 
+import { floatingPanelZIndex } from '@/lib/dialog-stack'
 import { cn } from '@/lib/utils'
 
 const DropdownMenu = DropdownMenuPrimitive.Root
@@ -12,6 +13,7 @@ const DropdownMenuPortal = DropdownMenuPrimitive.Portal
 function DropdownMenuContent({
   className,
   sideOffset = 4,
+  style,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
   return (
@@ -19,8 +21,10 @@ function DropdownMenuContent({
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
+        style={{ zIndex: floatingPanelZIndex(), ...style }}
         className={cn(
-          'z-50 min-w-[10rem] overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg',
+          /* max-h + scroll: long menus (e.g. Quick role) must not clip off-screen */
+          'max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-[10rem] overflow-x-hidden overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-lg print:hidden',
           'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
           className,
         )}
@@ -41,7 +45,7 @@ function DropdownMenuItem({
       data-variant={variant}
       className={cn(
         "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1 text-[0.8125rem] outline-none transition-colors",
-        'focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
+        'focus:bg-[var(--band)] focus:text-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
         "data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10",
         "[&_svg:not([class*='size-'])]:size-3.5 [&_svg]:shrink-0",
         className,

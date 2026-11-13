@@ -1,19 +1,23 @@
 import type { Metadata } from 'next'
-import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
 
+import { ApprovalTrailPanel } from '@/app/(app)/approvals/approval-trail-panel'
 import { PageHeader } from '@/components/data/page-header'
 import { DocumentForm } from '@/components/sales/document-form'
-import { buttonVariants } from '@/components/ui/button'
+import { SalesPaperFrame } from '@/components/sales/paper-width'
 import { toCalendarDate, today } from '@/lib/date'
-import { describeTerm } from '@/lib/payment-terms'
 import { bySlug } from '@/lib/sales-types'
 import { requireOrgContext } from '@/server/auth/context'
+import { loadFormCustomization } from '@/server/services/form-customization'
 import { loadFormOptions } from '@/server/services/sales-options'
 import * as salesService from '@/server/services/sales.service'
+import * as storeService from '@/server/services/store.service'
+import * as trackingCategories from '@/server/services/tracking-category.service'
 
 export const metadata: Metadata = { title: 'Edit document' }
+
+/** Form options + stock for a large catalogue exceed the default 10s hobby limit. */
+export const maxDuration = 60
 
 /**
  * Editing a posted document.
@@ -36,25 +40,26 @@ export default async function EditSalesDocumentPage({
   if (!config) notFound()
 
   const ctx = await requireOrgContext('invoice:update')
-  const [document, options] = await Promise.all([
+  const emptyShelf = {
+    stores: [] as Awaited<ReturnType<typeof storeService.quantities>>['stores'],
+    byItem: {} as Awaited<ReturnType<typeof storeService.quantities>>['byItem'],
+  }
+  const [document, options, neighbors, shelf, formCustomization, classes] = await Promise.all([
     salesService.get(ctx, id),
-    loadFormOptions(ctx),
+    loadFormOptions(ctx, { includeOnHand: false }),
+    salesService.neighbors(ctx, config.type, id),
+    storeService.quantities(ctx).catch(() => emptyShelf),
+    loadFormCustomization(ctx, 'sales', config.type),
+    trackingCategories.list(ctx),
   ])
 
   if (document.type !== config.type) notFound()
 
   return (
-    <>
-      <Link
-        href={`/sales/${config.slug}/${id}`}
-        className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}
-      >
-        <ArrowLeftIcon /> {config.singular} {document.number}
-      </Link>
-
+    <SalesPaperFrame type={config.type}>
       <PageHeader
         title={`Edit ${config.singular.toLowerCase()} ${document.number}`}
-        description="Saving reverses the original entry and posts a replacement. Both stay in the ledger."
+        className="mb-2 pb-2"
       />
 
       <DocumentForm
@@ -63,18 +68,35 @@ export default async function EditSalesDocumentPage({
         items={options.items}
         taxCodes={options.taxCodes}
         depositAccounts={options.depositAccounts}
-        terms={options.terms.map((term) => ({ id: term.id, label: `${term.name} — ${describeTerm(term)}` }))}
+        terms={options.terms.map((term) => ({
+          id: term.id,
+          label: term.name,
+          type: term.type,
+          dueDays: term.dueDays,
+        }))}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
+        organizationName={ctx.organization.name}
+        documentNumber={document.number}
         document={{
           id: document.id,
           customerId: document.customer.id,
           date: toCalendarDate(document.date),
           reference: document.reference,
+          inRef: document.inRef,
+          prescriptionRef: document.prescriptionRef,
           memo: document.memo,
           customerMessage: document.customerMessage,
+          workScope: document.workScope,
+          workSite: document.workSite,
           paymentTermId: document.paymentTerm?.id ?? null,
           depositAccountId: document.depositAccount?.id ?? null,
+          paymentMethod: document.paymentMethod,
+          projectId: document.projectId ?? null,
+          trackingCategoryId: document.trackingCategoryId ?? null,
+          discountAmount: document.discountAmount,
+          currencyCode: document.currencyCode,
+          exchangeRate: document.exchangeRate?.toString() ?? '1',
           lines: document.lines.map((line) => ({
             itemId: line.item?.id ?? null,
             description: line.description,
@@ -82,9 +104,20 @@ export default async function EditSalesDocumentPage({
             unitPrice: line.unitPrice.toString(),
             discountPercent: line.discountPercent?.toString() ?? null,
             taxCodeId: line.taxCode?.id ?? null,
+            storeId: line.storeId,
+            lotNumber: line.lotNumber,
+            serialNumber: line.serialNumber,
+            lotExpiryDate: line.lotExpiryDate,
           })),
         }}
+        projects={options.projects}
+        classes={classes.map((row) => ({ id: row.id, label: row.name }))}
+        neighbors={neighbors}
+        stores={shelf.stores}
+        stock={shelf.byItem}
+        formCustomization={formCustomization}
       />
-    </>
+      <ApprovalTrailPanel entityType="SALES_DOCUMENT" entityId={document.id} />
+    </SalesPaperFrame>
   )
 }

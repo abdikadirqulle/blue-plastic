@@ -1,39 +1,153 @@
 'use client'
 
 import { useActionState, useEffect, useMemo, useRef, useState } from 'react'
+
+import { usePropState } from '@/lib/use-prop-state'
 import { useRouter } from 'next/navigation'
-import { PlusIcon, Trash2Icon } from 'lucide-react'
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  LayoutTemplateIcon,
+  PlusIcon,
+  PrinterIcon,
+  SaveIcon,
+  SearchIcon,
+  Trash2Icon,
+} from 'lucide-react'
 import { toast } from 'sonner'
 
-import { idleState } from '@/components/forms/action-state'
+import { listBillableExpenses } from '@/app/(app)/sales/actions'
+import {
+  FromSourcePicker,
+  type AppliedSource,
+  type OpenSourceOption,
+} from '@/components/sales/from-source'
+import { idleState, type FormState } from '@/components/forms/action-state'
 import { AccountPicker } from '@/components/forms/account-picker'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
+import { FormCustomizePanel } from '@/components/forms/form-customize-panel'
+import { RecordNav } from '@/components/forms/record-nav'
+import { neighborHrefs } from '@/lib/record-nav'
+import { PartyInfo } from '@/components/forms/party-info'
+import { LockedNumber } from '@/components/forms/locked-number'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
+import { CustomerBalancePanel } from '@/components/sales/customer-balance-panel'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
 import { DateField } from '@/components/ui/date-field'
 import { Input } from '@/components/ui/input'
 import { NativeSelect } from '@/components/ui/native-select'
 import type { AccountPickerOption } from '@/lib/account-options'
+import { isFieldVisible, isColumnVisible, SALES_FORM_COLUMNS, SALES_FORM_FIELDS } from '@/lib/form-field-catalog'
+import type { FormCustomizationProps } from '@/lib/form-customization-props'
+import type { FormTemplate } from '@/lib/form-templates'
+import {
+  DEFAULT_INVOICE_FORM_TEMPLATE,
+  DEFAULT_SALES_FORM_TEMPLATE,
+  DEFAULT_SALES_RECEIPT_FORM_TEMPLATE,
+  INVOICE_FORM_TEMPLATES,
+  isInvoiceFormTemplateId,
+  isSalesFormTemplateId,
+  isSalesReceiptFormTemplateId,
+  PRINT_SHEET_SALES_TYPES,
+  SALES_FORM_TEMPLATES,
+  SALES_RECEIPT_FORM_TEMPLATES,
+  type InvoiceFormTemplateId,
+  type SalesFormTemplateId,
+  type SalesReceiptFormTemplateId,
+} from '@/lib/sales-form-templates'
+import { formatDate, isCalendarDate } from '@/lib/date'
+import { dueDateFor } from '@/lib/payment-terms'
 import { Decimal, formatMoney, parseMoneyInput, ZERO } from '@/lib/money'
-import type { SalesTypeConfig } from '@/lib/sales-types'
-import { saveDocumentForm } from '@/app/(app)/sales/actions'
+import { fixed2, resolveUnit } from '@/lib/quantity'
+import {
+  byType,
+  customerPaperTotalLabel,
+  defaultLineRows,
+  isProposal,
+  isSalesOrder,
+  PAYMENT_METHOD_LABELS,
+  type SalesTypeConfig,
+} from '@/lib/sales-types'
+import { cn } from '@/lib/utils'
+import { LineStore } from '@/components/inventory/line-store'
+import { StockWarningNote } from '@/components/inventory/stock-warning'
+import { SheetMarks } from '@/components/sales/sheet-marks'
+import { CUSTOMER_CREDIT, FORM_SHEET } from '@/lib/credit-brand'
+import {
+  negativeStockWarning,
+  officeStoreId,
+  type StockByStore,
+  type StockWarning,
+  type StoreChoice,
+} from '@/lib/store-stock'
+import { findSalesDocuments, saveDocumentForm } from '@/app/(app)/sales/actions'
 
 export type ItemOption = {
   id: string
   label: string
   price: string | null
+  /** Used when the customer is wholesale. Empty means the sales price still applies. */
+  wholesalePrice?: string | null
   description: string | null
   taxCodeId: string | null
-  /** SERVICE | NON_INVENTORY | INVENTORY — decides the picker heading. */
   type?: string
   group?: string
-  /** Stock on hand, for tracked items. Shown beside the name. */
   onHand?: string | null
+  sku?: string | null
+  /** Package barcode — searchable on invoice/receipt lines the same way as at the till. */
+  barcode?: string | null
+  /** Piece / meter / kg — shown next to qty everywhere. */
+  unitOfMeasure?: string | null
+  trackLots?: boolean
+  trackSerials?: boolean
+  pharmacyControlled?: boolean
+  /** GROUP members expanded onto the form when the group is chosen. */
+  components?: {
+    itemId: string
+    label: string
+    quantity: string
+    price: string | null
+    wholesalePrice?: string | null
+    description: string | null
+    taxCodeId: string | null
+    type?: string
+  }[]
 }
 export type Option = { id: string; label: string }
+export type CustomerOption = Option & {
+  email: string | null
+  paymentTermId: string | null
+  /** Prefer this currency on new sales when the document has none yet. */
+  currencyCode?: string | null
+  /** RETAIL charges the sales price. WHOLESALE charges wholesale when the item has one. */
+  priceLevel?: 'RETAIL' | 'WHOLESALE'
+  /** Open A/R balance before this document. Positive = customer owes. */
+  balance?: string | null
+  hint?: string
+  billingAddress: string
+  shippingAddress: string
+}
+export type TermOption = Option & {
+  type: 'DUE_ON_RECEIPT' | 'NET_DAYS' | 'DAY_OF_MONTH'
+  dueDays: number
+}
 export type TaxOption = Option & { rate: number; isInclusive: boolean }
 
 type Line = {
@@ -44,26 +158,81 @@ type Line = {
   unitPrice: string
   discountPercent: string
   taxCodeId: string
+  storeId: string
+  lotNumber: string
+  serialNumber: string
+  lotExpiryDate: string
+  sourcePurchaseLineId?: string
 }
 
-const empty = (key: number): Line => ({
+const empty = (key: number, storeId = ''): Line => ({
   key,
   itemId: '',
   description: '',
-  quantity: '1',
+  quantity: '',
   unitPrice: '',
   discountPercent: '',
   taxCodeId: '',
+  storeId,
+  lotNumber: '',
+  serialNumber: '',
+  lotExpiryDate: '',
 })
 
+function withMinimumLines(seeded: Line[], minimum: number, storeId: string): Line[] {
+  const rows = [...seeded]
+  let key = rows.reduce((max, line) => Math.max(max, line.key), 0)
+  while (rows.length < minimum) {
+    key += 1
+    rows.push(empty(key, storeId))
+  }
+  return rows
+}
+
+type DocumentSeed = {
+  id: string
+  customerId: string
+  date: string
+  reference: string | null
+  inRef?: string | null
+  memo: string | null
+  customerMessage: string | null
+  workScope?: string | null
+  workSite?: string | null
+  paymentTermId: string | null
+  depositAccountId: string | null
+  paymentMethod?: string | null
+  projectId?: string | null
+  trackingCategoryId?: string | null
+  discountAmount?: string | null
+  currencyCode?: string | null
+  exchangeRate?: string | null
+  prescriptionRef?: string | null
+  lines: {
+    itemId: string | null
+    description: string | null
+    quantity: string
+    unitPrice: string
+    discountPercent: string | null
+    taxCodeId: string | null
+    storeId?: string | null
+    lotNumber?: string | null
+    serialNumber?: string | null
+    lotExpiryDate?: string | null
+  }[]
+}
+
+type FormTemplateId = InvoiceFormTemplateId | SalesReceiptFormTemplateId
+
+function sharedLineDiscount(document: DocumentSeed | undefined): string {
+  const values = (document?.lines ?? []).map((line) => line.discountPercent).filter((value): value is string => Boolean(value))
+  if (values.length === 0 || values.some((value) => value !== values[0])) return ''
+  return values[0] ?? ''
+}
+
 /**
- * One form for every customer-facing document. The type decides the wording, the
- * fields shown and where the money goes — not the arithmetic, which is identical
- * for all of them.
- *
- * Totals are recomputed on the server before anything is written. What is shown
- * here is a preview using the same order of operations, so the number on screen
- * matches the number that posts.
+ * One form for every customer-facing document. The type decides the wording and
+ * where money goes; company form templates control which fields and columns show.
  */
 export function DocumentForm({
   config,
@@ -74,161 +243,648 @@ export function DocumentForm({
   terms,
   today,
   currency,
+  organizationName,
   document,
+  documentNumber,
+  initialCustomerId,
+  initialStoreId,
+  initialProjectId,
+  initialWorkSite,
+  projects = [],
+  classes = [],
+  neighbors,
+  stores = [],
+  stock = {},
+  openSources = [],
+  formCustomization,
 }: {
   config: SalesTypeConfig
-  customers: Option[]
+  customers: CustomerOption[]
   items: ItemOption[]
   taxCodes: TaxOption[]
   depositAccounts: AccountPickerOption[]
-  terms: Option[]
+  terms: TermOption[]
   today: string
   currency: string
-  document?: {
-    id: string
-    customerId: string
-    date: string
-    reference: string | null
-    memo: string | null
-    customerMessage: string | null
-    paymentTermId: string | null
-    depositAccountId: string | null
-    lines: {
-      itemId: string | null
-      description: string | null
-      quantity: string
-      unitPrice: string
-      discountPercent: string | null
-      taxCodeId: string | null
-    }[]
+  organizationName: string
+  /** The number this document has, or the next one if it has not been saved. */
+  documentNumber: string
+  document?: DocumentSeed
+  /** Set when the form was opened from a customer, so the sale starts on them. */
+  initialCustomerId?: string
+  /** Set when the form was opened from a store, so lines issue from that shelf. */
+  initialStoreId?: string
+  /** Set when the form was opened from a project job folder. */
+  initialProjectId?: string
+  /** Site on the linked project, used until the user types a work site. */
+  initialWorkSite?: string
+  /** Open jobs this sale can belong to. */
+  projects?: { id: string; label: string; customerId: string; siteLocation?: string | null }[]
+  /** Active classes. Hidden when the company has none. */
+  classes?: { id: string; label: string }[]
+  /** The saved document before this one, and the one after, in date then number order. */
+  neighbors?: {
+    previous: { id: string; number: string } | null
+    next: { id: string; number: string } | null
   }
+  /** Stores a line can be issued from. The office is the default. */
+  stores?: StoreChoice[]
+  /** Quantity of each tracked item in each store. */
+  stock?: StockByStore
+  /** Open estimates, quotations, and sales orders a new invoice or receipt can use. */
+  openSources?: OpenSourceOption[]
+  /** Company form field/column templates for this document type. */
+  formCustomization?: FormCustomizationProps
 }) {
+  const officeId = officeStoreId(stores)
+  const defaultStoreId =
+    initialStoreId && stores.some((store) => store.id === initialStoreId) ? initialStoreId : officeId
   const router = useRouter()
   const [state, formAction] = useActionState(saveDocumentForm, idleState)
+  // Invoice, quotation, sales receipt, credit, and refund share the print sheet —
+  // the same paper POS and the counter print. Layout skins stay available only
+  // when the type is not locked to that sheet.
+  const usesPrintSheet = (PRINT_SHEET_SALES_TYPES as readonly string[]).includes(config.type)
+  const usesInvoiceSheet =
+    config.type === 'INVOICE' || isProposal(config.type) || isSalesOrder(config.type)
+  const [draftTemplate, setDraftTemplate] = useState<FormTemplate | null>(null)
+  const [draftActiveId, setDraftActiveId] = useState<string | null>(null)
+  const activeForm =
+    draftTemplate && draftActiveId === formCustomization?.activeId
+      ? draftTemplate
+      : (formCustomization?.active ?? null)
+  const setFormDraft = (next: FormTemplate) => {
+    setDraftActiveId(formCustomization?.activeId ?? next.id)
+    setDraftTemplate(next)
+  }
+  const layoutFromCompany = activeForm?.layoutId
+  const template: FormTemplateId = (() => {
+    if (usesPrintSheet) return 'sheet'
+    if (layoutFromCompany) {
+      const known = usesInvoiceSheet
+        ? isInvoiceFormTemplateId(layoutFromCompany)
+        : config.type === 'SALES_RECEIPT'
+          ? isSalesReceiptFormTemplateId(layoutFromCompany)
+          : isSalesFormTemplateId(layoutFromCompany)
+      if (known) return layoutFromCompany as FormTemplateId
+    }
+    return usesInvoiceSheet
+      ? DEFAULT_INVOICE_FORM_TEMPLATE
+      : config.type === 'SALES_RECEIPT'
+        ? DEFAULT_SALES_RECEIPT_FORM_TEMPLATE
+        : DEFAULT_SALES_FORM_TEMPLATE
+  })()
+  const setTemplate = (next: FormTemplateId) => {
+    if (!activeForm) return
+    setDraftTemplate({ ...activeForm, layoutId: next })
+  }
+  const showField = (id: string) => isFieldVisible(activeForm?.fields, id)
+  const showColumn = (id: string) => isColumnVisible(activeForm?.columns, id)
+  const layoutOptions = usesPrintSheet
+    ? undefined
+    : usesInvoiceSheet
+      ? INVOICE_FORM_TEMPLATES
+      : config.type === 'SALES_RECEIPT'
+        ? SALES_RECEIPT_FORM_TEMPLATES
+        : SALES_FORM_TEMPLATES
+  const savedDiscount = Number(document?.discountAmount ?? 0)
+  const liftedPercent =
+    config.type === 'SALES_RECEIPT' && savedDiscount <= 0 ? sharedLineDiscount(document) : ''
+  const [discountKind, setDiscountKind] = useState<'amount' | 'percent'>(savedDiscount > 0 ? 'amount' : 'percent')
+  const [discountValue, setDiscountValue] = useState(savedDiscount > 0 ? savedDiscount.toFixed(2) : liftedPercent)
 
-  const [customerId, setCustomerId] = useState(document?.customerId ?? '')
+  const [number, setNumber] = usePropState(documentNumber)
+  const [customerId, setCustomerId] = useState(document?.customerId ?? initialCustomerId ?? '')
+  const [billableOpen, setBillableOpen] = useState(false)
+  const [billableLoading, setBillableLoading] = useState(false)
+  const [billableRows, setBillableRows] = useState<
+    {
+      lineId: string
+      description: string | null
+      amount: string
+      billableUnitPrice: string | null
+      documentNumber: string
+    }[]
+  >([])
+  const [projectId, setProjectId] = useState(document?.projectId ?? initialProjectId ?? '')
+  const [trackingCategoryId, setTrackingCategoryId] = useState(document?.trackingCategoryId ?? '')
   const [date, setDate] = useState(document?.date ?? today)
+  const [currencyCode, setCurrencyCode] = useState(document?.currencyCode ?? currency)
+  const [exchangeRate, setExchangeRate] = useState(document?.exchangeRate ?? '1')
+  const [acknowledgeCreditLimit, setAcknowledgeCreditLimit] = useState(false)
   const [reference, setReference] = useState(document?.reference ?? '')
+  const [inRef, setInRef] = useState(document?.inRef ?? '')
+  const [prescriptionRef, setPrescriptionRef] = useState(document?.prescriptionRef ?? '')
   const [memo, setMemo] = useState(document?.memo ?? '')
   const [customerMessage, setCustomerMessage] = useState(document?.customerMessage ?? '')
+  const [workScope, setWorkScope] = useState(document?.workScope ?? '')
+  const [workSite, setWorkSite] = useState(
+    document?.workSite ??
+      initialWorkSite ??
+      projects.find((row) => row.id === (document?.projectId ?? initialProjectId))?.siteLocation ??
+      '',
+  )
   const [paymentTermId, setPaymentTermId] = useState(document?.paymentTermId ?? '')
   const [depositAccountId, setDepositAccountId] = useState(
     document?.depositAccountId ?? depositAccounts[0]?.id ?? '',
   )
-  const [lines, setLines] = useState<Line[]>(
-    document?.lines.length
-      ? document.lines.map((line, index) => ({
-          key: index + 1,
-          itemId: line.itemId ?? '',
-          description: line.description ?? '',
-          quantity: line.quantity,
-          unitPrice: line.unitPrice,
-          discountPercent: line.discountPercent ?? '',
-          taxCodeId: line.taxCodeId ?? '',
-        }))
-      : [empty(1), empty(2)],
+  const [paymentMethod, setPaymentMethod] = useState(document?.paymentMethod ?? '')
+  /** Estimate / quotation / order the lines were brought from — closed on save. */
+  const [convertedFromId, setConvertedFromId] = useState<string | null>(null)
+  const [convertedFromLabel, setConvertedFromLabel] = useState<string | null>(null)
+  const minimumLines = defaultLineRows(config.type)
+  const [lines, setLines] = useState<Line[]>(() =>
+    withMinimumLines(
+      document?.lines.length
+        ? document.lines.map((line, index) => ({
+            key: index + 1,
+            itemId: line.itemId ?? '',
+            description: line.description ?? '',
+            quantity: fixed2(line.quantity),
+            unitPrice: fixed2(line.unitPrice),
+            discountPercent: liftedPercent ? '' : (line.discountPercent ?? ''),
+            taxCodeId: line.taxCodeId ?? '',
+            storeId: line.storeId ?? defaultStoreId,
+            lotNumber: line.lotNumber ?? '',
+            serialNumber: line.serialNumber ?? '',
+            lotExpiryDate: line.lotExpiryDate ?? '',
+          }))
+        : [],
+      minimumLines,
+      defaultStoreId,
+    ),
   )
-  const nextKey = useRef((document?.lines.length ?? 2) + 1)
+  const nextKey = useRef(Math.max(document?.lines.length ?? 0, minimumLines) + 1)
   const handled = useRef(false)
+  const afterSave = useRef<'close' | 'new'>('close')
+  /** Set in the button click; read when the form builds the payload on submit. */
+  const saveAsDraft = useRef(false)
+
+  /** Wipe typed fields back to a blank sheet (or the last saved document when editing). */
+  const resetForm = () => {
+    if (document) {
+      const restoredDiscount = Number(document.discountAmount ?? 0)
+      const restoredPercent =
+        config.type === 'SALES_RECEIPT' && restoredDiscount <= 0
+          ? sharedLineDiscount(document)
+          : ''
+      setNumber(documentNumber)
+      setCustomerId(document.customerId)
+      setProjectId(document.projectId ?? '')
+      setTrackingCategoryId(document.trackingCategoryId ?? '')
+      setDate(document.date)
+      setReference(document.reference ?? '')
+      setInRef(document.inRef ?? '')
+      setPrescriptionRef(document.prescriptionRef ?? '')
+      setMemo(document.memo ?? '')
+      setCustomerMessage(document.customerMessage ?? '')
+      setWorkScope(document.workScope ?? '')
+      setWorkSite(document.workSite ?? '')
+      setPaymentTermId(document.paymentTermId ?? '')
+      setDepositAccountId(document.depositAccountId ?? depositAccounts[0]?.id ?? '')
+      setPaymentMethod(document.paymentMethod ?? '')
+      setDiscountKind(restoredDiscount > 0 ? 'amount' : 'percent')
+      setDiscountValue(restoredDiscount > 0 ? restoredDiscount.toFixed(2) : restoredPercent)
+      setConvertedFromId(null)
+      setConvertedFromLabel(null)
+      setLines(
+        withMinimumLines(
+          document.lines.map((line, index) => ({
+            key: index + 1,
+            itemId: line.itemId ?? '',
+            description: line.description ?? '',
+            quantity: fixed2(line.quantity),
+            unitPrice: fixed2(line.unitPrice),
+            discountPercent: restoredPercent ? '' : (line.discountPercent ?? ''),
+            taxCodeId: line.taxCodeId ?? '',
+            storeId: line.storeId ?? defaultStoreId,
+            lotNumber: line.lotNumber ?? '',
+            serialNumber: line.serialNumber ?? '',
+            lotExpiryDate: line.lotExpiryDate ?? '',
+          })),
+          minimumLines,
+          defaultStoreId,
+        ),
+      )
+      nextKey.current = Math.max(document.lines.length, minimumLines) + 1
+      return
+    }
+    setCustomerId(initialCustomerId ?? '')
+    setProjectId(initialProjectId ?? '')
+    setDate(today)
+    setReference('')
+    setInRef('')
+    setPrescriptionRef('')
+    setMemo('')
+    setCustomerMessage('')
+    setWorkScope('')
+    setWorkSite(
+      initialWorkSite ??
+        projects.find((row) => row.id === (initialProjectId ?? ''))?.siteLocation ??
+        '',
+    )
+    setPaymentTermId('')
+    setDepositAccountId(depositAccounts[0]?.id ?? '')
+    setPaymentMethod('')
+    setDiscountKind('percent')
+    setDiscountValue('')
+    setConvertedFromId(null)
+    setConvertedFromLabel(null)
+    setLines(Array.from({ length: minimumLines }, (_, index) => empty(index + 1, defaultStoreId)))
+    nextKey.current = minimumLines + 1
+  }
+
+  // Start on the customer name so Tab walks the form without the mouse.
+  useEffect(() => {
+    if (customerId) return
+    const timer = window.setTimeout(() => window.document.getElementById('customerId')?.focus(), 0)
+    return () => window.clearTimeout(timer)
+  }, [customerId])
 
   useEffect(() => {
     if (state.status === 'success' && !handled.current) {
       handled.current = true
-      toast.success(state.message ?? 'Saved.')
-      router.push(`/sales/${config.slug}`)
+      toast.success(
+        saveAsDraft.current ? 'Saved as draft.' : (state.message ?? 'Saved.'),
+      )
+      if (afterSave.current === 'new' && !document?.id) {
+        setCustomerId(initialCustomerId ?? '')
+        setProjectId(initialProjectId ?? '')
+        setDate(today)
+        setReference('')
+        setInRef('')
+        setPrescriptionRef('')
+        setMemo('')
+        setCustomerMessage('')
+        setWorkScope('')
+        setWorkSite(
+          initialWorkSite ??
+            projects.find((row) => row.id === initialProjectId)?.siteLocation ??
+            '',
+        )
+        setPaymentTermId('')
+        setDepositAccountId(depositAccounts[0]?.id ?? '')
+        setPaymentMethod('')
+        setDiscountKind('percent')
+        setDiscountValue('')
+        setConvertedFromId(null)
+        setConvertedFromLabel(null)
+        setLines(Array.from({ length: minimumLines }, (_, index) => empty(index + 1, defaultStoreId)))
+        nextKey.current = minimumLines + 1
+        router.refresh()
+        return
+      }
+      router.push(
+        afterSave.current === 'new' ? `/sales/${config.slug}/new` : `/sales/${config.slug}`,
+      )
       router.refresh()
     }
     if (state.status !== 'success') handled.current = false
-  }, [state, router, config.slug])
+  }, [state, router, config.slug, document?.id, initialCustomerId, today, depositAccounts, minimumLines, defaultStoreId])
 
   const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
-
-  /**
-   * Tracked items are grouped and show what is on hand. A picker that hid them —
-   * as this one used to — made an inventory product impossible to sell.
-   */
-  const itemOptions = useMemo(
-    () =>
-      items.map((item) => ({
-        id: item.id,
-        label: item.label,
-        group: item.group,
-        hint: item.onHand != null ? `${item.onHand} on hand` : undefined,
-      })),
+  const discountItemIds = useMemo(
+    () => new Set(items.filter((item) => item.type === 'DISCOUNT').map((item) => item.id)),
     [items],
   )
-  const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
-
+  const paymentItemIds = useMemo(
+    () => new Set(items.filter((item) => item.type === 'PAYMENT').map((item) => item.id)),
+    [items],
+  )
+  const subtotalItemIds = useMemo(
+    () => new Set(items.filter((item) => item.type === 'SUBTOTAL').map((item) => item.id)),
+    [items],
+  )
+  const trackedIds = useMemo(
+    () => items.filter((item) => item.type === 'INVENTORY').map((item) => item.id),
+    [items],
+  )
+  const itemOptions = useMemo(
+    () =>
+      items.map((item) => {
+        const unit = resolveUnit(item.unitOfMeasure)
+        return {
+          id: item.id,
+          label: item.label,
+          group: item.group,
+          unitOfMeasure: item.unitOfMeasure ?? null,
+          trackLots: item.trackLots,
+          trackSerials: item.trackSerials,
+          pharmacyControlled: item.pharmacyControlled,
+          hint:
+            [
+              item.barcode,
+              item.sku,
+              item.onHand != null ? `${item.onHand} ${unit} on hand` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ') || undefined,
+        }
+      }),
+    [items],
+  )
   /**
-   * No tax codes set up means this business does not charge tax, so the column
-   * is not shown at all. An empty dropdown reading "No tax" on every line is a
-   * question the form is asking and already knows the answer to.
+   * Line key → amber note when this sale takes a store to or below zero. Uses the
+   * per-store stock already loaded for the store picker; no extra queries. Only
+   * invoices and sales receipts move stock. Earlier lines for the same item and
+   * store count first, and on edit this document's own saved lines are added
+   * back (they are already in the figures).
    */
+  const stockWarnings = useMemo(() => {
+    const out: Record<number, StockWarning> = {}
+    if (config.type !== 'INVOICE' && config.type !== 'SALES_RECEIPT') return out
+    const tracked = new Set(trackedIds)
+    const keyFor = (itemId: string, storeId: string | null | undefined) =>
+      `${itemId}|${stores.length > 0 ? storeId || officeId : ''}`
+    const ownSaved = new Map<string, number>()
+    if (document?.id) {
+      for (const saved of document.lines) {
+        if (!saved.itemId) continue
+        const key = keyFor(saved.itemId, saved.storeId)
+        ownSaved.set(key, (ownSaved.get(key) ?? 0) + (Number(saved.quantity) || 0))
+      }
+    }
+    const taken = new Map<string, number>()
+    for (const line of lines) {
+      if (!line.itemId || !tracked.has(line.itemId)) continue
+      const storeId = line.storeId || officeId
+      const key = keyFor(line.itemId, storeId)
+      const recorded =
+        stores.length > 0
+          ? Number(stock[line.itemId]?.[storeId] ?? '0')
+          : Number(itemById.get(line.itemId)?.onHand ?? Number.NaN)
+      const before = recorded + (ownSaved.get(key) ?? 0) - (taken.get(key) ?? 0)
+      const qty = Number(line.quantity)
+      const storeName = stores.find((store) => store.id === storeId)?.name ?? ''
+      const warning = negativeStockWarning(before, qty, storeName)
+      if (warning) out[line.key] = warning
+      if (Number.isFinite(qty) && qty > 0) taken.set(key, (taken.get(key) ?? 0) + qty)
+    }
+    return out
+  }, [config.type, trackedIds, stores, officeId, document, lines, stock, itemById])
+  const taxById = useMemo(() => new Map(taxCodes.map((code) => [code.id, code])), [taxCodes])
   const showTax = taxCodes.length > 0
 
-  /** Mirrors `server/accounting/sales-pricing.ts`: price, then discount, then tax. */
+  const offersDocumentDiscount =
+    config.type === 'INVOICE' || config.type === 'SALES_RECEIPT' || isSalesOrder(config.type)
+
   const totals = useMemo(() => {
-    let subtotal = ZERO
+    let netSubtotal = ZERO
     let tax = ZERO
 
     for (const line of lines) {
+      const itemType = itemById.get(line.itemId)?.type
+      // Subtotal is display-only — never part of the document math.
+      if (itemType === 'SUBTOTAL') continue
+
       const quantity = parseMoneyInput(line.quantity) ?? ZERO
       const price = parseMoneyInput(line.unitPrice) ?? ZERO
       if (quantity.isZero() && price.isZero()) continue
 
-      const gross = quantity.times(price).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-      const discountPercent = parseMoneyInput(line.discountPercent) ?? ZERO
-      const discount = gross.times(discountPercent).dividedBy(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-      const amount = gross.minus(discount)
+      const reduces = itemType === 'DISCOUNT' || itemType === 'PAYMENT'
+      const sign = reduces ? new Decimal(-1) : new Decimal(1)
+      const gross = quantity.times(price).times(sign).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+      const discountPercent = reduces ? ZERO : (parseMoneyInput(line.discountPercent) ?? ZERO)
+      const lineDiscount = gross.times(discountPercent).dividedBy(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+      const amount = gross.minus(lineDiscount)
 
-      const code = line.taxCodeId ? taxById.get(line.taxCodeId) : null
+      const code = itemType === 'PAYMENT' ? null : line.taxCodeId ? taxById.get(line.taxCodeId) : null
       if (!code) {
-        subtotal = subtotal.plus(amount)
+        netSubtotal = netSubtotal.plus(amount)
         continue
       }
 
       if (code.isInclusive) {
         const net = amount.dividedBy(new Decimal(1).plus(code.rate)).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-        subtotal = subtotal.plus(net)
+        netSubtotal = netSubtotal.plus(net)
         tax = tax.plus(amount.minus(net))
       } else {
-        subtotal = subtotal.plus(amount)
+        netSubtotal = netSubtotal.plus(amount)
         tax = tax.plus(amount.times(code.rate).toDecimalPlaces(2, Decimal.ROUND_HALF_UP))
       }
     }
 
-    return { subtotal, tax, total: subtotal.plus(tax) }
-  }, [lines, taxById])
+    const raw = parseMoneyInput(discountValue) ?? ZERO
+    let discount = ZERO
+    if (offersDocumentDiscount && raw.greaterThan(0) && netSubtotal.greaterThan(0)) {
+      discount =
+        discountKind === 'percent'
+          ? netSubtotal.times(Decimal.min(raw, new Decimal(100))).dividedBy(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+          : Decimal.min(raw, netSubtotal).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    }
+    const ratio = netSubtotal.isZero() ? ZERO : netSubtotal.minus(discount).dividedBy(netSubtotal)
+    const taxAfter = tax.times(ratio).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+
+    return {
+      subtotal: netSubtotal,
+      discount,
+      tax: taxAfter,
+      total: netSubtotal.minus(discount).plus(taxAfter),
+    }
+  }, [lines, taxById, itemById, offersDocumentDiscount, discountKind, discountValue])
+
+  /** Running sum shown on a SUBTOTAL line (items since the previous subtotal). */
+  const subtotalDisplayByKey = useMemo(() => {
+    const out: Record<number, string> = {}
+    let running = ZERO
+    for (const line of lines) {
+      const itemType = itemById.get(line.itemId)?.type
+      if (itemType === 'SUBTOTAL') {
+        out[line.key] = running.toFixed(2)
+        running = ZERO
+        continue
+      }
+      const quantity = parseMoneyInput(line.quantity) ?? ZERO
+      const price = parseMoneyInput(line.unitPrice) ?? ZERO
+      if (quantity.isZero() && price.isZero()) continue
+      const reduces = itemType === 'DISCOUNT' || itemType === 'PAYMENT'
+      const sign = reduces ? new Decimal(-1) : new Decimal(1)
+      const gross = quantity.times(price).times(sign).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+      const discountPercent = reduces ? ZERO : (parseMoneyInput(line.discountPercent) ?? ZERO)
+      const lineDiscount = gross.times(discountPercent).dividedBy(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+      running = running.plus(gross.minus(lineDiscount))
+    }
+    return out
+  }, [lines, itemById])
 
   const update = (key: number, patch: Partial<Line>) =>
     setLines((current) => current.map((line) => (line.key === key ? { ...line, ...patch } : line)))
 
-  /** Choosing an item fills in its price, description and default tax. */
-  const chooseItem = (key: number, itemId: string) => {
-    const item = itemId ? itemById.get(itemId) : null
-    update(key, {
-      itemId,
-      description: item?.description ?? '',
-      unitPrice: item?.price ?? '',
-      taxCodeId: item?.taxCodeId ?? '',
-    })
+  const priceFor = (
+    item: { price: string | null; wholesalePrice?: string | null; type?: string } | null | undefined,
+    level: 'RETAIL' | 'WHOLESALE' | undefined,
+  ) => {
+    if (item?.type === 'SUBTOTAL') return ''
+    if (level === 'WHOLESALE' && item?.wholesalePrice) return fixed2(item.wholesalePrice)
+    return fixed2(item?.price)
   }
 
-  const filled = lines.filter(
-    (line) => line.itemId || line.description || parseMoneyInput(line.unitPrice)?.greaterThan(0),
-  )
+  const chooseItem = (key: number, itemId: string) => {
+    const item = itemId ? itemById.get(itemId) : null
 
-  const payloadFor = (saveAsDraft: boolean) =>
+    // A GROUP is one priced kit line. Members move stock when the sale posts
+    // (Phase 11.13) — they are no longer exploded onto the form.
+    if (item?.type === 'GROUP' && (!item.components || item.components.length === 0)) {
+      toast.error(
+        `"${item.label}" has no items. Open the group and add members before using it on a sale.`,
+      )
+      return
+    }
+
+    setLines((current) =>
+      current.map((line) =>
+        line.key === key
+          ? {
+              ...line,
+              itemId,
+              description: item?.description ?? '',
+              unitPrice: priceFor(item, customers.find((row) => row.id === customerId)?.priceLevel),
+              taxCodeId: item?.type === 'SUBTOTAL' || item?.type === 'PAYMENT' ? '' : (item?.taxCodeId ?? ''),
+              quantity:
+                item?.type === 'SUBTOTAL'
+                  ? '1.00'
+                  : line.quantity.trim() === ''
+                    ? '1.00'
+                    : fixed2(line.quantity),
+            }
+          : line,
+      ),
+    )
+  }
+
+  const addLines = (count = 1) =>
+    setLines((current) => [
+      ...current,
+      ...Array.from({ length: count }, () => empty(nextKey.current++, defaultStoreId)),
+    ])
+  const addLine = () => addLines(1)
+  const openBillable = () => {
+    if (!customerId) {
+      toast.error('Choose a customer first.')
+      return
+    }
+    setBillableOpen(true)
+    setBillableLoading(true)
+    void listBillableExpenses({ customerId }).then((result) => {
+      setBillableLoading(false)
+      if (result.ok) setBillableRows(result.data)
+      else {
+        setBillableRows([])
+        toast.error(result.error.message)
+      }
+    })
+  }
+  const appendBillable = (row: (typeof billableRows)[number]) => {
+    setLines((current) => {
+      if (current.some((line) => line.sourcePurchaseLineId === row.lineId)) return current
+      return [
+        ...current,
+        {
+          key: nextKey.current++,
+          itemId: '',
+          description: row.description?.trim() || `Recharge ${row.documentNumber}`,
+          quantity: '1.00',
+          unitPrice: fixed2(row.billableUnitPrice ?? row.amount),
+          discountPercent: '',
+          taxCodeId: '',
+          storeId: defaultStoreId,
+          lotNumber: '',
+          serialNumber: '',
+          lotExpiryDate: '',
+          sourcePurchaseLineId: row.lineId,
+        },
+      ]
+    })
+  }
+  const clearLines = () => {
+    setLines(Array.from({ length: minimumLines }, (_, index) => empty(index + 1, defaultStoreId)))
+    nextKey.current = minimumLines + 1
+  }
+  const removeLine = (key: number) =>
+    setLines((current) => {
+      if (current.length <= minimumLines) {
+        return current.map((line) => (line.key === key ? empty(line.key, defaultStoreId) : line))
+      }
+      return current.filter((line) => line.key !== key)
+    })
+
+  // A rate alone is not a sale line — item or description must name what moved.
+  const filled = lines.filter((line) => Boolean(line.itemId || line.description.trim()))
+
+  const applyFromSource = (applied: AppliedSource) => {
+    const seeded = applied.lines.map((line, index) => ({
+      key: index + 1,
+      itemId: line.itemId,
+      description: line.description,
+      quantity: line.quantity,
+      unitPrice: line.unitPrice,
+      discountPercent: line.discountPercent,
+      taxCodeId: line.taxCodeId,
+      storeId: line.storeId || defaultStoreId,
+      lotNumber: line.lotNumber ?? '',
+      serialNumber: line.serialNumber ?? '',
+      lotExpiryDate: '',
+    }))
+    setLines(withMinimumLines(seeded, minimumLines, defaultStoreId))
+    nextKey.current = Math.max(seeded.length, minimumLines) + 1
+    setConvertedFromId(applied.sourceId)
+    setConvertedFromLabel(`${byType(applied.sourceType).singular} ${applied.sourceNumber}`)
+    if (applied.reference && !reference) setReference(applied.reference)
+    if (applied.inRef && !inRef) setInRef(applied.inRef)
+    if (applied.memo && !memo) setMemo(applied.memo)
+    if (applied.customerMessage && !customerMessage) setCustomerMessage(applied.customerMessage)
+    if (applied.workScope && !workScope) setWorkScope(applied.workScope)
+    if (applied.workSite && !workSite) setWorkSite(applied.workSite)
+    if (applied.paymentTermId) setPaymentTermId(applied.paymentTermId)
+  }
+
+  const changeCustomer = (id: string) => {
+    const previous = customers.find((row) => row.id === customerId)
+    const next = customers.find((row) => row.id === id)
+    setLines((current) =>
+      current.map((line) => {
+        if (!line.itemId || line.sourcePurchaseLineId) return line
+        const item = itemById.get(line.itemId)
+        const previousDefault = priceFor(item, previous?.priceLevel)
+        const stillDefault = line.unitPrice.trim() === '' || fixed2(line.unitPrice) === previousDefault
+        if (!stillDefault) return line
+        return { ...line, unitPrice: priceFor(item, next?.priceLevel) }
+      }),
+    )
+    setCustomerId(id)
+    if (next?.currencyCode) setCurrencyCode(next.currencyCode)
+    if (convertedFromId) {
+      setConvertedFromId(null)
+      setConvertedFromLabel(null)
+    }
+    if (projectId) {
+      const job = projects.find((row) => row.id === projectId)
+      if (job && job.customerId !== id) setProjectId('')
+    }
+  }
+
+  const payloadInput = useRef<HTMLInputElement>(null)
+  const payloadFor = (draft: boolean) =>
     JSON.stringify({
       ...(document?.id ? { id: document.id } : { type: config.type }),
+      number,
       customerId,
       date,
       reference,
+      inRef,
       memo,
       customerMessage,
+      workScope,
+      workSite,
       paymentTermId,
       depositAccountId: config.needsDeposit ? depositAccountId : '',
-      saveAsDraft,
+      paymentMethod:
+        config.type === 'SALES_RECEIPT' || config.type === 'REFUND_RECEIPT' ? paymentMethod : '',
+      projectId,
+      trackingCategoryId,
+      saveAsDraft: draft,
+      ...(convertedFromId && !document?.id ? { convertedFromId } : {}),
+      ...(offersDocumentDiscount ? { discountKind, discountValue } : {}),
       lines: filled.map((line) => ({
         itemId: line.itemId,
         description: line.description,
@@ -236,294 +892,2066 @@ export function DocumentForm({
         unitPrice: line.unitPrice,
         discountPercent: line.discountPercent,
         taxCodeId: line.taxCodeId,
+        storeId: line.storeId,
+        lotNumber: line.lotNumber,
+        serialNumber: line.serialNumber,
+        lotExpiryDate: line.lotExpiryDate,
+        sourcePurchaseLineId: line.sourcePurchaseLineId || '',
       })),
+      prescriptionRef,
     })
 
-  const [saveAsDraft, setSaveAsDraft] = useState(false)
-  const canSave = customerId !== '' && filled.length > 0 && totals.total.greaterThan(0)
+  // Payment items can bring amount due to zero (still a real sale — cash already taken).
+  const hasPaymentLine = filled.some((line) => paymentItemIds.has(line.itemId))
+  const canSave =
+    customerId !== '' &&
+    filled.length > 0 &&
+    !totals.total.isNegative() &&
+    (totals.total.greaterThan(0) || hasPaymentLine) &&
+    (!config.needsDeposit || depositAccountId !== '')
+  /** A draft can be unfinished — customer and at least one line are enough. */
+  const canDraft = customerId !== '' && filled.length > 0
+
+  const shared = {
+    config,
+    state,
+    customers,
+    itemOptions,
+    discountItemIds,
+    paymentItemIds,
+    subtotalItemIds,
+    subtotalDisplayByKey,
+    taxCodes,
+    depositAccounts,
+    terms,
+    today,
+    currency,
+    organizationName,
+    documentNumber,
+    number,
+    setNumber,
+    recordId: document?.id,
+    showTax,
+    customerId,
+    setCustomerId: changeCustomer,
+    projectId,
+    setProjectId: (id: string) => {
+      setProjectId(id)
+      if (!id) return
+      const site = projects.find((row) => row.id === id)?.siteLocation
+      if (site) setWorkSite((current) => current.trim() ? current : site)
+    },
+    projects,
+    trackingCategoryId,
+    setTrackingCategoryId,
+    classes,
+    date,
+    setDate,
+    currencyCode,
+    setCurrencyCode,
+    exchangeRate,
+    setExchangeRate,
+    acknowledgeCreditLimit,
+    setAcknowledgeCreditLimit,
+    reference,
+    setReference,
+    inRef,
+    setInRef,
+    prescriptionRef,
+    setPrescriptionRef,
+    memo,
+    setMemo,
+    customerMessage,
+    setCustomerMessage,
+    workScope,
+    setWorkScope,
+    workSite,
+    setWorkSite,
+    paymentTermId,
+    setPaymentTermId,
+    depositAccountId,
+    setDepositAccountId,
+    paymentMethod,
+    setPaymentMethod,
+    lines,
+    stores,
+    stock,
+    trackedIds,
+    stockWarnings,
+    update,
+    chooseItem,
+    addLine,
+    addLines,
+    clearLines,
+    removeLine,
+    totals,
+    discountKind,
+    setDiscountKind,
+    discountValue,
+    setDiscountValue,
+    openSources:
+      (config.type === 'INVOICE' || config.type === 'SALES_RECEIPT') && !document?.id
+        ? openSources
+        : [],
+    convertTarget:
+      config.type === 'SALES_RECEIPT' ? ('SALES_RECEIPT' as const) : ('INVOICE' as const),
+    convertedFromLabel,
+    applyFromSource,
+    showField,
+    showColumn,
+  }
 
   return (
-    <form action={formAction} className="space-y-4">
-      <input type="hidden" name="payload" value={payloadFor(saveAsDraft)} />
+    <form
+      action={formAction}
+      onSubmit={() => {
+        if (payloadInput.current) payloadInput.current.value = payloadFor(saveAsDraft.current)
+      }}
+      className="space-y-2"
+    >
+      <input ref={payloadInput} type="hidden" name="payload" defaultValue={payloadFor(false)} />
 
-      <Card>
-        <CardContent className="space-y-4 p-4">
-          <FormStatus state={state} />
-
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <Field name="customerId" label="Customer" required error={state.fieldErrors?.customerId}>
-              <EntityPicker
-                id="customerId"
-                kind="customer"
-                options={customers}
-                value={customerId || null}
-                onChange={(next) => setCustomerId(next ?? '')}
-                placeholder="Search or add a customer"
-                required
-                error={state.fieldErrors?.customerId}
-              />
-            </Field>
-
-            <Field name="date" label="Date" required error={state.fieldErrors?.date}>
-              <DateField
-                id="date"
-                value={date}
-                onChange={setDate}
-                today={today}
-                required
-                aria-invalid={state.fieldErrors?.date ? true : undefined}
-              />
-            </Field>
-
-            {config.type === 'INVOICE' ? (
-              <Field
-                name="paymentTermId"
-                label="Terms"
-                hint="Sets the due date from this document's own date."
-                error={state.fieldErrors?.paymentTermId}
-              >
-                <NativeSelect
-                  {...fieldProps('paymentTermId', state.fieldErrors?.paymentTermId, true)}
-                  value={paymentTermId}
-                  onChange={(event) => setPaymentTermId(event.target.value)}
-                >
-                  <option value="">Customer&rsquo;s default</option>
-                  {terms.map((term) => (
-                    <option key={term.id} value={term.id}>
-                      {term.label}
-                    </option>
-                  ))}
-                </NativeSelect>
-              </Field>
-            ) : null}
-
-            {config.needsDeposit ? (
-              <Field
-                name="depositAccountId"
-                label={config.type === 'REFUND_RECEIPT' ? 'Paid from' : 'Deposit to'}
-                required
-                error={state.fieldErrors?.depositAccountId}
-              >
-                <AccountPicker
-                  id="depositAccountId"
-                  options={depositAccounts}
-                  value={depositAccountId || null}
-                  onChange={(next) => setDepositAccountId(next ?? '')}
-                  required
-                  error={state.fieldErrors?.depositAccountId}
-                />
-              </Field>
-            ) : null}
-
-            <Field name="reference" label="Their reference" error={state.fieldErrors?.reference}>
-              <Input
-                {...fieldProps('reference', state.fieldErrors?.reference)}
-                value={reference}
-                onChange={(event) => setReference(event.target.value)}
-                placeholder="PO number"
-              />
-            </Field>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/*
-        A sales document has one kind of line: what was sold. There is no
-        category selector here on purpose — an invoice line's income account
-        comes from the product or service on it, so choosing an account as well
-        would be two ways of saying the same thing, and they would eventually
-        disagree. The purchase side is the mirror image: see bill-form.tsx.
-      */}
-      <Card className="overflow-hidden p-0">
-        <div className="panel-head">
-          <h2 className="text-sm font-semibold">Product and service details</h2>
-          <span className="text-xs text-muted-foreground">
-            Each line posts to the income account its item names.
-          </span>
+      {config.type === 'SALES_RECEIPT' ? (
+        <SalesReceiptToolbar
+          type={config.type}
+          slug={config.slug}
+          singular={config.singular}
+          recordId={document?.id}
+          neighbors={neighbors}
+          canSave={canSave}
+          onSave={() => {
+            afterSave.current = 'close'
+            saveAsDraft.current = false
+          }}
+        />
+      ) : (
+        <div className="flex flex-wrap items-center gap-1 print:hidden">
+          <RecordNav
+            {...neighborHrefs(`/sales/${config.slug}`, neighbors, document?.id)}
+          />
+          <DocumentFinder type={config.type} slug={config.slug} singular={config.singular} />
+          {config.type === 'INVOICE' ? (
+            <Button type="button" variant="outline" size="sm" onClick={openBillable}>
+              Add billable expenses
+            </Button>
+          ) : null}
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b">
-                <th className="w-56 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
-                  Product or service
-                </th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">Description</th>
-                <th className="w-24 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Qty</th>
-                <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Price</th>
-                <th className="w-20 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Disc %</th>
-                {showTax ? (
-                  <th className="w-40 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
-                    Tax
-                  </th>
-                ) : null}
-                <th className="w-28 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Amount</th>
-                <th className="w-10" />
-              </tr>
-            </thead>
-            <tbody>
-              {lines.map((line) => {
-                const quantity = parseMoneyInput(line.quantity) ?? ZERO
-                const price = parseMoneyInput(line.unitPrice) ?? ZERO
-                const gross = quantity.times(price).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-                const discount = gross
-                  .times(parseMoneyInput(line.discountPercent) ?? ZERO)
-                  .dividedBy(100)
-                  .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+      )}
 
+      <Dialog open={billableOpen} onOpenChange={setBillableOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Billable expenses</DialogTitle>
+            <DialogDescription>
+              Costs marked billable to this customer that are not on an invoice yet.
+            </DialogDescription>
+          </DialogHeader>
+          {billableLoading ? (
+            <p className="text-sm text-muted-foreground">Looking up costs…</p>
+          ) : billableRows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nothing waiting to be recharged.</p>
+          ) : (
+            <ul className="max-h-72 space-y-2 overflow-y-auto text-sm">
+              {billableRows.map((row) => {
+                const added = lines.some((line) => line.sourcePurchaseLineId === row.lineId)
                 return (
-                  <tr key={line.key} className="border-b last:border-0">
-                    <td className="px-2 py-1.5">
-                      <EntityPicker
-                        kind="item"
-                        options={itemOptions}
-                        value={line.itemId || null}
-                        onChange={(next) => chooseItem(line.key, next ?? '')}
-                        placeholder="Item"
-                        clearable
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Description"
-                        value={line.description}
-                        onChange={(event) => update(line.key, { description: event.target.value })}
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Quantity"
-                        inputMode="decimal"
-                        className="tabular text-right"
-                        value={line.quantity}
-                        onChange={(event) => update(line.key, { quantity: event.target.value })}
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Unit price"
-                        inputMode="decimal"
-                        className="tabular text-right"
-                        value={line.unitPrice}
-                        onChange={(event) => update(line.key, { unitPrice: event.target.value })}
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Discount percent"
-                        inputMode="decimal"
-                        className="tabular text-right"
-                        value={line.discountPercent}
-                        onChange={(event) => update(line.key, { discountPercent: event.target.value })}
-                      />
-                    </td>
-                    {showTax ? (
-                      <td className="px-2 py-1.5">
-                        <NativeSelect
-                          aria-label="Tax code"
-                          value={line.taxCodeId}
-                          onChange={(event) => update(line.key, { taxCodeId: event.target.value })}
-                          className="px-2"
-                        >
-                          <option value="">No tax</option>
-                          {taxCodes.map((code) => (
-                            <option key={code.id} value={code.id}>
-                              {code.label}
-                            </option>
-                          ))}
-                        </NativeSelect>
-                      </td>
-                    ) : null}
-                    <td className="tabular px-3 py-1.5 text-right">
-                      {formatMoney(gross.minus(discount), currency)}
-                    </td>
-                    <td className="px-1 py-1.5">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Remove line"
-                        disabled={lines.length <= 1}
-                        onClick={() => setLines((current) => current.filter((l) => l.key !== line.key))}
-                      >
-                        <Trash2Icon />
-                      </Button>
-                    </td>
-                  </tr>
+                  <li key={row.lineId} className="flex items-center justify-between gap-3">
+                    <span>
+                      <span className="font-medium">{row.documentNumber}</span>
+                      <span className="block text-muted-foreground">
+                        {row.description ?? 'Expense'} · {formatMoney(row.billableUnitPrice ?? row.amount, currency)}
+                      </span>
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      disabled={added}
+                      onClick={() => appendBillable(row)}
+                    >
+                      {added ? 'Added' : 'Add'}
+                    </Button>
+                  </li>
                 )
               })}
-            </tbody>
-          </table>
-        </div>
+            </ul>
+          )}
+        </DialogContent>
+      </Dialog>
 
-        <div className="flex flex-wrap items-start justify-between gap-4 border-t p-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setLines((current) => [...current, empty(nextKey.current++)])}
-          >
-            <PlusIcon /> Add line
-          </Button>
+      {formCustomization && activeForm ? (
+        <FormCustomizePanel
+          family={formCustomization.family}
+          templates={formCustomization.templates}
+          activeId={formCustomization.activeId}
+          draft={activeForm}
+          onDraftChange={setFormDraft}
+          fieldCatalog={SALES_FORM_FIELDS}
+          columnCatalog={SALES_FORM_COLUMNS}
+          canManage={formCustomization.canManage}
+          layoutOptions={layoutOptions}
+        />
+      ) : usesPrintSheet ? null : usesInvoiceSheet ? (
+        <TemplateMenu options={INVOICE_FORM_TEMPLATES} value={template} onChange={setTemplate} />
+      ) : config.type === 'SALES_RECEIPT' ? (
+        <TemplateMenu options={SALES_RECEIPT_FORM_TEMPLATES} value={template} onChange={setTemplate} />
+      ) : (
+        <TemplatePicker value={template as SalesFormTemplateId} onChange={setTemplate} />
+      )}
+      {usesPrintSheet || template === 'sheet' ? <SheetLayout {...shared} /> : null}
+      {!usesPrintSheet && template === 'invoice' ? <InvoiceLayout {...shared} /> : null}
+      {!usesPrintSheet && template === 'classic' ? <ClassicLayout {...shared} /> : null}
+      {!usesPrintSheet && template === 'service' ? <ServiceLayout {...shared} /> : null}
+      {!usesPrintSheet && template === 'modern' ? <ModernLayout {...shared} /> : null}
 
-          <dl className="min-w-52 space-y-1 text-sm">
-            <div className="flex justify-between gap-8">
-              <dt className="text-muted-foreground">Subtotal</dt>
-              <dd className="tabular">{formatMoney(totals.subtotal, currency)}</dd>
-            </div>
-            {showTax ? (
-              <div className="flex justify-between gap-8">
-                <dt className="text-muted-foreground">Tax</dt>
-                <dd className="tabular">{formatMoney(totals.tax, currency)}</dd>
-              </div>
-            ) : null}
-            <div className="flex justify-between gap-8 border-t pt-1 font-semibold">
-              <dt>Total</dt>
-              <dd className="tabular">{formatMoney(totals.total, currency)}</dd>
-            </div>
-          </dl>
-        </div>
-      </Card>
-
-      <Card>
-        <CardContent className="grid gap-4 p-4 sm:grid-cols-2">
-          <Field name="customerMessage" label="Message on the document" error={state.fieldErrors?.customerMessage}>
-            <Input
-              {...fieldProps('customerMessage', state.fieldErrors?.customerMessage)}
-              value={customerMessage}
-              onChange={(event) => setCustomerMessage(event.target.value)}
-              placeholder="Thank you for your business"
-            />
-          </Field>
-          <Field name="memo" label="Internal note" hint="Not shown to the customer." error={state.fieldErrors?.memo}>
-            <Input
-              {...fieldProps('memo', state.fieldErrors?.memo, true)}
-              value={memo}
-              onChange={(event) => setMemo(event.target.value)}
-            />
-          </Field>
-        </CardContent>
-      </Card>
-
-      <div className="flex flex-wrap items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2 print:hidden">
         <Button type="button" variant="outline" onClick={() => router.push(`/sales/${config.slug}`)}>
-          Cancel
+          Close
         </Button>
-        {config.posts ? (
-          <SubmitButton variant="outline" disabled={!canSave} onClick={() => setSaveAsDraft(true)}>
-            Save as draft
-          </SubmitButton>
-        ) : null}
-        <SubmitButton disabled={!canSave} onClick={() => setSaveAsDraft(false)} pendingLabel="Saving…">
-          {config.posts ? `Save and post` : `Save ${config.singular.toLowerCase()}`}
+        <Button type="button" variant="outline" onClick={resetForm}>
+          Reset
+        </Button>
+        <SubmitButton
+          variant="outline"
+          disabled={!canDraft}
+          pendingLabel="Saving draft…"
+          title="Save without posting — finish and post later from Drafts"
+          onClick={() => {
+            afterSave.current = 'close'
+            saveAsDraft.current = true
+          }}
+        >
+          Save as draft
+        </SubmitButton>
+        <SubmitButton
+          variant="outline"
+          disabled={!canSave}
+          pendingLabel="Saving…"
+          onClick={() => {
+            afterSave.current = 'close'
+            saveAsDraft.current = false
+          }}
+        >
+          Save and close
+        </SubmitButton>
+        <SubmitButton
+          disabled={!canSave}
+          pendingLabel="Saving…"
+          onClick={() => {
+            afterSave.current = 'new'
+            saveAsDraft.current = false
+          }}
+        >
+          Save and new
         </SubmitButton>
       </div>
 
-      {config.posts ? (
-        <p className="text-right text-xs text-muted-foreground">{config.effect}</p>
-      ) : (
-        <p className="text-right text-xs text-muted-foreground">{config.effect}</p>
-      )}
     </form>
+  )
+}
+
+function TemplateMenu({
+  options,
+  value,
+  onChange,
+}: {
+  options: readonly { id: string; label: string; blurb: string }[]
+  value: string
+  onChange: (next: FormTemplateId) => void
+}) {
+  const current = options.find((option) => option.id === value)
+
+  return (
+    <div className="flex justify-end print:hidden">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button type="button" variant="outline" size="sm">
+            <LayoutTemplateIcon />
+            {current?.label ?? 'Template'}
+            <ChevronDownIcon />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-72">
+          {options.map((option) => (
+            <DropdownMenuItem
+              key={option.id}
+              onSelect={() => onChange(option.id as FormTemplateId)}
+              className="items-start py-2"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">{option.label}</span>
+                <span className="block text-xs text-muted-foreground">{option.blurb}</span>
+              </span>
+              {option.id === value ? <CheckIcon className="mt-0.5" /> : null}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
+function TemplatePicker({
+  value,
+  onChange,
+}: {
+  value: SalesFormTemplateId
+  onChange: (next: SalesFormTemplateId) => void
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-200/80 bg-white/90 p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] print:hidden sm:p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <LayoutTemplateIcon className="size-4 text-primary" aria-hidden />
+        <div>
+          <p className="text-sm font-semibold text-slate-800">Form template</p>
+          <p className="text-xs text-slate-500">Change the layout — the numbers and posting stay the same.</p>
+        </div>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        {SALES_FORM_TEMPLATES.map((option) => {
+          const active = option.id === value
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onChange(option.id)}
+              className={cn(
+                'rounded-xl border px-3 py-3 text-left transition',
+                active
+                  ? 'border-primary bg-sky-50 ring-2 ring-primary/20'
+                  : 'border-slate-200 bg-slate-50/70 hover:border-slate-300 hover:bg-white',
+              )}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="text-sm font-semibold text-slate-800">{option.label}</span>
+                {active ? <CheckIcon className="size-4 text-primary" aria-hidden /> : null}
+              </span>
+              <span className="mt-1 block text-[0.7rem] leading-snug text-slate-500">{option.blurb}</span>
+              <TemplateThumb kind={option.id} active={active} />
+            </button>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function TemplateThumb({ kind, active }: { kind: SalesFormTemplateId; active: boolean }) {
+  return (
+    <span
+      className={cn(
+        'mt-3 block h-14 overflow-hidden rounded-lg border',
+        active ? 'border-primary/25 bg-white' : 'border-slate-200 bg-white',
+      )}
+      aria-hidden
+    >
+      {kind === 'classic' ? (
+        <span className="flex h-full flex-col gap-1 p-2">
+          <span className="h-2 w-full rounded bg-slate-200" />
+          <span className="h-2 w-[80%] rounded bg-slate-100" />
+          <span className="mt-auto grid grid-cols-4 gap-1">
+            <span className="h-1.5 rounded bg-slate-200" />
+            <span className="h-1.5 rounded bg-slate-200" />
+            <span className="h-1.5 rounded bg-slate-200" />
+            <span className="h-1.5 rounded bg-slate-200" />
+          </span>
+        </span>
+      ) : null}
+      {kind === 'service' ? (
+        <span className="flex h-full flex-col gap-1 p-2">
+          <span className="h-2 w-1/2 rounded bg-teal-200" />
+          <span className="h-3 w-full rounded bg-slate-100" />
+          <span className="h-3 w-full rounded bg-slate-100" />
+        </span>
+      ) : null}
+      {kind === 'modern' ? (
+        <span className="flex h-full flex-col">
+          <span className="h-4 bg-primary text-primary-foreground" />
+          <span className="flex flex-1 flex-col gap-1 p-2">
+            <span className="h-1.5 w-2/3 rounded bg-slate-200" />
+            <span className="h-1.5 w-full rounded bg-slate-100" />
+            <span className="h-1.5 w-full rounded bg-slate-100" />
+          </span>
+        </span>
+      ) : null}
+      {kind === 'sheet' ? (
+        <span className="relative flex h-full flex-col bg-white">
+          <span className="absolute left-0 top-0 h-5 w-7 bg-[#3DDC97]" />
+          <span className="absolute right-2 top-1.5 h-1 w-8 rounded bg-[#1B3A4B]" />
+          <span className="mx-2 mt-7 h-2 bg-[#1B3A4B]" />
+          <span className="mx-2 mt-1 h-1 rounded bg-slate-100" />
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+function ClassField({ props }: { props: LayoutProps }) {
+  if (props.classes.length === 0 && !props.trackingCategoryId) return null
+  return (
+    <Field name="trackingCategoryId" label="Class" error={props.state.fieldErrors?.trackingCategoryId}>
+      <EntityPicker
+        id="trackingCategoryId"
+        options={props.classes}
+        value={props.trackingCategoryId || null}
+        onChange={(next) => props.setTrackingCategoryId(next ?? '')}
+        placeholder="Optional class"
+        clearable
+        emptyMessage="No classes"
+        error={props.state.fieldErrors?.trackingCategoryId}
+      />
+    </Field>
+  )
+}
+
+function ProjectField({ props }: { props: LayoutProps }) {
+  if (!props.showField('project')) return null
+  if (props.projects.length === 0 && !props.projectId) return null
+  const options = props.projects.filter(
+    (row) => !props.customerId || row.customerId === props.customerId || row.id === props.projectId,
+  )
+  return (
+    <Field name="projectId" label="Project" error={props.state.fieldErrors?.projectId}>
+      <EntityPicker
+        id="projectId"
+        options={options}
+        value={props.projectId || null}
+        onChange={(next) => props.setProjectId(next ?? '')}
+        placeholder="Link a job"
+        clearable
+        emptyMessage="No projects for this customer"
+        error={props.state.fieldErrors?.projectId}
+      />
+    </Field>
+  )
+}
+
+type LayoutProps = {
+  config: SalesTypeConfig
+  state: FormState
+  customers: CustomerOption[]
+  itemOptions: {
+    id: string
+    label: string
+    group?: string
+    hint?: string
+    unitOfMeasure?: string | null
+    trackLots?: boolean
+    trackSerials?: boolean
+    pharmacyControlled?: boolean
+  }[]
+  /** Item ids whose type is Discount — line amount reduces the document. */
+  discountItemIds: Set<string>
+  paymentItemIds: Set<string>
+  subtotalItemIds: Set<string>
+  /** SUBTOTAL line key → running sum to show in Amount. */
+  subtotalDisplayByKey: Record<number, string>
+  taxCodes: TaxOption[]
+  depositAccounts: AccountPickerOption[]
+  terms: TermOption[]
+  today: string
+  currency: string
+  organizationName: string
+  documentNumber: string
+  number: string
+  setNumber: (value: string) => void
+  recordId?: string
+  showTax: boolean
+  customerId: string
+  setCustomerId: (value: string) => void
+  projectId: string
+  setProjectId: (value: string) => void
+  projects: { id: string; label: string; customerId: string; siteLocation?: string | null }[]
+  trackingCategoryId: string
+  setTrackingCategoryId: (value: string) => void
+  classes: { id: string; label: string }[]
+  date: string
+  setDate: (value: string) => void
+  currencyCode: string
+  setCurrencyCode: (value: string) => void
+  exchangeRate: string
+  setExchangeRate: (value: string) => void
+  acknowledgeCreditLimit: boolean
+  setAcknowledgeCreditLimit: (value: boolean) => void
+  reference: string
+  setReference: (value: string) => void
+  inRef: string
+  setInRef: (value: string) => void
+  prescriptionRef: string
+  setPrescriptionRef: (value: string) => void
+  memo: string
+  setMemo: (value: string) => void
+  customerMessage: string
+  setCustomerMessage: (value: string) => void
+  workScope: string
+  setWorkScope: (value: string) => void
+  workSite: string
+  setWorkSite: (value: string) => void
+  paymentTermId: string
+  setPaymentTermId: (value: string) => void
+  depositAccountId: string
+  setDepositAccountId: (value: string) => void
+  paymentMethod: string
+  setPaymentMethod: (value: string) => void
+  lines: Line[]
+  stores: StoreChoice[]
+  stock: StockByStore
+  trackedIds: string[]
+  /** Line key → negative-stock note (information only, never blocks). */
+  stockWarnings: Record<number, StockWarning>
+  update: (key: number, patch: Partial<Line>) => void
+  chooseItem: (key: number, itemId: string) => void
+  addLine: () => void
+  addLines: (count?: number) => void
+  clearLines: () => void
+  removeLine: (key: number) => void
+  totals: { subtotal: Decimal; discount: Decimal; tax: Decimal; total: Decimal }
+  discountKind: 'amount' | 'percent'
+  setDiscountKind: (value: 'amount' | 'percent') => void
+  discountValue: string
+  setDiscountValue: (value: string) => void
+  openSources: OpenSourceOption[]
+  convertTarget: 'INVOICE' | 'SALES_RECEIPT'
+  convertedFromLabel: string | null
+  applyFromSource: (applied: AppliedSource) => void
+  showField: (id: string) => boolean
+  showColumn: (id: string) => boolean
+}
+
+function HeaderFields({
+  props,
+  quantityLabel = 'Qty',
+}: {
+  props: LayoutProps
+  quantityLabel?: string
+}) {
+  void quantityLabel
+  const { config, state, customers, depositAccounts, terms, today } = props
+  const customer = customers.find((row) => row.id === props.customerId)
+  const termId = props.paymentTermId || customer?.paymentTermId || ''
+  const term = terms.find((row) => row.id === termId)
+  const due =
+    isCalendarDate(props.date)
+      ? dueDateFor(props.date, term ? { type: term.type, dueDays: term.dueDays } : null)
+      : props.date
+  const showDue =
+    config.type === 'INVOICE' ||
+    config.type === 'CREDIT_MEMO' ||
+    isProposal(config.type) ||
+    isSalesOrder(config.type)
+  const dueLabel = isProposal(config.type) || isSalesOrder(config.type) ? 'Valid until' : 'Due date'
+
+  return (
+    <div className="space-y-2.5">
+      {/* Odoo-style: Customer name first, then date / number / due / PO */}
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,1fr))]">
+        <Field name="customerId" label="Customer name" required error={state.fieldErrors?.customerId}>
+          <EntityPicker
+            id="customerId"
+            kind="customer"
+            options={customers}
+            value={props.customerId || null}
+            onChange={(next) => {
+              const id = next ?? ''
+              props.setCustomerId(id)
+              const chosen = customers.find((row) => row.id === id)
+              if (chosen?.paymentTermId) props.setPaymentTermId(chosen.paymentTermId)
+              if (chosen?.currencyCode) props.setCurrencyCode(chosen.currencyCode)
+            }}
+            placeholder="Search or add a customer"
+            required
+            error={state.fieldErrors?.customerId}
+          />
+        </Field>
+
+        <ProjectField props={props} />
+        <ClassField props={props} />
+
+        <Field name="date" label="Date" required error={state.fieldErrors?.date}>
+          <DateField
+            id="date"
+            value={props.date}
+            onChange={props.setDate}
+            today={today}
+            required
+            aria-invalid={state.fieldErrors?.date ? true : undefined}
+          />
+        </Field>
+
+        <LockedNumber
+          label={`${config.singular} no.`}
+          value={props.number}
+          onChange={props.setNumber}
+          error={state.fieldErrors?.number}
+          recordId={props.recordId}
+        />
+
+        <Field name="currencyCode" label="Currency" error={state.fieldErrors?.currencyCode}>
+          <Input
+            name="currencyCode"
+            value={props.currencyCode}
+            onChange={(event) => props.setCurrencyCode(event.target.value.toUpperCase())}
+            maxLength={3}
+            className="uppercase"
+            aria-invalid={state.fieldErrors?.currencyCode ? true : undefined}
+          />
+        </Field>
+        <Field
+          name="exchangeRate"
+          label="FX rate"
+          hint={`Base (${props.currency}) per 1 ${props.currencyCode || props.currency}. Use 1 when same currency.`}
+          error={state.fieldErrors?.exchangeRate}
+        >
+          <Input
+            name="exchangeRate"
+            value={props.exchangeRate}
+            onChange={(event) => props.setExchangeRate(event.target.value)}
+            inputMode="decimal"
+            className="tabular"
+            aria-invalid={state.fieldErrors?.exchangeRate ? true : undefined}
+          />
+        </Field>
+        <input
+          type="hidden"
+          name="acknowledgeCreditLimit"
+          value={props.acknowledgeCreditLimit ? 'true' : 'false'}
+        />
+        {state.fieldErrors?.acknowledgeCreditLimit ? (
+          <label className="col-span-full flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+            <input
+              type="checkbox"
+              checked={props.acknowledgeCreditLimit}
+              onChange={(event) => props.setAcknowledgeCreditLimit(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              {state.fieldErrors.acknowledgeCreditLimit[0] ??
+                'This invoice exceeds the credit limit. Tick to confirm and save again.'}
+            </span>
+          </label>
+        ) : null}
+
+        {showDue && props.showField('dueDate') ? (
+          <Field name="dueDate" label={dueLabel}>
+            <Input id="dueDate" value={isCalendarDate(due) ? formatDate(due) : ''} readOnly />
+          </Field>
+        ) : null}
+
+        {props.showField('inRef') ? (
+          <Field name="inRef" label="IN/" error={state.fieldErrors?.inRef}>
+            <Input
+              {...fieldProps('inRef', state.fieldErrors?.inRef)}
+              value={props.inRef}
+              onChange={(event) => props.setInRef(event.target.value)}
+              placeholder="GRN / IN/"
+            />
+          </Field>
+        ) : null}
+
+        {props.showField('reference') ? (
+          <Field name="reference" label="P.O. NO." error={state.fieldErrors?.reference}>
+            <Input
+              {...fieldProps('reference', state.fieldErrors?.reference)}
+              value={props.reference}
+              onChange={(event) => props.setReference(event.target.value)}
+              placeholder="P.O. number"
+            />
+          </Field>
+        ) : null}
+
+        <Field
+          name="prescriptionRef"
+          label="Rx / prescription"
+          error={state.fieldErrors?.prescriptionRef}
+        >
+          <Input
+            {...fieldProps('prescriptionRef', state.fieldErrors?.prescriptionRef)}
+            value={props.prescriptionRef}
+            onChange={(event) => props.setPrescriptionRef(event.target.value)}
+            placeholder="Optional"
+            maxLength={120}
+          />
+        </Field>
+      </div>
+
+      {(config.type === 'INVOICE' || config.needsDeposit) && (
+        <div className="flex flex-wrap items-end gap-2">
+          {config.type === 'INVOICE' && props.showField('paymentTerms') ? (
+            <Field
+              name="paymentTermId"
+              label="Terms"
+              error={state.fieldErrors?.paymentTermId}
+              className="w-full min-w-[10rem] sm:w-44"
+            >
+              <NativeSelect
+                {...fieldProps('paymentTermId', state.fieldErrors?.paymentTermId, true)}
+                value={props.paymentTermId}
+                onChange={(event) => props.setPaymentTermId(event.target.value)}
+              >
+                <option value="">Customer&rsquo;s default</option>
+                {terms.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    {row.label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          ) : null}
+
+          {(config.type === 'SALES_RECEIPT' || config.type === 'REFUND_RECEIPT') &&
+          props.showField('paymentMethod') ? (
+            <Field
+              name="paymentMethod"
+              label="Payment method"
+              error={state.fieldErrors?.paymentMethod}
+              className="w-full min-w-[10rem] sm:w-44"
+            >
+              <NativeSelect
+                {...fieldProps('paymentMethod', state.fieldErrors?.paymentMethod, true)}
+                value={props.paymentMethod}
+                onChange={(event) => props.setPaymentMethod(event.target.value)}
+              >
+                <option value="">Choose</option>
+                {Object.entries(PAYMENT_METHOD_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          ) : null}
+
+          {config.needsDeposit ? (
+            <Field
+              name="depositAccountId"
+              label={config.type === 'REFUND_RECEIPT' ? 'Paid from' : 'Deposit to'}
+              required
+              error={state.fieldErrors?.depositAccountId}
+              className="w-full min-w-[12rem] sm:w-56"
+            >
+              <AccountPicker
+                id="depositAccountId"
+                options={depositAccounts}
+                value={props.depositAccountId || null}
+                onChange={(next) => props.setDepositAccountId(next ?? '')}
+                required
+                error={state.fieldErrors?.depositAccountId}
+              />
+            </Field>
+          ) : null}
+        </div>
+      )}
+
+      {config.type === 'INVOICE' && props.showField('customerBalance') ? (
+        <CustomerBalancePanel
+          customerId={props.customerId || null}
+          currency={props.currency}
+          className="mt-4 rounded-md border border-border/70 bg-muted/20 p-3 sm:max-w-sm sm:ml-auto"
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function DiscountControl({ props }: { props: LayoutProps }) {
+  if (props.config.type !== 'INVOICE' && props.config.type !== 'SALES_RECEIPT') return null
+  if (!props.showField('documentDiscount')) return null
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      <span className="text-muted-foreground">Discount</span>
+      <span className="inline-flex overflow-hidden rounded-md border border-primary/30">
+        <button
+          type="button"
+          className={`px-2 py-1 text-xs ${props.discountKind === 'amount' ? 'bg-primary text-primary-foreground' : 'text-primary'}`}
+          onClick={() => props.setDiscountKind('amount')}
+        >
+          Amount
+        </button>
+        <button
+          type="button"
+          className={`px-2 py-1 text-xs ${props.discountKind === 'percent' ? 'bg-primary text-primary-foreground' : 'text-primary'}`}
+          onClick={() => props.setDiscountKind('percent')}
+        >
+          %
+        </button>
+      </span>
+      <Input
+        value={props.discountValue}
+        onChange={(event) => props.setDiscountValue(event.target.value)}
+        inputMode="decimal"
+        aria-label={props.discountKind === 'percent' ? 'Discount percent' : 'Discount amount'}
+        className="h-8 w-24 text-right tabular"
+        placeholder="0"
+      />
+      <span className="tabular text-sm">{formatMoney(props.totals.discount, props.currency)}</span>
+    </div>
+  )
+}
+
+function TotalsBlock({ props }: { props: LayoutProps }) {
+  return (
+    <dl className="min-w-64 space-y-1 text-sm">
+      <div className="flex justify-between gap-8">
+        <dt className="text-muted-foreground">Subtotal</dt>
+        <dd className="tabular">{formatMoney(props.totals.subtotal, props.currency)}</dd>
+      </div>
+      <div className="py-1">
+        <DiscountControl props={props} />
+      </div>
+      {props.showTax ? (
+        <div className="flex justify-between gap-8">
+          <dt className="text-muted-foreground">Tax</dt>
+          <dd className="tabular">{formatMoney(props.totals.tax, props.currency)}</dd>
+        </div>
+      ) : null}
+      <div className="flex justify-between gap-8 border-t pt-1 font-semibold">
+        <dt>Total</dt>
+        <dd className="tabular">{formatMoney(props.totals.total, props.currency)}</dd>
+      </div>
+    </dl>
+  )
+}
+
+function NotesFields({ props }: { props: LayoutProps }) {
+  const showWorkScope = isProposal(props.config.type)
+  const customerName =
+    props.customers.find((row) => row.id === props.customerId)?.label ?? ''
+  const showSite = showWorkScope && props.showField('workSite')
+  const showScope = showWorkScope && props.showField('workScope')
+  return (
+    <div className="grid gap-2">
+      {showSite || showScope ? (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {showSite ? (
+            <Field
+              name="workSite"
+              label="Work site"
+              hint="Magaca ama nooca goobta shaqada. Waxaa ka soo muuqda hoosta Sales person."
+              error={props.state.fieldErrors?.workSite}
+            >
+              <Input
+                {...fieldProps('workSite', props.state.fieldErrors?.workSite)}
+                value={props.workSite}
+                onChange={(event) => props.setWorkSite(event.target.value)}
+                placeholder="e.g. Alanley villa, Site A, Warehouse 2"
+              />
+            </Field>
+          ) : null}
+          {showScope ? (
+            <Field
+              name="workScope"
+              label="Work / job section"
+              hint="Nooca shaqada ama qaybta mashruuca. Waxaa lagu daabacaa quotation-ka magaca macmiilka."
+              error={props.state.fieldErrors?.workScope}
+            >
+              <Input
+                {...fieldProps('workScope', props.state.fieldErrors?.workScope)}
+                value={props.workScope}
+                onChange={(event) => props.setWorkScope(event.target.value)}
+                placeholder={
+                  customerName
+                    ? `e.g. Foundation works — ${customerName}`
+                    : 'e.g. Foundation works, Electrical, Phase 2'
+                }
+              />
+            </Field>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field name="customerMessage" label="Message" error={props.state.fieldErrors?.customerMessage}>
+          <Input
+            {...fieldProps('customerMessage', props.state.fieldErrors?.customerMessage)}
+            value={props.customerMessage}
+            onChange={(event) => props.setCustomerMessage(event.target.value)}
+            placeholder="Thank you for your business"
+          />
+        </Field>
+        <Field name="memo" label="Memo" error={props.state.fieldErrors?.memo}>
+          <Input
+            {...fieldProps('memo', props.state.fieldErrors?.memo)}
+            value={props.memo}
+            onChange={(event) => props.setMemo(event.target.value)}
+            placeholder="Internal note"
+          />
+        </Field>
+      </div>
+    </div>
+  )
+}
+
+function InvoiceLayout(props: LayoutProps) {
+  const { state, customers, terms, today } = props
+  const customer = customers.find((row) => row.id === props.customerId)
+  const termId = props.paymentTermId || customer?.paymentTermId || ''
+  const term = terms.find((row) => row.id === termId)
+  const due =
+    isCalendarDate(props.date)
+      ? dueDateFor(props.date, term ? { type: term.type, dueDays: term.dueDays } : null)
+      : props.date
+
+  return (
+    <Card className="overflow-hidden bg-white p-0">
+      <CardContent className="space-y-3 p-3 sm:p-4">
+        <FormStatus state={state} />
+
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <PartyInfo>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Field name="customerId" label="Customer" required error={state.fieldErrors?.customerId}>
+                <EntityPicker
+                  id="customerId"
+                  kind="customer"
+                  options={customers}
+                  value={props.customerId || null}
+                  onChange={(next) => {
+                    const id = next ?? ''
+                    props.setCustomerId(id)
+                    const chosen = customers.find((row) => row.id === id)
+                    props.setPaymentTermId(chosen?.paymentTermId ?? '')
+                  }}
+                  placeholder="Choose a customer"
+                  required
+                  error={state.fieldErrors?.customerId}
+                />
+              </Field>
+              <Field name="customerEmail" label="Email">
+                <Input id="customerEmail" value={customer?.email ?? ''} readOnly placeholder="No email on this customer" />
+              </Field>
+              <ProjectField props={props} />
+              <ClassField props={props} />
+            </div>
+            {props.showField('addresses') &&
+            (customer?.billingAddress || customer?.shippingAddress) ? (
+              <div className="grid gap-2 md:grid-cols-2">
+                <AddressBox label="Billing address" value={customer?.billingAddress ?? ''} empty="No billing address" />
+                <AddressBox label="Shipping address" value={customer?.shippingAddress ?? ''} empty="No shipping address" />
+              </div>
+            ) : null}
+          </PartyInfo>
+          <div className="text-right">
+            <p className="text-[0.6875rem] font-semibold uppercase tracking-wider text-muted-foreground">
+              {customerPaperTotalLabel(props.config.type, props.config.needsDeposit)}
+            </p>
+            <p className="text-xl font-semibold tabular text-primary">{formatMoney(props.totals.total, props.currency)}</p>
+          </div>
+        </div>
+
+        {(props.config.type === 'INVOICE' || props.config.type === 'SALES_RECEIPT') &&
+        !props.recordId ? (
+          <FromSourcePicker
+            customerId={props.customerId}
+            sources={props.openSources}
+            today={today}
+            currency={props.currency}
+            target={props.convertTarget}
+            onApply={props.applyFromSource}
+          />
+        ) : null}
+        {props.convertedFromLabel && !props.recordId ? (
+          <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
+            Lines from{' '}
+            <span className="font-medium text-foreground">{props.convertedFromLabel}</span>. That
+            document closes when you save this one.
+          </p>
+        ) : null}
+
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <Field name="date" label="Date" required error={state.fieldErrors?.date}>
+            <DateField
+              id="date"
+              value={props.date}
+              onChange={props.setDate}
+              today={today}
+              required
+              aria-invalid={state.fieldErrors?.date ? true : undefined}
+            />
+          </Field>
+          <LockedNumber
+            label={`${props.config.singular} no.`}
+            value={props.number}
+            onChange={props.setNumber}
+            error={state.fieldErrors?.number}
+            recordId={props.recordId}
+          />
+          <Field name="currencyCode" label="Currency" error={state.fieldErrors?.currencyCode}>
+            <Input
+              name="currencyCode"
+              value={props.currencyCode}
+              onChange={(event) => props.setCurrencyCode(event.target.value.toUpperCase())}
+              maxLength={3}
+              className="uppercase"
+            />
+          </Field>
+          <Field name="exchangeRate" label="FX rate" error={state.fieldErrors?.exchangeRate}>
+            <Input
+              name="exchangeRate"
+              value={props.exchangeRate}
+              onChange={(event) => props.setExchangeRate(event.target.value)}
+              inputMode="decimal"
+              className="tabular"
+            />
+          </Field>
+          <input
+            type="hidden"
+            name="acknowledgeCreditLimit"
+            value={props.acknowledgeCreditLimit ? 'true' : 'false'}
+          />
+          {state.fieldErrors?.acknowledgeCreditLimit ? (
+            <label className="col-span-full flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+              <input
+                type="checkbox"
+                checked={props.acknowledgeCreditLimit}
+                onChange={(event) => props.setAcknowledgeCreditLimit(event.target.checked)}
+                className="mt-0.5"
+              />
+              <span>{state.fieldErrors.acknowledgeCreditLimit[0]}</span>
+            </label>
+          ) : null}
+          {props.config.needsDeposit || !props.showField('dueDate') ? null : (
+            <Field
+              name="dueDate"
+              label={
+                isProposal(props.config.type) || isSalesOrder(props.config.type)
+                  ? 'Valid until'
+                  : 'Due date'
+              }
+            >
+              <Input id="dueDate" value={isCalendarDate(due) ? formatDate(due) : ''} readOnly />
+            </Field>
+          )}
+          {props.showField('inRef') ? (
+            <Field name="inRef" label="IN/" error={state.fieldErrors?.inRef}>
+              <Input
+                {...fieldProps('inRef', state.fieldErrors?.inRef)}
+                value={props.inRef}
+                onChange={(event) => props.setInRef(event.target.value)}
+                placeholder="GRN / IN/"
+              />
+            </Field>
+          ) : null}
+          {props.showField('reference') ? (
+            <Field name="reference" label="P.O. NO." error={state.fieldErrors?.reference}>
+              <Input
+                {...fieldProps('reference', state.fieldErrors?.reference)}
+                value={props.reference}
+                onChange={(event) => props.setReference(event.target.value)}
+                placeholder="P.O. number"
+              />
+            </Field>
+          ) : null}
+          <Field
+            name="prescriptionRef"
+            label="Rx / prescription"
+            error={state.fieldErrors?.prescriptionRef}
+          >
+            <Input
+              {...fieldProps('prescriptionRef', state.fieldErrors?.prescriptionRef)}
+              value={props.prescriptionRef}
+              onChange={(event) => props.setPrescriptionRef(event.target.value)}
+              placeholder="Optional"
+              maxLength={120}
+            />
+          </Field>
+          {props.config.needsDeposit ? (
+            <Field
+              name="depositAccountId"
+              label={props.config.type === 'REFUND_RECEIPT' ? 'Paid from' : 'Deposit to'}
+              required
+              error={state.fieldErrors?.depositAccountId}
+            >
+              <AccountPicker
+                id="depositAccountId"
+                options={props.depositAccounts}
+                value={props.depositAccountId || null}
+                onChange={(next) => props.setDepositAccountId(next ?? '')}
+                required
+                error={state.fieldErrors?.depositAccountId}
+              />
+            </Field>
+          ) : props.showField('paymentTerms') ? (
+            <Field name="paymentTermId" label="Terms" error={state.fieldErrors?.paymentTermId}>
+              <NativeSelect
+                {...fieldProps('paymentTermId', state.fieldErrors?.paymentTermId)}
+                value={props.paymentTermId}
+                onChange={(event) => props.setPaymentTermId(event.target.value)}
+              >
+                <option value="">Due on receipt</option>
+                {terms.map((row) => (
+                  <option key={row.id} value={row.id}>
+                    {row.label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+          ) : null}
+        </div>
+
+        <InvoiceLines props={props} />
+
+        <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="grid gap-4">
+            <Field name="customerMessage" label={`Message on ${props.config.singular.toLowerCase()}`} error={state.fieldErrors?.customerMessage}>
+              <textarea
+                id="customerMessage"
+                name="customerMessage"
+                rows={3}
+                value={props.customerMessage}
+                onChange={(event) => props.setCustomerMessage(event.target.value)}
+                placeholder="Thank you for your business"
+                className={noteBox}
+              />
+            </Field>
+            <Field
+              name="memo"
+              label="Message on statement"
+              hint="Stays with the invoice. It is not printed on the customer’s copy."
+              error={state.fieldErrors?.memo}
+            >
+              <textarea
+                id="memo"
+                name="memo"
+                rows={3}
+                value={props.memo}
+                onChange={(event) => props.setMemo(event.target.value)}
+                className={noteBox}
+              />
+            </Field>
+          </div>
+          <div className="space-y-4">
+            {props.config.type === 'INVOICE' && props.showField('customerBalance') ? (
+              <CustomerBalancePanel
+                customerId={props.customerId || null}
+                currency={props.currency}
+                className="rounded-md border border-border/70 bg-muted/20 p-3"
+              />
+            ) : null}
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between gap-6">
+                <dt className="text-muted-foreground">Subtotal</dt>
+                <dd className="tabular">{formatMoney(props.totals.subtotal, props.currency)}</dd>
+              </div>
+              <DiscountControl props={props} />
+              {props.showTax ? (
+                <div className="flex justify-between gap-6">
+                  <dt className="text-muted-foreground">Tax</dt>
+                  <dd className="tabular">{formatMoney(props.totals.tax, props.currency)}</dd>
+                </div>
+              ) : null}
+              <div className="flex justify-between gap-6 border-t pt-2 font-medium">
+                <dt>Total</dt>
+                <dd className="tabular">{formatMoney(props.totals.total, props.currency)}</dd>
+              </div>
+              <div className="flex justify-between gap-6 text-base font-semibold">
+                <dt>{customerPaperTotalLabel(props.config.type, props.config.needsDeposit)}</dt>
+                <dd className="tabular text-primary">{formatMoney(props.totals.total, props.currency)}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function AddressBox({ label, value, empty }: { label: string; value: string; empty: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium">{label}</p>
+      <div className="max-h-16 overflow-hidden whitespace-pre-line rounded-md border border-border bg-muted/30 px-2 py-1.5 text-xs text-foreground">
+        {value || <span className="text-muted-foreground">{empty}</span>}
+      </div>
+    </div>
+  )
+}
+
+const noteBox =
+  'flex min-h-20 w-full rounded-md border border-input bg-card px-2.5 py-2 text-[0.8125rem] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25'
+
+function InvoiceLines({ props }: { props: LayoutProps }) {
+  const showDescription = props.showColumn('description')
+  const showQty = props.showColumn('qty')
+  const showUnit = props.showColumn('unit')
+  const showRate = props.showColumn('rate')
+  const showStore = props.showColumn('store') && props.stores.length > 0
+  return (
+    <div>
+      <div className="overflow-x-auto rounded-md border">
+        <table className="w-full border-separate border-spacing-0 text-sm">
+          <thead>
+            <tr className="ledger-head text-[12px] font-semibold uppercase tracking-wide">
+              <th className="w-44 px-2 py-2 text-left">Item</th>
+              {showDescription ? <th className="px-2 py-2 text-left">Description</th> : null}
+              {showQty ? <th className="w-24 px-2 py-2 text-center">Qty</th> : null}
+              {showUnit ? <th className="w-16 px-2 py-2 text-center">Unit</th> : null}
+              {showRate ? <th className="w-28 px-2 py-2 text-right">Rate</th> : null}
+              <th className="w-28 px-2 py-2 text-right">Amount</th>
+              {showStore ? <th className="w-40 px-2 py-2 text-left">Store</th> : null}
+              <th className="w-8" />
+            </tr>
+          </thead>
+          <tbody>
+            {props.lines.map((line, index) => (
+              <tr key={line.key} className={index % 2 === 0 ? 'ledger-row' : 'ledger-row-alt'}>
+                <td className="px-1 py-1">
+                  <EntityPicker
+                    kind="item"
+                    options={props.itemOptions}
+                    value={line.itemId || null}
+                    onChange={(next) => props.chooseItem(line.key, next ?? '')}
+                    placeholder="Item"
+                    clearable
+                  />
+                  {!showStore ? <StockWarningNote warning={props.stockWarnings[line.key]} /> : null}
+                </td>
+                {showDescription ? (
+                  <td className="px-1 py-1">
+                    <Input
+                      aria-label={`Description, line ${index + 1}`}
+                      className={lineInput}
+                      value={line.description}
+                      onChange={(event) => props.update(line.key, { description: event.target.value })}
+                    />
+                  </td>
+                ) : null}
+                {showQty ? (
+                  <td className="px-1 py-1">
+                    <div className="flex items-center gap-1">
+                      <Input
+                        aria-label={`Quantity, line ${index + 1}`}
+                        inputMode="decimal"
+                        readOnly={props.subtotalItemIds.has(line.itemId)}
+                        className={cn(lineInput, 'min-w-0 flex-1 tabular text-center')}
+                        value={props.subtotalItemIds.has(line.itemId) ? '' : line.quantity}
+                        onChange={(event) => props.update(line.key, { quantity: event.target.value })}
+                        onBlur={(event) =>
+                          props.update(line.key, { quantity: fixed2(event.target.value) })
+                        }
+                      />
+                      {!showUnit && line.itemId && !props.subtotalItemIds.has(line.itemId) ? (
+                        <span
+                          className="w-9 shrink-0 truncate text-center text-[0.65rem] font-medium uppercase text-muted-foreground"
+                          title={resolveUnit(
+                            props.itemOptions.find((item) => item.id === line.itemId)?.unitOfMeasure,
+                          )}
+                        >
+                          {resolveUnit(
+                            props.itemOptions.find((item) => item.id === line.itemId)?.unitOfMeasure,
+                          )}
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
+                ) : null}
+                {showUnit ? (
+                  <td className="px-1 py-1 text-center text-[0.7rem] font-medium uppercase text-muted-foreground">
+                    {line.itemId && !props.subtotalItemIds.has(line.itemId)
+                      ? (
+                          props.itemOptions.find((item) => item.id === line.itemId)?.unitOfMeasure?.trim() ||
+                          'EACH'
+                        ).toUpperCase()
+                      : ''}
+                  </td>
+                ) : null}
+                {showRate ? (
+                  <td className="px-1 py-1">
+                    <Input
+                      aria-label={`Rate, line ${index + 1}`}
+                      inputMode="decimal"
+                      readOnly={props.subtotalItemIds.has(line.itemId)}
+                      className={cn(lineInput, 'tabular text-right')}
+                      value={props.subtotalItemIds.has(line.itemId) ? '' : line.unitPrice}
+                      onChange={(event) => props.update(line.key, { unitPrice: event.target.value })}
+                      onBlur={(event) =>
+                        props.update(line.key, { unitPrice: fixed2(event.target.value) })
+                      }
+                    />
+                  </td>
+                ) : null}
+                <td className="px-1 py-1">
+                  <AmountField
+                    line={line}
+                    isDiscount={props.discountItemIds.has(line.itemId)}
+                    isPayment={props.paymentItemIds.has(line.itemId)}
+                    isSubtotal={props.subtotalItemIds.has(line.itemId)}
+                    subtotalDisplay={props.subtotalDisplayByKey[line.key]}
+                    onCommit={(next) => props.update(line.key, next)}
+                  />
+                </td>
+                {showStore ? (
+                  <td className="px-1 py-1 align-top">
+                    <LineStore
+                      stores={props.stores}
+                      stock={props.stock}
+                      tracked={props.trackedIds.includes(line.itemId)}
+                      warn={props.config.type === 'INVOICE' || props.config.type === 'SALES_RECEIPT'}
+                      warning={props.stockWarnings[line.key]}
+                      itemId={line.itemId}
+                      storeId={line.storeId}
+                      quantity={line.quantity}
+                      onChange={(storeId) => props.update(line.key, { storeId })}
+                      label={`Store, line ${index + 1}`}
+                    />
+                  </td>
+                ) : null}
+                <td className="px-1 py-1 align-top">
+                  <LotSerialFields
+                    item={props.itemOptions.find((row) => row.id === line.itemId)}
+                    lotNumber={line.lotNumber}
+                    serialNumber={line.serialNumber}
+                    lotExpiryDate={line.lotExpiryDate}
+                    onChange={(next) => props.update(line.key, next)}
+                    lineIndex={index + 1}
+                  />
+                </td>
+                <td className="px-0.5 py-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    tabIndex={-1}
+                    aria-label={`Clear line ${index + 1}`}
+                    onClick={() => props.removeLine(line.key)}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Button type="button" variant="outline" size="sm" className="mt-3" onClick={props.addLine}>
+        <PlusIcon /> Add line
+      </Button>
+    </div>
+  )
+}
+
+function SheetLayout(props: LayoutProps) {
+  const credit = props.config.type === 'CREDIT_MEMO'
+  const accent = credit ? CUSTOMER_CREDIT.accent : FORM_SHEET.accent
+  const band = credit ? CUSTOMER_CREDIT.band : FORM_SHEET.band
+  const marks = credit
+    ? {
+        markA: CUSTOMER_CREDIT.markA,
+        markB: CUSTOMER_CREDIT.markB,
+        markC: CUSTOMER_CREDIT.markC,
+        markD: CUSTOMER_CREDIT.markD,
+      }
+    : {
+        markA: FORM_SHEET.markA,
+        markB: FORM_SHEET.markB,
+        markC: FORM_SHEET.markC,
+        markD: FORM_SHEET.markD,
+      }
+
+  return (
+    <Card className="relative overflow-hidden border-border bg-card p-0 shadow-[0_1px_3px_rgba(15,23,42,0.06)]">
+      <div
+        className="relative z-10 flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-white sm:px-5"
+        style={{ background: band }}
+      >
+        <div className="min-w-0">
+          <p className="truncate text-[10px] font-medium uppercase tracking-[0.14em] text-white/80">
+            {credit ? 'Customer credit' : props.organizationName}
+          </p>
+          <p className="text-base font-semibold tracking-wide sm:text-lg">{props.config.singular}</p>
+        </div>
+        {!credit ? (
+          <p className="hidden text-right text-xs font-medium text-white/90 sm:block">
+            {props.organizationName}
+          </p>
+        ) : null}
+      </div>
+      <SheetMarks colors={marks} />
+      <CardContent className="relative space-y-2.5 bg-muted/25 px-3 py-3 sm:px-4">
+        <FormStatus state={props.state} />
+
+        <div
+          className="rounded-md border border-border bg-card px-3 py-2.5 shadow-sm"
+          style={{ borderTopColor: accent, borderTopWidth: 2 }}
+        >
+          <div
+            className={cn(
+              '[&_label]:text-[10px] [&_label]:font-semibold [&_label]:uppercase [&_label]:tracking-[0.08em] [&_label]:text-primary',
+            )}
+          >
+            <HeaderFields props={props} />
+          </div>
+        </div>
+
+        {(props.config.type === 'INVOICE' || props.config.type === 'SALES_RECEIPT') &&
+        !props.recordId ? (
+          <FromSourcePicker
+            customerId={props.customerId}
+            sources={props.openSources}
+            today={props.today}
+            currency={props.currency}
+            target={props.convertTarget}
+            onApply={props.applyFromSource}
+          />
+        ) : null}
+        {props.convertedFromLabel && !props.recordId ? (
+          <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
+            Lines from{' '}
+            <span className="font-medium text-foreground">{props.convertedFromLabel}</span>. That
+            document closes when you save this one.
+          </p>
+        ) : null}
+
+        <StripedLines props={props} />
+
+        <div className="rounded-md border border-border bg-card px-3 py-2.5 shadow-sm">
+          <NotesFields props={props} />
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+
+function SalesReceiptToolbar({
+  type,
+  slug,
+  singular,
+  recordId,
+  neighbors,
+  canSave,
+  onSave,
+}: {
+  type: SalesTypeConfig['type']
+  slug: string
+  singular: string
+  recordId?: string
+  neighbors?: {
+    previous: { id: string; number: string } | null
+    next: { id: string; number: string } | null
+  }
+  canSave: boolean
+  onSave: () => void
+}) {
+  const router = useRouter()
+  const nav = neighborHrefs(`/sales/${slug}`, neighbors, recordId)
+
+  return (
+    <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-background p-1.5 print:hidden">
+      <RecordNav {...nav} />
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => {
+          if (recordId) router.push(`/sales/${slug}/${recordId}/print`)
+          else window.print()
+        }}
+      >
+        <PrinterIcon />
+        Print
+      </Button>
+      <Button type="button" variant="outline" size="sm" onClick={() => router.push(`/sales/${slug}/new`)}>
+        <PlusIcon />
+        New
+      </Button>
+      <DocumentFinder type={type} slug={slug} singular={singular} />
+      <Button type="submit" size="sm" disabled={!canSave} onClick={onSave}>
+        <SaveIcon />
+        Save
+      </Button>
+    </div>
+  )
+}
+
+const AMOUNT_OPS = [
+  { value: 'eq', label: '=' },
+  { value: 'gt', label: '>' },
+  { value: 'lt', label: '<' },
+  { value: 'gte', label: '≥' },
+  { value: 'lte', label: '≤' },
+] as const
+
+/** QuickBooks-style Find: number, date, amount with = / > / <. */
+function DocumentFinder({
+  type,
+  slug,
+  singular,
+}: {
+  type: SalesTypeConfig['type']
+  slug: string
+  singular: string
+}) {
+  const router = useRouter()
+  const [open, setOpen] = useState(false)
+  const [number, setNumber] = useState('')
+  const [date, setDate] = useState('')
+  const [amount, setAmount] = useState('')
+  const [amountOp, setAmountOp] = useState<(typeof AMOUNT_OPS)[number]['value']>('eq')
+  const [rows, setRows] = useState<
+    { id: string; number: string; date: string; total: string; currencyCode: string; customerName: string }[]
+  >([])
+  const [searched, setSearched] = useState(false)
+
+  async function search(next?: {
+    number?: string
+    date?: string
+    amount?: string
+    amountOp?: (typeof AMOUNT_OPS)[number]['value']
+  }) {
+    const result = await findSalesDocuments({
+      type,
+      number: next?.number ?? number,
+      date: next?.date ?? date,
+      amount: next?.amount ?? amount,
+      amountOp: next?.amountOp ?? amountOp,
+    })
+    setRows(result.ok ? result.data : [])
+    setSearched(true)
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) {
+          setNumber('')
+          setDate('')
+          setAmount('')
+          setAmountOp('eq')
+          void search({ number: '', date: '', amount: '', amountOp: 'eq' })
+        }
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" size="sm">
+          <SearchIcon />
+          Find
+        </Button>
+      </DialogTrigger>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>Find {singular.toLowerCase()}</DialogTitle>
+          <DialogDescription>
+            Search by number, date, or amount — use =, &gt;, or &lt; like QuickBooks Desktop.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="mt-4 grid gap-3">
+          <Field name="findNumber" label={`${singular} no.`}>
+            <Input
+              id="findNumber"
+              value={number}
+              onChange={(event) => setNumber(event.target.value)}
+              placeholder="Number"
+              autoComplete="off"
+            />
+          </Field>
+          <Field name="findDate" label="Date">
+            <DateField id="findDate" value={date} onChange={setDate} />
+          </Field>
+          <Field name="findAmount" label="Amount">
+            <div className="flex gap-1.5">
+              <NativeSelect
+                aria-label="Amount match"
+                value={amountOp}
+                onChange={(event) =>
+                  setAmountOp(event.target.value as (typeof AMOUNT_OPS)[number]['value'])
+                }
+                className="w-16 shrink-0"
+              >
+                {AMOUNT_OPS.map((op) => (
+                  <option key={op.value} value={op.value}>
+                    {op.label}
+                  </option>
+                ))}
+              </NativeSelect>
+              <Input
+                id="findAmount"
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+                inputMode="decimal"
+                placeholder="100 or >100"
+                autoComplete="off"
+                className="min-w-0 flex-1"
+              />
+            </div>
+          </Field>
+          <Button type="button" onClick={() => void search()}>
+            <SearchIcon />
+            Find
+          </Button>
+        </div>
+        <ul className="mt-4 max-h-64 space-y-1 overflow-y-auto">
+          {rows.map((row) => (
+            <li key={row.id}>
+              <button
+                type="button"
+                className="flex w-full items-baseline justify-between gap-3 rounded-md px-2 py-2 text-left text-sm text-foreground hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setOpen(false)
+                  router.push(`/sales/${slug}/${row.id}/edit`)
+                }}
+              >
+                <span>
+                  <span className="font-medium">{row.number}</span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {row.customerName} · {formatDate(row.date)}
+                  </span>
+                </span>
+                <span className="tabular">{formatMoney(row.total, row.currencyCode)}</span>
+              </button>
+            </li>
+          ))}
+          {searched && rows.length === 0 ? (
+            <li className="px-2 py-3 text-sm text-muted-foreground">No {singular.toLowerCase()} matches.</li>
+          ) : null}
+        </ul>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function unitPriceFromTotal(
+  quantity: string,
+  totalText: string,
+  discountPercent = '',
+): { quantity: string; unitPrice: string } | null {
+  if (totalText.trim() === '') return { quantity, unitPrice: '' }
+  const total = parseMoneyInput(totalText)
+  if (total == null) return null
+  const qty = parseMoneyInput(quantity)
+  const count = qty && !qty.isZero() ? qty : new Decimal(1)
+  const percent = parseMoneyInput(discountPercent) ?? ZERO
+  const kept = new Decimal(1).minus(percent.dividedBy(100))
+  const gross = kept.isZero() ? total : total.dividedBy(kept)
+  const unit = gross.dividedBy(count).toDecimalPlaces(4, Decimal.ROUND_HALF_UP)
+  return {
+    quantity: qty && !qty.isZero() ? fixed2(quantity) : '1.00',
+    unitPrice: fixed2(unit.toString()),
+  }
+}
+
+function AmountField({
+  line,
+  onCommit,
+  className,
+  isDiscount = false,
+  isPayment = false,
+  isSubtotal = false,
+  subtotalDisplay,
+}: {
+  line: Line
+  onCommit: (next: { quantity: string; unitPrice: string }) => void
+  className?: string
+  isDiscount?: boolean
+  isPayment?: boolean
+  isSubtotal?: boolean
+  /** Pre-computed running sum for a SUBTOTAL line. */
+  subtotalDisplay?: string
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const reduces = isDiscount || isPayment
+  const quantity = parseMoneyInput(line.quantity) ?? ZERO
+  const price = parseMoneyInput(line.unitPrice) ?? ZERO
+  const sign = reduces ? new Decimal(-1) : new Decimal(1)
+  const gross = quantity.times(price).times(sign)
+  const discount = reduces
+    ? ZERO
+    : gross.times(parseMoneyInput(line.discountPercent) ?? ZERO).dividedBy(100)
+  const amount = quantity.isZero() && price.isZero() ? null : gross.minus(discount)
+  const shown = isSubtotal
+    ? (subtotalDisplay ?? '0')
+    : draft ??
+      (amount
+        ? fixed2(amount.toString())
+        : '')
+
+  return (
+    <Input
+      aria-label="Amount"
+      inputMode="decimal"
+      readOnly={isSubtotal}
+      className={cn(className ?? lineInput, 'tabular text-right', isSubtotal && 'text-muted-foreground')}
+      value={shown}
+      onChange={(event) => {
+        if (isSubtotal) return
+        setDraft(event.target.value)
+      }}
+      onBlur={(event) => {
+        if (isSubtotal) return
+        // Discount / payment lines store a positive rate; the signed amount is display-only.
+        const raw = event.currentTarget.value.trim()
+        const entered = parseMoneyInput(raw)
+        const totalText =
+          reduces && entered ? entered.abs().toString() : event.currentTarget.value
+        const next = unitPriceFromTotal(line.quantity, totalText, reduces ? '' : line.discountPercent)
+        if (next) onCommit(next)
+        setDraft(null)
+      }}
+    />
+  )
+}
+
+
+function ClassicLayout(props: LayoutProps) {
+  return (
+    <>
+      <Card>
+        <CardContent className="space-y-4 p-4">
+          <FormStatus state={props.state} />
+          <HeaderFields props={props} />
+        </CardContent>
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <div className="panel-head">
+          <h2 className="text-sm font-semibold">Product and service details</h2>
+          <span className="text-xs text-muted-foreground">Each line posts to the income account its item names.</span>
+        </div>
+        <StripedLines props={props} />
+      </Card>
+
+      <Card>
+        <CardContent className="p-4">
+          <NotesFields props={props} />
+        </CardContent>
+      </Card>
+    </>
+  )
+}
+
+function ServiceLayout(props: LayoutProps) {
+  return (
+    <Card className="overflow-hidden p-0">
+      <div className="border-b border-teal-100 bg-gradient-to-r from-teal-50 to-sky-50 px-5 py-4">
+        <p className="text-[0.7rem] font-semibold uppercase tracking-[0.16em] text-teal-800/70">
+          Service template
+        </p>
+        <h2 className="mt-1 text-lg font-semibold text-slate-900">
+          New {props.config.singular.toLowerCase()}
+        </h2>
+        <p className="mt-1 max-w-2xl text-sm text-slate-600">
+          Built for labour and services — description and hours lead, rates follow.
+        </p>
+      </div>
+
+      <CardContent className="space-y-5 p-5">
+        <FormStatus state={props.state} />
+        <HeaderFields props={props} quantityLabel="Hours" />
+
+        <StripedLines props={props} />
+
+        <NotesFields props={props} />
+      </CardContent>
+    </Card>
+  )
+}
+
+function ModernLayout(props: LayoutProps) {
+  return (
+    <Card className="overflow-hidden p-0">
+      <div className="bg-primary px-5 py-5 text-primary-foreground sm:px-6">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="text-[0.7rem] font-semibold uppercase tracking-[0.18em] text-primary-foreground/70">
+              {props.organizationName}
+            </p>
+            <h2 className="mt-1 text-xl font-semibold tracking-tight">
+              {props.config.singular}
+            </h2>
+          </div>
+          <p className="max-w-xs text-right text-xs text-primary-foreground/75">{props.config.effect}</p>
+        </div>
+      </div>
+
+      <CardContent className="space-y-5 p-5 sm:p-6">
+        <FormStatus state={props.state} />
+        <HeaderFields props={props} />
+        <div className="rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="border-b bg-slate-50 px-4 py-2.5">
+            <h3 className="text-sm font-semibold text-slate-800">Line items</h3>
+          </div>
+          <StripedLines props={props} />
+        </div>
+        <NotesFields props={props} />
+      </CardContent>
+    </Card>
+  )
+}
+
+const lineInput =
+  'h-7 border-transparent bg-transparent px-1.5 shadow-none focus-visible:border-ring focus-visible:bg-muted/40'
+
+/** Sheet line cells — quiet fields that follow the theme (no paper-white rims). */
+const sheetLineInput =
+  'h-7 rounded-md border border-border/70 bg-transparent px-2 text-foreground shadow-none focus-visible:border-ring focus-visible:bg-muted/40 focus-visible:ring-1 focus-visible:ring-ring/20'
+
+/** The line band from a ruled sales sheet: product brand head, then pale stripes. */
+function StripedLines({ props }: { props: LayoutProps }) {
+  const head =
+    props.config.type === 'CREDIT_MEMO' ? CUSTOMER_CREDIT.band : FORM_SHEET.band
+  const showDescription = props.showColumn('description')
+  const showQty = props.showColumn('qty')
+  const showUnit = props.showColumn('unit')
+  const showRate = props.showColumn('rate')
+  const showStore = props.showColumn('store') && props.stores.length > 0
+  const showTax = props.showColumn('tax') && props.showTax
+
+  return (
+    <div className="rounded-lg bg-muted/40 p-1.5 sm:p-2">
+      <div className="overflow-x-auto rounded-md">
+        <table className="w-full border-separate border-spacing-0 text-sm">
+          <thead>
+            <tr className="text-white" style={{ background: head }}>
+              <th className="w-40 rounded-tl-md px-1.5 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide">
+                Item
+              </th>
+              {showDescription ? (
+                <th className="px-1.5 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide">
+                  Description
+                </th>
+              ) : null}
+              {showQty ? (
+                <th className="w-24 px-1.5 py-1.5 text-center text-[11px] font-semibold uppercase tracking-wide">
+                  Qty
+                </th>
+              ) : null}
+              {showUnit ? (
+                <th className="w-16 px-1.5 py-1.5 text-center text-[11px] font-semibold uppercase tracking-wide">
+                  Unit
+                </th>
+              ) : null}
+              {showRate ? (
+                <th className="w-24 px-1.5 py-1.5 text-right text-[11px] font-semibold uppercase tracking-wide">
+                  Rate
+                </th>
+              ) : null}
+              <th className="w-24 px-1.5 py-1.5 text-right text-[11px] font-semibold uppercase tracking-wide">
+                Amount
+              </th>
+              {showStore ? (
+                <th className="w-36 px-1.5 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wide">
+                  Store
+                </th>
+              ) : null}
+              <th className="w-8 rounded-tr-md" />
+            </tr>
+          </thead>
+          <tbody>
+            {props.lines.map((line, index) => (
+              <tr
+                key={line.key}
+                className={index % 2 === 0 ? 'bg-card/80' : 'bg-muted/30'}
+              >
+                <td className="px-1 py-1">
+                  <EntityPicker
+                    kind="item"
+                    options={props.itemOptions}
+                    value={line.itemId || null}
+                    onChange={(next) => props.chooseItem(line.key, next ?? '')}
+                    placeholder="Item"
+                    clearable
+                    className={sheetLineInput}
+                  />
+                  {!showStore ? <StockWarningNote warning={props.stockWarnings[line.key]} /> : null}
+                </td>
+                {showDescription ? (
+                  <td className="px-1 py-1">
+                    <Input
+                      aria-label={`Description, line ${index + 1}`}
+                      className={sheetLineInput}
+                      value={line.description}
+                      onChange={(event) => props.update(line.key, { description: event.target.value })}
+                    />
+                    {showTax && (line.itemId || line.description || line.unitPrice || line.taxCodeId) ? (
+                      <NativeSelect
+                        aria-label={`Tax, line ${index + 1}`}
+                        value={line.taxCodeId}
+                        onChange={(event) => props.update(line.key, { taxCodeId: event.target.value })}
+                        className="mt-0.5 h-6 rounded-md border border-border/70 bg-transparent px-2 text-xs"
+                      >
+                        <option value="">No tax</option>
+                        {props.taxCodes.map((code) => (
+                          <option key={code.id} value={code.id}>
+                            {code.label}
+                          </option>
+                        ))}
+                      </NativeSelect>
+                    ) : null}
+                  </td>
+                ) : null}
+                {showQty ? (
+                  <td className="px-1 py-1">
+                    <div className="flex items-center gap-1">
+                      <Input
+                        aria-label={`Quantity, line ${index + 1}`}
+                        inputMode="decimal"
+                        readOnly={props.subtotalItemIds.has(line.itemId)}
+                        className={cn(sheetLineInput, 'min-w-0 flex-1 tabular text-center')}
+                        value={props.subtotalItemIds.has(line.itemId) ? '' : line.quantity}
+                        onChange={(event) => props.update(line.key, { quantity: event.target.value })}
+                        onBlur={(event) =>
+                          props.update(line.key, { quantity: fixed2(event.target.value) })
+                        }
+                      />
+                      {!showUnit && line.itemId && !props.subtotalItemIds.has(line.itemId) ? (
+                        <span
+                          className="w-9 shrink-0 truncate text-center text-[0.65rem] font-medium uppercase text-muted-foreground"
+                          title={resolveUnit(
+                            props.itemOptions.find((item) => item.id === line.itemId)?.unitOfMeasure,
+                          )}
+                        >
+                          {resolveUnit(
+                            props.itemOptions.find((item) => item.id === line.itemId)?.unitOfMeasure,
+                          )}
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
+                ) : null}
+                {showUnit ? (
+                  <td className="px-1 py-1 text-center text-[0.7rem] font-medium uppercase text-muted-foreground">
+                    {line.itemId && !props.subtotalItemIds.has(line.itemId)
+                      ? (
+                          props.itemOptions.find((item) => item.id === line.itemId)?.unitOfMeasure?.trim() ||
+                          'EACH'
+                        ).toUpperCase()
+                      : ''}
+                  </td>
+                ) : null}
+                {showRate ? (
+                  <td className="px-1 py-1">
+                    <Input
+                      aria-label={`Rate, line ${index + 1}`}
+                      inputMode="decimal"
+                      readOnly={props.subtotalItemIds.has(line.itemId)}
+                      className={cn(sheetLineInput, 'tabular text-right')}
+                      value={props.subtotalItemIds.has(line.itemId) ? '' : line.unitPrice}
+                      onChange={(event) => props.update(line.key, { unitPrice: event.target.value })}
+                      onBlur={(event) =>
+                        props.update(line.key, { unitPrice: fixed2(event.target.value) })
+                      }
+                    />
+                  </td>
+                ) : null}
+                <td className="px-1 py-1">
+                  <AmountField
+                    line={line}
+                    isDiscount={props.discountItemIds.has(line.itemId)}
+                    isPayment={props.paymentItemIds.has(line.itemId)}
+                    isSubtotal={props.subtotalItemIds.has(line.itemId)}
+                    subtotalDisplay={props.subtotalDisplayByKey[line.key]}
+                    onCommit={(next) => props.update(line.key, next)}
+                    className={sheetLineInput}
+                  />
+                </td>
+                {showStore ? (
+                  <td className="px-1 py-1 align-top">
+                    <LineStore
+                      stores={props.stores}
+                      stock={props.stock}
+                      tracked={props.trackedIds.includes(line.itemId)}
+                      warn={props.config.type === 'INVOICE' || props.config.type === 'SALES_RECEIPT'}
+                      warning={props.stockWarnings[line.key]}
+                      itemId={line.itemId}
+                      storeId={line.storeId}
+                      quantity={line.quantity}
+                      onChange={(storeId) => props.update(line.key, { storeId })}
+                      label={`Store, line ${index + 1}`}
+                      className="[&_select]:h-7 [&_select]:rounded-md [&_select]:border [&_select]:border-border/70 [&_select]:bg-transparent [&_select]:px-2 [&_select]:text-sm"
+                    />
+                  </td>
+                ) : null}
+                <td className="px-1 py-1 align-top">
+                  <LotSerialFields
+                    item={props.itemOptions.find((row) => row.id === line.itemId)}
+                    lotNumber={line.lotNumber}
+                    serialNumber={line.serialNumber}
+                    lotExpiryDate={line.lotExpiryDate}
+                    onChange={(next) => props.update(line.key, next)}
+                    lineIndex={index + 1}
+                  />
+                </td>
+                <td className="px-0.5 py-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="rounded-md"
+                    tabIndex={-1}
+                    aria-label={`Clear line ${index + 1}`}
+                    onClick={() => props.removeLine(line.key)}
+                  >
+                    <Trash2Icon />
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-1 flex flex-wrap items-start justify-between gap-3 px-1 py-1.5">
+        <Button type="button" variant="outline" size="sm" className="rounded-full" onClick={props.addLine}>
+          <PlusIcon /> Add line
+        </Button>
+        <TotalsBlock props={props} />
+      </div>
+    </div>
+  )
+}
+
+function LotSerialFields({
+  item,
+  lotNumber,
+  serialNumber,
+  lotExpiryDate,
+  onChange,
+  lineIndex,
+}: {
+  item: { trackLots?: boolean; trackSerials?: boolean; pharmacyControlled?: boolean } | undefined
+  lotNumber: string
+  serialNumber: string
+  lotExpiryDate: string
+  onChange: (next: {
+    lotNumber?: string
+    serialNumber?: string
+    lotExpiryDate?: string
+  }) => void
+  lineIndex: number
+}) {
+  const needsLot = Boolean(item?.trackLots || item?.pharmacyControlled)
+  if (!needsLot && !item?.trackSerials) {
+    return <span className="text-xs text-muted-foreground">—</span>
+  }
+  return (
+    <div className="flex min-w-[7rem] flex-col gap-1">
+      {needsLot ? (
+        <>
+          <Input
+            aria-label={`Lot, line ${lineIndex}`}
+            className="h-8 text-xs"
+            placeholder="Lot"
+            value={lotNumber}
+            onChange={(event) => onChange({ lotNumber: event.target.value })}
+          />
+          <Input
+            type="date"
+            aria-label={`Lot expiry, line ${lineIndex}`}
+            className="h-8 text-xs"
+            value={lotExpiryDate}
+            onChange={(event) => onChange({ lotExpiryDate: event.target.value })}
+          />
+        </>
+      ) : null}
+      {item?.trackSerials ? (
+        <Input
+          aria-label={`Serial, line ${lineIndex}`}
+          className="h-8 text-xs"
+          placeholder="Serial"
+          value={serialNumber}
+          onChange={(event) => onChange({ serialNumber: event.target.value })}
+        />
+      ) : null}
+    </div>
   )
 }

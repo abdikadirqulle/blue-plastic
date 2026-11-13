@@ -99,10 +99,128 @@ export function formatDate(date: CalendarDate, locale = 'en-US'): string {
   }).format(toDate(date))
 }
 
+/** The calendar day of a real instant, as YYYY-MM-DD in `timeZone`. */
+export function calendarDateInZone(value: Date, timeZone = 'UTC'): CalendarDate {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(value)
+}
+
+/**
+ * Build a real instant from a calendar date and HH:mm clock in `timeZone`.
+ * Used for meetings and appointments that people enter in local wall time.
+ */
+export function zonedInstant(date: CalendarDate, time: string, timeZone: string): Date {
+  if (!isCalendarDate(date)) throw new Error(`Invalid calendar date: ${date}`)
+  const clock = /^([01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : '00:00'
+  const [year, month, day] = date.split('-').map(Number)
+  const [hour, minute] = clock.split(':').map(Number)
+  const guess = new Date(Date.UTC(year!, (month ?? 1) - 1, day, hour, minute, 0))
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(guess)
+  const read = (type: string) => Number(parts.find((part) => part.type === type)?.value)
+  const asUtc = Date.UTC(
+    read('year'),
+    read('month') - 1,
+    read('day'),
+    read('hour') % 24,
+    read('minute'),
+    read('second'),
+  )
+  return new Date(guess.getTime() - (asUtc - guess.getTime()))
+}
+
+/** HH:mm of an instant in `timeZone`. */
+export function clockInZone(value: Date, timeZone = 'UTC'): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(value)
+  const hour = parts.find((part) => part.type === 'hour')?.value ?? '00'
+  const minute = parts.find((part) => part.type === 'minute')?.value ?? '00'
+  return `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`
+}
+
+/**
+ * Date and clock time of a real instant, in the reader's timezone.
+ * "Oct 9, 2026, 11:05 AM" for en-US in Africa/Mogadishu (UTC+3).
+ */
 export function formatDateTime(value: Date, timeZone = 'UTC', locale = 'en-US'): string {
   return new Intl.DateTimeFormat(locale, {
     timeZone,
-    dateStyle: 'medium',
-    timeStyle: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
   }).format(value)
+}
+
+/**
+ * A transaction date for lists, detail pages, and printed paper.
+ *
+ * `date` is the business calendar day. `instant`, when the row stores one
+ * (createdAt, openedAt, postedAt), supplies the clock — but only when that
+ * instant falls on `date` in `timeZone`. A date-only column, or a document
+ * dated on a different day from when it was typed, stays "Oct 9, 2026" with
+ * no invented midnight. A till sale created at 11:05 in Mogadishu reads
+ * "Oct 9, 2026, 11:05 AM".
+ */
+export function formatTransactionDate(
+  date: CalendarDate,
+  instant?: Date | null,
+  timeZone = 'UTC',
+  locale = 'en-US',
+): string {
+  if (
+    instant instanceof Date &&
+    !Number.isNaN(instant.getTime()) &&
+    calendarDateInZone(instant, timeZone) === date
+  ) {
+    return formatDateTime(instant, timeZone, locale)
+  }
+  return formatDate(date, locale)
+}
+
+/**
+ * Same wording as the on-screen MerchantInvoice paper ("20 October 2026, 7:35 PM")
+ * so PDF download and Print stay one document.
+ */
+export function formatLongTransactionDate(
+  date: CalendarDate,
+  instant?: Date | null,
+  timeZone = 'UTC',
+): string {
+  const day = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+  }).format(toDate(date))
+  if (
+    !(instant instanceof Date) ||
+    Number.isNaN(instant.getTime()) ||
+    calendarDateInZone(instant, timeZone) !== date
+  ) {
+    return day
+  }
+  const time = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(instant)
+  return `${day}, ${time}`
 }

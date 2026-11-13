@@ -77,7 +77,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_purchase_application_target ON purchase_applications;
 CREATE TRIGGER trg_purchase_application_target
@@ -120,7 +120,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_purchase_application_source ON purchase_applications;
 CREATE TRIGGER trg_purchase_application_source
@@ -168,7 +168,7 @@ BEGIN
 
   RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_purchase_totals ON purchase_documents;
 CREATE CONSTRAINT TRIGGER trg_purchase_totals
@@ -177,12 +177,17 @@ CREATE CONSTRAINT TRIGGER trg_purchase_totals
   FOR EACH ROW EXECUTE FUNCTION assert_purchase_totals();
 
 
--- An expense is paid at once, so it must say what it was paid from.
+-- An expense is paid at once: from a money account, or by reducing a customer's balance.
 ALTER TABLE purchase_documents
   DROP CONSTRAINT IF EXISTS purchase_documents_payment_required;
 ALTER TABLE purchase_documents
   ADD CONSTRAINT purchase_documents_payment_required
-  CHECK (type <> 'EXPENSE' OR status = 'DRAFT' OR "paymentAccountId" IS NOT NULL);
+  CHECK (
+    type <> 'EXPENSE'
+    OR status = 'DRAFT'
+    OR "paymentAccountId" IS NOT NULL
+    OR "offsetCustomerId" IS NOT NULL
+  );
 
 
 -- Totals are never negative. A negative bill is a vendor credit.

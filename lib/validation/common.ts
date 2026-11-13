@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { settleNumberInput } from '@/lib/money'
+
 export const cuid = z.string().min(1, 'Required')
 
 export const trimmed = (max: number) => z.string().trim().max(max)
@@ -16,6 +18,14 @@ export const optionalText = (max = 255) =>
     .nullable()
     .optional()
 
+/** A number typed on a form. Blank means "use the next one in order". */
+export const chosenNumber = z
+  .string()
+  .trim()
+  .max(40, 'Use 40 characters or fewer')
+  .optional()
+  .transform((value) => (value ? value : undefined))
+
 export const email = z
   .string()
   .trim()
@@ -24,12 +34,11 @@ export const email = z
   .email('Enter a valid email address')
 
 /**
- * Passwords are checked for length and variety, not for a punctuation ritual.
- * Length is what actually resists guessing.
+ * Letters, numbers, and symbols are all fine — only a short floor is enforced.
  */
 export const password = z
   .string()
-  .min(12, 'Password must be at least 12 characters')
+  .min(6, 'Password must be at least 6 characters')
   .max(200, 'Password must be 200 characters or fewer')
 
 export const currencyCode = z
@@ -52,20 +61,42 @@ export const countryCode = z
   .nullable()
   .optional()
 
-/** Money crosses the wire as a decimal string, never a float (ADR-0003). */
-export const moneyString = z
-  .string()
-  .trim()
-  .regex(/^-?\d{1,15}(\.\d{1,4})?$/, 'Enter a valid amount')
+/** Fold 120-10 into 110 before a decimal pattern is checked. A plain number is unchanged. */
+export function calculatedDecimal(pattern: RegExp, message: string) {
+  return z
+    .string()
+    .trim()
+    .transform((value, ctx) => {
+      const next = settleNumberInput(value) ?? value
+      if (!pattern.test(next)) {
+        ctx.addIssue({ code: 'custom', message })
+        return z.NEVER
+      }
+      return next
+    })
+}
+
+/**
+ * Money crosses the wire as a decimal string, never a float (ADR-0003).
+ * Up to five fractional digits may be typed; posting still rounds to the
+ * currency (and storage) scale.
+ */
+export const moneyString = calculatedDecimal(
+  /^-?\d{1,15}(\.\d{1,5})?$/,
+  'Enter a valid amount (up to 5 decimal places)',
+)
 
 export const calendarDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the format YYYY-MM-DD')
 
-/** Shared list-query shape. Every paginated route parses through this. */
+/**
+ * Shared list-query shape. Lists open the whole result and scroll; pageSize is
+ * kept so older callers still parse, and is sized to hold a full working set.
+ */
 export const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(100).default(25),
+  pageSize: z.coerce.number().int().min(1).max(50_000).default(50_000),
   q: z.string().trim().max(120).optional(),
   sort: z.string().trim().max(60).optional(),
   dir: z.enum(['asc', 'desc']).default('asc'),
@@ -80,8 +111,12 @@ export function parseListQuery(params: Record<string, string | string[] | undefi
   return result.success ? result.data : listQuerySchema.parse({})
 }
 
+/** Page slice for callers that still page in memory (e.g. balance-sorted lists). */
 export function paginate(query: ListQuery) {
-  return { skip: (query.page - 1) * query.pageSize, take: query.pageSize }
+  return {
+    skip: (query.page - 1) * query.pageSize,
+    take: query.pageSize,
+  }
 }
 
 export type Paged<T> = {

@@ -1,10 +1,9 @@
 'use client'
 
 import Link from 'next/link'
-import { signOut } from 'next-auth/react'
-import { LogOutIcon, MoonIcon, SunIcon, UserIcon } from 'lucide-react'
-import { useTheme } from 'next-themes'
+import { DatabaseIcon, LogOutIcon, PaletteIcon, PieChartIcon, UserIcon } from 'lucide-react'
 
+import { signOutWithHistory } from '@/app/(app)/auth/actions'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,12 +18,16 @@ import {
 export function UserMenu({
   user,
   roleLabel,
+  showDatabases = false,
+  showCompanyReports = false,
 }: {
   user: { name: string; email: string; image: string | null }
   roleLabel: string
+  /** Databases app — system owner, or an admin who was given Connect. */
+  showDatabases?: boolean
+  /** Consolidated figures for the company group (or all companies for system owner). */
+  showCompanyReports?: boolean
 }) {
-  const { resolvedTheme, setTheme } = useTheme()
-
   const initials = user.name
     .split(' ')
     .map((part) => part[0])
@@ -56,12 +59,35 @@ export function UserMenu({
             Your profile
           </Link>
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setTheme(resolvedTheme === 'dark' ? 'light' : 'dark') }}>
-          {resolvedTheme === 'dark' ? <SunIcon /> : <MoonIcon />}
-          {resolvedTheme === 'dark' ? 'Light theme' : 'Dark theme'}
+        <DropdownMenuItem asChild>
+          <Link href="/settings/appearance">
+            <PaletteIcon />
+            Appearance
+          </Link>
         </DropdownMenuItem>
+        {showDatabases ? (
+          <DropdownMenuItem asChild>
+            <Link href="/databases">
+              <DatabaseIcon />
+              Close company
+            </Link>
+          </DropdownMenuItem>
+        ) : null}
+        {showCompanyReports ? (
+          <DropdownMenuItem asChild>
+            <Link href="/reports/companies">
+              <PieChartIcon />
+              Company reports
+            </Link>
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuSeparator />
-        <DropdownMenuItem variant="destructive" onSelect={() => signOut({ callbackUrl: '/sign-in' })}>
+        <DropdownMenuItem
+          variant="destructive"
+          onSelect={() => {
+            void signOutWithHistory(showDatabases ? '/login/staff' : '/login/company')
+          }}
+        >
           <LogOutIcon />
           Sign out
         </DropdownMenuItem>

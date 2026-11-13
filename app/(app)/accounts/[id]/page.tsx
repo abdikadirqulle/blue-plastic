@@ -1,30 +1,30 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon, ScrollTextIcon } from 'lucide-react'
+import { ScrollTextIcon } from 'lucide-react'
 
+import { AccountTypeIcon } from '@/components/accounts/account-type-icon'
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
-import { Badge } from '@/components/ui/badge'
-import { buttonVariants } from '@/components/ui/button'
+import { DateRangeForm } from '@/app/(app)/reports/trial-balance/date-range-form'
 import { Card, CardContent } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { RegisterTable } from '@/components/accounts/register-table'
 import {
   ACCOUNT_SUBTYPE_LABELS,
   ACCOUNT_TYPE_LABELS,
   isDebitNormalType,
   JOURNAL_SOURCE_LABELS,
 } from '@/lib/accounting-labels'
-import { fiscalYearOf, fiscalYearRange, formatDate, toCalendarDate, today } from '@/lib/date'
+import { fiscalYearOf, fiscalYearRange, formatDate, today } from '@/lib/date'
+import { postedLineParts } from '@/lib/ledger-text'
 import { formatMoney } from '@/lib/money'
-import { readSort, SortableHeader } from '@/components/data/sortable-header'
 import { generalLedger } from '@/server/accounting/balances'
 import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
 import * as accountService from '@/server/services/account.service'
+import { RegisterEntry } from '@/components/accounts/register-entry'
 import { resolveSources, sourceFor } from '@/server/services/journal-sources'
 import type { JournalSourceType } from '@prisma/client'
-
-const SORTABLE = ['date', 'entry', 'description', 'debit', 'credit'] as const
 
 export const metadata: Metadata = { title: 'Account' }
 
@@ -55,16 +55,19 @@ export default async function AccountRegisterPage({
   )
   const from = typeof query.from === 'string' ? query.from : defaults.start
   const to = typeof query.to === 'string' ? query.to : defaults.end
+  const sourceFilter =
+    query.source === 'pos' || query.source === 'other' ? query.source : ''
 
   const ledger = await generalLedger(ctx.orgId, id, { from, to })
+  const canType =
+    ctx.permissions.has('bank:transact') &&
+    ['BANK', 'CREDIT_CARD', 'OTHER_CURRENT_ASSET', 'UNDEPOSITED_FUNDS'].includes(account.subtype)
+  const categories = canType
+    ? (await accountService.list(ctx))
+        .filter((row) => row.type === 'EXPENSE' || row.type === 'COGS' || row.type === 'REVENUE')
+        .map((row) => ({ id: row.id, label: `${row.code} ${row.name}`, type: row.type }))
+    : []
 
-  // What produced each line, resolved in one batch per document family.
-  //
-  // This is the hop that makes a report answer its own question. A figure on the
-  // profit and loss led here, and here used to lead only to the journal — so
-  // tracing a number to the invoice that caused it took three screens, and the
-  // middle one was the least informative of the three. The document and the
-  // party it was with now sit on the register row itself.
   const sources = await resolveSources(
     ctx.orgId,
     ledger.entries.map((entry) => ({
@@ -73,43 +76,125 @@ export default async function AccountRegisterPage({
     })),
   )
 
-  // The running balance column only means anything in date order, so it is shown
-  // as computed and never re-derived from a different ordering.
-  const sort = readSort(query, SORTABLE, { sort: 'date', dir: 'asc' })
-  const basePath = `/accounts/${id}`
-  const linkParams = { from, to, sort: sort.sort, dir: sort.dir }
-  const direction = sort.dir === 'asc' ? 1 : -1
-  const entries = [...ledger.entries].sort((a, b) => {
-    switch (sort.sort) {
-      case 'entry':
-        return direction * a.journalNumber.localeCompare(b.journalNumber)
-      case 'description':
-        return direction * (a.description ?? '').localeCompare(b.description ?? '')
-      case 'debit':
-        return direction * a.debit.comparedTo(b.debit)
-      case 'credit':
-        return direction * a.credit.comparedTo(b.credit)
-      default:
-        return direction * (a.date.getTime() - b.date.getTime())
-    }
-  })
+  const salesDocIds = [
+    ...new Set(
+      ledger.entries
+        .filter(
+          (entry) =>
+            (entry.sourceType === 'SALES_RECEIPT' || entry.sourceType === 'REFUND_RECEIPT') &&
+            entry.sourceId,
+        )
+        .map((entry) => entry.sourceId as string),
+    ),
+  ]
+  const posOrders =
+    salesDocIds.length > 0
+      ? await db.posOrder.findMany({
+          where: { orgId: ctx.orgId, salesDocumentId: { in: salesDocIds } },
+          select: {
+            salesDocumentId: true,
+            register: { select: { name: true } },
+          },
+        })
+      : []
+  const posByDoc = new Map(posOrders.map((order) => [order.salesDocumentId, order.register.name]))
+
+  // The grid sorts for display on its own; the balance column keeps the value
+  // computed in journal-date order no matter how the reader re-sorts the rows.
   const debitNormal = isDebitNormalType(account.type)
+  const registerRows = ledger.entries
+    .map((entry) => {
+      const source = sourceFor(sources, {
+        sourceType: entry.sourceType as JournalSourceType,
+        sourceId: entry.sourceId,
+      })
+      const posRegister =
+        (entry.sourceType === 'SALES_RECEIPT' || entry.sourceType === 'REFUND_RECEIPT') &&
+        entry.sourceId
+          ? (posByDoc.get(entry.sourceId) ?? null)
+          : null
+      const baseLabel =
+        JOURNAL_SOURCE_LABELS[entry.sourceType as JournalSourceType] ?? entry.sourceType
+      // Keep the plain journal label for memo parsing; TYPE shows "(POS)" when till-sold.
+      const sourceLabel = posRegister ? `${baseLabel} (POS)` : baseLabel
+      const parts = postedLineParts({
+        sourceLabel: baseLabel,
+        memo: entry.memo,
+        description: entry.description,
+        partyName: entry.partyName ?? source.partyName,
+      })
+      const nameHref = entry.customerId
+        ? `/customers?id=${entry.customerId}`
+        : entry.vendorId
+          ? `/vendors?id=${entry.vendorId}`
+          : source.partyHref
+      const documentHref = source.href ?? `/journals/${entry.journalId}`
+      return {
+        lineId: entry.lineId,
+        journalNumber: entry.journalNumber,
+        recordedAt: entry.recordedAt.toISOString(),
+        status: entry.status,
+        sourceLabel,
+        typeHref: documentHref,
+        entryHref: documentHref,
+        posRegisterName: posRegister,
+        isPos: Boolean(posRegister),
+        name: parts.name,
+        nameHref: nameHref ?? null,
+        note: parts.note ?? null,
+        docNumber: source.number,
+        docHref: source.href,
+        contraAccounts: entry.contraAccounts,
+        splits: entry.splits.map((s) => ({ code: s.code, name: s.name, amount: s.amount })),
+        debit: entry.debit.isZero() ? '' : entry.debit.toString(),
+        credit: entry.credit.isZero() ? '' : entry.credit.toString(),
+        balance: entry.balance.toString(),
+      }
+    })
+    .filter((row) => {
+      if (sourceFilter === 'pos') return row.isPos
+      if (sourceFilter === 'other') return !row.isPos
+      return true
+    })
+
+  function sourceHref(value: '' | 'pos' | 'other') {
+    const search = new URLSearchParams()
+    search.set('from', from)
+    search.set('to', to)
+    if (value) search.set('source', value)
+    return `/accounts/${id}?${search.toString()}`
+  }
 
   return (
     <>
-      <Link
-        href="/accounts"
-        className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}
-      >
-        <ArrowLeftIcon /> Chart of accounts
-      </Link>
-
       <PageHeader
-        title={`${account.code} · ${account.name}`}
+        title={
+          <span className="inline-flex items-center gap-2">
+            <AccountTypeIcon type={account.type} />
+            <span>
+              {account.code} · {account.name}
+            </span>
+          </span>
+        }
         description={`${ACCOUNT_TYPE_LABELS[account.type]} · ${ACCOUNT_SUBTYPE_LABELS[account.subtype]} · ${
           debitNormal ? 'debit' : 'credit'
         } balance`}
       />
+
+      <div className="mb-4 flex flex-wrap items-end gap-4">
+        <DateRangeForm
+          from={from}
+          to={to}
+          extraParams={{
+            source: sourceFilter || undefined,
+          }}
+        />
+        <div className="flex flex-wrap gap-1 pb-0.5">
+          <FilterChip href={sourceHref('')} active={!sourceFilter} label="All sources" />
+          <FilterChip href={sourceHref('pos')} active={sourceFilter === 'pos'} label="POS only" />
+          <FilterChip href={sourceHref('other')} active={sourceFilter === 'other'} label="Not POS" />
+        </div>
+      </div>
 
       <div className="mb-4 grid gap-4 sm:grid-cols-3">
         <Summary label={`Opening ${formatDate(from)}`} value={formatMoney(ledger.opening, currency)} />
@@ -120,149 +205,52 @@ export default async function AccountRegisterPage({
         <Summary label={`Closing ${formatDate(to)}`} value={formatMoney(ledger.closing, currency)} emphasis />
       </div>
 
-      {account.description ? (
+      {account.description && account.description !== 'pos-parent' && !account.description.startsWith('pos-register:') ? (
         <p className="mb-4 text-sm text-muted-foreground">{account.description}</p>
       ) : null}
 
-      {ledger.entries.length === 0 ? (
+      {canType ? (
+        <RegisterEntry
+          accountId={account.id}
+          today={today(timeZone)}
+          categories={categories}
+        />
+      ) : null}
+
+      {registerRows.length === 0 ? (
         <EmptyState
           icon={ScrollTextIcon}
           title="Nothing posted to this account in this period"
-          description={`Showing ${formatDate(from)} to ${formatDate(to)}.`}
+          description={`Showing ${formatDate(from)} to ${formatDate(to)}${
+            sourceFilter === 'pos' ? ' · POS only' : sourceFilter === 'other' ? ' · not POS' : ''
+          }.`}
         />
       ) : (
-        <Card className="overflow-hidden p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" />
-                <SortableHeader column="entry" label="Entry" state={sort} basePath={basePath} params={linkParams} className="w-28" />
-                <SortableHeader column="description" label="Description" state={sort} basePath={basePath} params={linkParams} />
-                <TableHead className="w-40">Document</TableHead>
-                <TableHead>Contra account</TableHead>
-                <SortableHeader column="debit" label="Debit" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
-                <SortableHeader column="credit" label="Credit" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
-                <TableHead className="numeric w-36">
-                  {sort.sort === 'date' && sort.dir === 'asc' ? 'Balance' : 'Balance (in date order)'}
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries.map((entry) => (
-                <TableRow key={entry.lineId}>
-                  <TableCell className="tabular whitespace-nowrap text-muted-foreground">
-                    {formatDate(toCalendarDate(entry.date))}
-                  </TableCell>
-                  <TableCell>
-                    <Link
-                      href={`/journals/${entry.journalId}`}
-                      className="tabular font-medium underline-offset-4 hover:underline"
-                    >
-                      {entry.journalNumber}
-                    </Link>
-                    {entry.status === 'REVERSED' ? (
-                      <Badge variant="outline" className="ml-1.5">
-                        reversed
-                      </Badge>
-                    ) : null}
-                  </TableCell>
-                  <TableCell>
-                    <span className="block">{entry.description ?? entry.memo ?? '—'}</span>
-                    <span className="block text-xs text-muted-foreground">
-                      {JOURNAL_SOURCE_LABELS[entry.sourceType as JournalSourceType] ?? entry.sourceType}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <SourceCell
-                      source={sourceFor(sources, {
-                        sourceType: entry.sourceType as JournalSourceType,
-                        sourceId: entry.sourceId,
-                      })}
-                      partyName={entry.partyName}
-                      customerId={entry.customerId}
-                      vendorId={entry.vendorId}
-                    />
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">{entry.contraAccounts}</TableCell>
-                  <TableCell className="numeric tabular">
-                    {entry.debit.isZero() ? '' : formatMoney(entry.debit, currency)}
-                  </TableCell>
-                  <TableCell className="numeric tabular">
-                    {entry.credit.isZero() ? '' : formatMoney(entry.credit, currency)}
-                  </TableCell>
-                  <TableCell className="numeric tabular font-medium">
-                    {formatMoney(entry.balance, currency)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-            <TableFooter>
-              <TableRow>
-                <TableCell colSpan={7}>Closing balance</TableCell>
-                <TableCell className="numeric tabular font-semibold">
-                  {formatMoney(ledger.closing, currency)}
-                </TableCell>
-              </TableRow>
-            </TableFooter>
-          </Table>
-        </Card>
+        <RegisterTable
+          accountId={account.id}
+          currency={currency}
+          timeZone={timeZone}
+          rows={registerRows}
+          closingBalance={ledger.closing.toString()}
+        />
       )}
     </>
   )
 }
 
-/**
- * The document behind a register line, and who it was with.
- *
- * A manual entry has neither, and says so rather than showing an empty cell that
- * could equally mean "not loaded".
- */
-function SourceCell({
-  source,
-  partyName,
-  customerId,
-  vendorId,
-}: {
-  source: { number: string | null; href: string | null; partyName: string | null; partyHref: string | null }
-  partyName: string | null
-  customerId: string | null
-  vendorId: string | null
-}) {
-  // A control-account line carries its own counterparty, which is more precise
-  // than the document's: a payment settling three invoices is one document with
-  // one customer, but the line says whose balance moved.
-  const name = partyName ?? source.partyName
-  const nameHref = customerId
-    ? `/customers/${customerId}`
-    : vendorId
-      ? `/vendors/${vendorId}`
-      : source.partyHref
-
-  if (!source.number && !name) {
-    return <span className="text-muted-foreground">—</span>
-  }
-
+function FilterChip({ href, active, label }: { href: string; active: boolean; label: string }) {
   return (
-    <>
-      {source.number ? (
-        source.href ? (
-          <Link href={source.href} className="tabular block font-medium underline-offset-4 hover:underline">
-            {source.number}
-          </Link>
-        ) : (
-          <span className="tabular block font-medium">{source.number}</span>
-        )
-      ) : null}
-      {name ? (
-        nameHref ? (
-          <Link href={nameHref} className="block text-xs text-muted-foreground underline-offset-4 hover:underline">
-            {name}
-          </Link>
-        ) : (
-          <span className="block text-xs text-muted-foreground">{name}</span>
-        )
-      ) : null}
-    </>
+    <Link
+      href={href}
+      aria-current={active ? 'page' : undefined}
+      className={
+        active
+          ? 'rounded-full bg-primary px-3 py-1 text-xs font-medium text-primary-foreground'
+          : 'rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground'
+      }
+    >
+      {label}
+    </Link>
   )
 }
 

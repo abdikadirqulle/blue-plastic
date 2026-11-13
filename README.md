@@ -1,8 +1,10 @@
-# Blue Plastic Center
+# SOM ERP
 
-A double-entry accounting system — QuickBooks Online in scope, excluding payroll and
+Double-entry accounting ERP — QuickBooks Online in scope, excluding payroll and
 projects. Next.js 16, TypeScript, PostgreSQL, Prisma 7, NextAuth v5, Zod, Tailwind
 CSS v4, shadcn/ui, TanStack Query.
+
+Product name in the UI is **SOM ERP** (`lib/product-brand.ts`). Tenant companies keep their own names.
 
 ## Start here
 
@@ -34,7 +36,8 @@ organisation exists.
 | --- | --- |
 | `pnpm dev` / `pnpm build` / `pnpm start` | the app |
 | `pnpm verify` | lint + typecheck + tests — run before every hand-off |
-| `pnpm test` | Vitest (unit + integration; integration needs `DATABASE_URL`) |
+| `pnpm test` | Vitest (unit; DB suites skip when `DATABASE_URL` is hosted Supabase) |
+| `pnpm test:db` | Same, but runs DB integration suites (`ALLOW_DB_TESTS=1`; prefer local Postgres) |
 | `pnpm db:migrate` / `db:deploy` / `db:studio` / `db:seed` / `db:reset` | Prisma |
 
 Integration tests run every case inside a transaction that is deliberately rolled
@@ -50,10 +53,38 @@ the build deliberately requires none of them ([ADR-0009](./docs/decisions/0009-b
 | `DATABASE_URL` | pooled connection string |
 | `DIRECT_URL` | direct (non-pooled) connection — migrations only |
 | `AUTH_SECRET` | `openssl rand -base64 32` |
+| `APP_URL` | optional — `https://your-domain.com` after custom domain is live |
+| `AUTH_URL` | optional — same as `APP_URL` if you want Auth pinned to that origin |
 
 `pnpm build` runs `prisma generate` first, so a cached `node_modules` can never
 leave the deployment with an ungenerated Prisma client. Migrations are applied
 separately with `pnpm db:deploy` — the build never mutates the database.
+
+Auth.js is configured with `trustHost: true`, so `AUTH_URL` is optional. Set
+`APP_URL` / `AUTH_URL` to your HTTPS custom domain when you attach one. Vercel
+issues HTTPS automatically; do not use bare `http://` in production.
+
+### Custom domain (later)
+
+1. In Vercel → Project **Settings → Domains**, add `yourdomain.com` (and `www` if you want).
+2. At your registrar/DNS host, point the domain at Vercel (A/CNAME records Vercel shows).
+3. Wait for SSL to become **Valid**.
+4. Set Production env vars `APP_URL` and `AUTH_URL` to `https://yourdomain.com`, then redeploy.
+5. Optional: rename the Vercel project to `som-erp` so the free URL is `https://som-erp.vercel.app`.
+
+Public product page: `/` (SOM ERP). Request a company: `/register`. Company login: `/login` or `/sign-in`.
+
+Each company has its own apps (Settings → Apps & features), users, tax, and ledger. Public
+`/register` creates a company with a **14-day free trial** and signs the owner in. Set
+`SELF_SERVE_REQUIRE_APPROVAL=true` to keep the old pending-approval gate. Set
+`SELF_SERVE_COMPANIES=false` to hide `/register` after the first company exists. After the
+trial, companies pay rent from **Billing** (EVC / Zaad / bank proof); the system owner
+confirms payments under **Databases**.
+
+`GET /api/health` answers `{ ok, database }` and, when Postgres is down, a
+`problem` name. It never includes a connection string. Supabase URLs need
+`sslmode=require`. Use the pooler host on `DATABASE_URL` and the direct host on
+`DIRECT_URL`.
 
 ## Layout
 

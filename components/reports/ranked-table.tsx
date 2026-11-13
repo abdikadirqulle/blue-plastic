@@ -1,9 +1,12 @@
 import Link from 'next/link'
 
+import { ClickableRow } from '@/components/reports/clickable-row'
 import { EmptyState } from '@/components/data/empty-state'
 import { SortableHeader, type SortState } from '@/components/data/sortable-header'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Decimal, formatMoney } from '@/lib/money'
+import { formatQty } from '@/lib/quantity'
+import { REPORT_DRILL_LINK } from '@/lib/report-drill'
 import type { RankedRow } from '@/server/reports/business'
 
 /**
@@ -25,7 +28,7 @@ export function RankedTable({
   basePath,
   linkParams,
 }: {
-  rows: (RankedRow & { quantity?: Decimal })[]
+  rows: (RankedRow & { quantity?: Decimal; unitOfMeasure?: string | null })[]
   total: Decimal
   currency: string
   nameHeader: string
@@ -72,10 +75,10 @@ export function RankedTable({
       </TableHeader>
       <TableBody>
         {ordered.map((row) => (
-          <TableRow key={row.id}>
+          <ClickableRow key={row.id} href={linkTo?.(row.id)}>
             <TableCell className="font-medium">
               {linkTo ? (
-                <Link href={linkTo(row.id)} className="underline-offset-4 hover:underline">
+                <Link href={linkTo(row.id)} className={REPORT_DRILL_LINK} title="Open detail">
                   {row.name}
                 </Link>
               ) : (
@@ -85,10 +88,20 @@ export function RankedTable({
             <TableCell className="numeric tabular text-muted-foreground">{row.count}</TableCell>
             {quantities ? (
               <TableCell className="numeric tabular text-muted-foreground">
-                {row.quantity?.toDecimalPlaces(2).toString() ?? '—'}
+                {row.quantity
+                  ? formatQty(row.quantity.toDecimalPlaces(2).toString(), row.unitOfMeasure)
+                  : '—'}
               </TableCell>
             ) : null}
-            <TableCell className="numeric tabular">{formatMoney(row.amount, currency)}</TableCell>
+            <TableCell className="numeric tabular">
+              {linkTo ? (
+                <Link href={linkTo(row.id)} className={REPORT_DRILL_LINK} title="Open detail">
+                  {formatMoney(row.amount, currency)}
+                </Link>
+              ) : (
+                formatMoney(row.amount, currency)
+              )}
+            </TableCell>
             <TableCell>
               <div className="flex items-center gap-2">
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
@@ -106,7 +119,7 @@ export function RankedTable({
                 </span>
               </div>
             </TableCell>
-          </TableRow>
+          </ClickableRow>
         ))}
       </TableBody>
       <TableFooter>

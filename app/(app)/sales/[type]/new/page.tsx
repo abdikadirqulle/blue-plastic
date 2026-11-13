@@ -1,16 +1,23 @@
 import type { Metadata } from 'next'
-import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { DocumentForm } from '@/components/sales/document-form'
-import { buttonVariants } from '@/components/ui/button'
+import { SalesPaperFrame } from '@/components/sales/paper-width'
 import { today } from '@/lib/date'
-import { describeTerm } from '@/lib/payment-terms'
 import { bySlug } from '@/lib/sales-types'
 import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
+import { peekDocumentNumber } from '@/server/sequences'
+import { loadFormCustomization } from '@/server/services/form-customization'
 import { loadFormOptions } from '@/server/services/sales-options'
+import * as projectService from '@/server/services/project.service'
+import * as salesService from '@/server/services/sales.service'
+import * as storeService from '@/server/services/store.service'
+import * as trackingCategories from '@/server/services/tracking-category.service'
+
+/** Form options + stock for a large catalogue exceed the default 10s hobby limit. */
+export const maxDuration = 60
 
 export async function generateMetadata({
   params,
@@ -23,25 +30,47 @@ export async function generateMetadata({
 
 export default async function NewSalesDocumentPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ type: string }>
+  searchParams: Promise<Record<string, string | string[] | undefined>>
 }) {
   const config = bySlug((await params).type)
   if (!config) notFound()
 
   const ctx = await requireOrgContext(config.createPermission)
-  const options = await loadFormOptions(ctx)
+  const loadsSources = config.type === 'INVOICE' || config.type === 'SALES_RECEIPT'
+  const emptyShelf = {
+    stores: [] as Awaited<ReturnType<typeof storeService.quantities>>['stores'],
+    byItem: {} as Awaited<ReturnType<typeof storeService.quantities>>['byItem'],
+  }
+  const [options, query, documentNumber, neighbors, shelf, openSources, formCustomization, classes] =
+    await Promise.all([
+      loadFormOptions(ctx, { includeOnHand: false }),
+      searchParams,
+      peekDocumentNumber(db, ctx.orgId, config.type),
+      salesService.neighbors(ctx, config.type, null),
+      storeService.quantities(ctx).catch(() => emptyShelf),
+      loadsSources ? salesService.listConvertibleSources(ctx) : Promise.resolve([]),
+      loadFormCustomization(ctx, 'sales', config.type),
+      trackingCategories.list(ctx),
+    ])
+  const requestedProject = typeof query.project === 'string' ? query.project : undefined
+  const project = requestedProject
+    ? await projectService.peek(ctx, requestedProject).catch(() => null)
+    : null
+  const requested = typeof query.customer === 'string' ? query.customer : project?.customerId
+  const initialCustomerId = options.customers.some((customer) => customer.id === requested)
+    ? requested
+    : undefined
+  const requestedStore = typeof query.store === 'string' ? query.store : undefined
+  const initialStoreId = shelf.stores.some((store) => store.id === requestedStore)
+    ? requestedStore
+    : undefined
 
   return (
-    <>
-      <Link
-        href={`/sales/${config.slug}`}
-        className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}
-      >
-        <ArrowLeftIcon /> {config.plural}
-      </Link>
-
-      <PageHeader title={`New ${config.singular.toLowerCase()}`} description={config.effect} />
+    <SalesPaperFrame type={config.type}>
+      <PageHeader title={`New ${config.singular.toLowerCase()}`} className="mb-2 pb-2" />
 
       <DocumentForm
         config={config}
@@ -49,10 +78,28 @@ export default async function NewSalesDocumentPage({
         items={options.items}
         taxCodes={options.taxCodes}
         depositAccounts={options.depositAccounts}
-        terms={options.terms.map((term) => ({ id: term.id, label: `${term.name} — ${describeTerm(term)}` }))}
+        terms={options.terms.map((term) => ({
+          id: term.id,
+          label: term.name,
+          type: term.type,
+          dueDays: term.dueDays,
+        }))}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
+        organizationName={ctx.organization.name}
+        documentNumber={documentNumber}
+        initialCustomerId={initialCustomerId}
+        initialStoreId={initialStoreId}
+        initialProjectId={project?.id}
+        initialWorkSite={project?.siteLocation ?? undefined}
+        projects={options.projects}
+        classes={classes.map((row) => ({ id: row.id, label: row.name }))}
+        neighbors={neighbors}
+        stores={shelf.stores}
+        stock={shelf.byItem}
+        openSources={openSources}
+        formCustomization={formCustomization}
       />
-    </>
+    </SalesPaperFrame>
   )
 }

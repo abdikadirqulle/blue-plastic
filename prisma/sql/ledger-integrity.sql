@@ -72,7 +72,7 @@ BEGIN
 
   RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_journal_balanced ON journal_lines;
 CREATE CONSTRAINT TRIGGER trg_journal_balanced
@@ -95,10 +95,20 @@ CREATE CONSTRAINT TRIGGER trg_journal_balanced
 -- The history of what was once posted survives in full, which is the whole
 -- reason the physical row is kept. The deletion stamp must be set in the same
 -- statement, so an entry can never be marked deleted without saying when and by
--- whom -- and the reverse transition does not exist: an entry cannot be
--- un-deleted by an UPDATE any more than it could be edited.
+-- whom. Trash restore is the one reverse transition: DELETED back to POSTED or
+-- REVERSED, only when the stamp is cleared and nothing else about the row moves.
 CREATE OR REPLACE FUNCTION forbid_posted_journal_mutation() RETURNS trigger AS $$
 BEGIN
+  -- Company wipe / restore: the whole organisation is being removed in this
+  -- transaction. Delete is required for CASCADE. Update is required first, to
+  -- clear reversalOfId on posted journals (ON DELETE RESTRICT on that self-FK).
+  IF current_setting('app.allow_company_wipe', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+
   IF TG_OP = 'DELETE' THEN
     IF OLD.status <> 'DRAFT' THEN
       RAISE EXCEPTION
@@ -128,6 +138,26 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
+  -- Restoring from Trash. Mirror of the deletion transition: status goes back,
+  -- the stamp clears, and every other column stays byte-identical.
+  IF OLD.status = 'DELETED' AND NEW.status IN ('POSTED', 'REVERSED') THEN
+    IF NEW."deletedAt" IS NOT NULL THEN
+      RAISE EXCEPTION
+        'Journal % cannot be restored without clearing the deletion stamp.', OLD."journalNumber"
+        USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF (to_jsonb(NEW) - 'status' - 'updatedAt' - 'deletedAt' - 'deletedById' - 'deleteReason')
+       = (to_jsonb(OLD) - 'status' - 'updatedAt' - 'deletedAt' - 'deletedById' - 'deleteReason')
+    THEN
+      RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION
+      'Journal % cannot be changed while it is being restored.', OLD."journalNumber"
+      USING ERRCODE = 'check_violation';
+  END IF;
+
   IF OLD.status = 'DELETED' THEN
     RAISE EXCEPTION
       'Journal % has been deleted and cannot be changed.', OLD."journalNumber"
@@ -154,7 +184,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_journal_immutable ON journals;
 CREATE TRIGGER trg_journal_immutable
@@ -167,6 +197,13 @@ CREATE OR REPLACE FUNCTION forbid_posted_line_mutation() RETURNS trigger AS $$
 DECLARE
   v_status text;
 BEGIN
+  IF current_setting('app.allow_company_wipe', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+
   SELECT status::text INTO v_status
     FROM journals WHERE id = COALESCE(OLD."journalId", NEW."journalId");
 
@@ -183,7 +220,7 @@ BEGIN
 
   RETURN COALESCE(NEW, OLD);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_journal_line_immutable ON journal_lines;
 CREATE TRIGGER trg_journal_line_immutable
@@ -228,7 +265,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_journal_period_open ON journals;
 CREATE TRIGGER trg_journal_period_open
@@ -284,7 +321,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_journal_line_dimensions ON journal_lines;
 CREATE TRIGGER trg_journal_line_dimensions
@@ -300,6 +337,10 @@ CREATE TRIGGER trg_journal_line_dimensions
 CREATE OR REPLACE FUNCTION protect_system_accounts() RETURNS trigger AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
+    -- Company wipe / restore: the whole organisation is being removed.
+    IF current_setting('app.allow_company_wipe', true) = 'on' THEN
+      RETURN OLD;
+    END IF;
     IF OLD."isSystem" THEN
       RAISE EXCEPTION
         'Account % (%) is a system account and cannot be deleted. Rename it if the wording does not suit you.',
@@ -323,7 +364,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_protect_system_accounts ON ledger_accounts;
 CREATE TRIGGER trg_protect_system_accounts
@@ -358,7 +399,7 @@ BEGIN
     WHEN 'INCOME' THEN 'REVENUE'
     WHEN 'OTHER_INCOME' THEN 'REVENUE'
     WHEN 'SALES_DISCOUNTS' THEN 'REVENUE'
-    WHEN 'COST_OF_GOODS_SOLD' THEN 'EXPENSE'
+    WHEN 'COST_OF_GOODS_SOLD' THEN 'COGS'
     WHEN 'OPERATING_EXPENSE' THEN 'EXPENSE'
     WHEN 'OTHER_EXPENSE' THEN 'EXPENSE'
     WHEN 'DEPRECIATION' THEN 'EXPENSE'
@@ -389,7 +430,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_account_classification ON ledger_accounts;
 CREATE TRIGGER trg_account_classification

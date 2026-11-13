@@ -2,12 +2,12 @@ import 'server-only'
 import type { JournalSourceType } from '@prisma/client'
 
 import { Decimal, roundToCurrency, toMoneyString, ZERO } from '@/lib/money'
-import { toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
+import { addDays, toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
 import { writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
 import type { Tx } from '@/server/db'
 import { conflict, notFound, precondition, validation } from '@/server/errors'
-import { nextDocumentNumber } from '@/server/sequences'
+import { assignDocumentNumber, nextDocumentNumber, numberTaken } from '@/server/sequences'
 import { resolvePeriod } from './period'
 
 export type DraftLine = {
@@ -17,6 +17,7 @@ export type DraftLine = {
   description?: string | null
   customerId?: string | null
   vendorId?: string | null
+  trackingCategoryId?: string | null
 }
 
 export type DraftJournal = {
@@ -26,6 +27,8 @@ export type DraftJournal = {
   sourceId?: string | null
   isAdjusting?: boolean
   isClosingEntry?: boolean
+  /** Manual accruals only — see Phase 11.8. Ignored on reversals. */
+  autoReverse?: boolean
   idempotencyKey?: string | null
   /**
    * Set when this journal reverses another. Supplied at creation rather than
@@ -34,6 +37,21 @@ export type DraftJournal = {
    */
   reversalOfId?: string | null
   reversalReason?: string | null
+  /** Set only when someone typed the entry number. Other postings take the next one. */
+  journalNumber?: string | null
+  /**
+   * Maker-checker: write a draft journal that does not affect balances until
+   * `promoteDraftJournal` flips it to POSTED.
+   */
+  asDraft?: boolean
+  /**
+   * Document currency. Defaults to the organisation base. When different (or
+   * `exchangeRate` ≠ 1), line amounts are treated as foreign and converted to
+   * base for the ledger; foreign amounts are stored on the lines (ADR-0006).
+   */
+  currencyCode?: string | null
+  /** Units of base currency per one unit of document currency. Default 1. */
+  exchangeRate?: Decimal.Value | null
   lines: DraftLine[]
 }
 
@@ -59,7 +77,13 @@ export async function postJournal(
   ctx: OrgContext,
   draft: DraftJournal,
 ): Promise<PostedJournal> {
-  const currency = ctx.organization.baseCurrency
+  const baseCurrency = ctx.organization.baseCurrency
+  const docCurrency = (draft.currencyCode ?? baseCurrency).toUpperCase()
+  const rate = new Decimal(draft.exchangeRate ?? 1)
+  if (rate.lessThanOrEqualTo(0)) {
+    throw validation('Exchange rate must be greater than zero.')
+  }
+  const isFx = docCurrency !== baseCurrency || !rate.equals(1)
 
   // 1. Idempotency. A retried request must not post twice.
   if (draft.idempotencyKey) {
@@ -76,13 +100,26 @@ export async function postJournal(
   // 2. Round every amount before anything else looks at it, and drop the lines
   //    that round to nothing. A line that rounds to zero is not an error — a 0.4c
   //    tax line on a rounding-heavy invoice is real — it simply has no effect.
+  //    When FX is on, draft amounts are foreign; base = foreign × rate.
   const rounded = draft.lines
-    .map((line, index) => ({
-      source: line,
-      index,
-      debit: roundToCurrency(line.debit ?? 0, currency),
-      credit: roundToCurrency(line.credit ?? 0, currency),
-    }))
+    .map((line, index) => {
+      const foreignDebit = roundToCurrency(line.debit ?? 0, isFx ? docCurrency : baseCurrency)
+      const foreignCredit = roundToCurrency(line.credit ?? 0, isFx ? docCurrency : baseCurrency)
+      const debit = isFx
+        ? roundToCurrency(foreignDebit.times(rate), baseCurrency)
+        : foreignDebit
+      const credit = isFx
+        ? roundToCurrency(foreignCredit.times(rate), baseCurrency)
+        : foreignCredit
+      return {
+        source: line,
+        index,
+        debit,
+        credit,
+        foreignDebit: isFx ? foreignDebit : null,
+        foreignCredit: isFx ? foreignCredit : null,
+      }
+    })
     .filter((line) => !line.debit.isZero() || !line.credit.isZero())
 
   // 3. Shape.
@@ -101,7 +138,7 @@ export async function postJournal(
     throw validation('A journal needs at least two lines: something debited and something credited.')
   }
 
-  // 4. Balance, to the cent.
+  // 4. Balance, to the cent (always in base).
   const debits = rounded.reduce((total, line) => total.plus(line.debit), ZERO)
   const credits = rounded.reduce((total, line) => total.plus(line.credit), ZERO)
 
@@ -137,7 +174,16 @@ export async function postJournal(
   }
 
   // 7. Number, allocated under a row lock so two concurrent posts cannot collide.
-  const journalNumber = await nextDocumentNumber(tx, ctx.orgId, 'JOURNAL')
+  const journalNumber = draft.journalNumber
+    ? await assignDocumentNumber(tx, ctx.orgId, 'JOURNAL', draft.journalNumber)
+    : await nextDocumentNumber(tx, ctx.orgId, 'JOURNAL')
+  if (draft.journalNumber) {
+    const clash = await tx.journal.findFirst({
+      where: { orgId: ctx.orgId, journalNumber },
+      select: { id: true },
+    })
+    if (clash) throw numberTaken()
+  }
 
   // 8. Write. The deferred balance trigger re-checks all of this at COMMIT.
   const journal = await tx.journal.create({
@@ -149,13 +195,14 @@ export async function postJournal(
       memo: draft.memo ?? null,
       sourceType: draft.sourceType,
       sourceId: draft.sourceId ?? null,
-      status: 'POSTED',
+      status: draft.asDraft ? 'DRAFT' : 'POSTED',
       isAdjusting: draft.isAdjusting ?? false,
       isClosingEntry: draft.isClosingEntry ?? false,
+      autoReverse: draft.reversalOfId ? false : (draft.autoReverse ?? false),
       reversalOfId: draft.reversalOfId ?? null,
       reversalReason: draft.reversalReason ?? null,
-      currencyCode: currency,
-      exchangeRate: 1,
+      currencyCode: isFx ? docCurrency : baseCurrency,
+      exchangeRate: isFx ? rate.toFixed(9) : '1',
       idempotencyKey: draft.idempotencyKey ?? null,
       createdById: ctx.userId,
       lines: {
@@ -165,9 +212,12 @@ export async function postJournal(
           accountId: line.source.accountId,
           debit: line.debit.toFixed(4),
           credit: line.credit.toFixed(4),
+          foreignDebit: line.foreignDebit?.toFixed(4) ?? null,
+          foreignCredit: line.foreignCredit?.toFixed(4) ?? null,
           description: line.source.description ?? null,
           customerId: line.source.customerId ?? null,
           vendorId: line.source.vendorId ?? null,
+          trackingCategoryId: line.source.trackingCategoryId ?? null,
           // The trigger overwrites this with the header's date; supplying it keeps
           // the column non-null in Prisma's types.
           journalDate: toDate(draft.date),
@@ -180,17 +230,89 @@ export async function postJournal(
   await writeAudit(tx, ctx, {
     entity: 'Journal',
     entityId: journal.id,
-    action: 'POST',
+    action: draft.asDraft ? 'SUBMIT' : 'POST',
     after: {
       journalNumber: journal.journalNumber,
       date: draft.date,
       sourceType: draft.sourceType,
       total: toMoneyString(debits, 2),
       lines: rounded.length,
+      draft: draft.asDraft ?? false,
     },
   })
 
   return { ...journal, total: toMoneyString(debits, 2) }
+}
+
+/**
+ * Flip a maker-checker draft journal onto the ledger. Reports and balances only
+ * read POSTED entries, so this is the moment the entry becomes real.
+ */
+export async function promoteDraftJournal(
+  tx: Tx,
+  ctx: OrgContext,
+  journalId: string,
+): Promise<PostedJournal> {
+  const journal = await tx.journal.findFirst({
+    where: { id: journalId, orgId: ctx.orgId },
+    select: {
+      id: true,
+      journalNumber: true,
+      date: true,
+      periodId: true,
+      status: true,
+      autoReverse: true,
+    },
+  })
+  if (!journal) throw notFound('Journal')
+  if (journal.status === 'POSTED') {
+    const total = await journalTotal(tx, journal.id)
+    return { ...journal, total }
+  }
+  if (journal.status !== 'DRAFT') {
+    throw precondition(`Journal ${journal.journalNumber} is not waiting to be posted.`)
+  }
+
+  await tx.journal.update({
+    where: { id: journal.id },
+    data: { status: 'POSTED', postedAt: new Date() },
+  })
+
+  const total = await journalTotal(tx, journal.id)
+  await writeAudit(tx, ctx, {
+    entity: 'Journal',
+    entityId: journal.id,
+    action: 'POST',
+    after: { journalNumber: journal.journalNumber, promotedFromDraft: true, total },
+  })
+
+  if (journal.autoReverse) {
+    await autoReversePostedJournal(tx, ctx, journal.id, journal.date)
+  }
+
+  return { ...journal, total }
+}
+
+/**
+ * Write the mirror of a posted accrual, dated the first day of the next period.
+ *
+ * Both rows stay on the ledger: REVERSED originals still count in balances (the
+ * reversal sits beside them). Dating the mirror into the next period is what
+ * stops October's accrual from also sitting in November after the real bill
+ * posts — without anyone remembering to reverse by hand.
+ */
+export async function autoReversePostedJournal(
+  tx: Tx,
+  ctx: OrgContext,
+  journalId: string,
+  originalDate: Date,
+): Promise<PostedJournal> {
+  const period = await resolvePeriod(tx, ctx.orgId, ctx.organization.fiscalYearStartMonth, toCalendarDate(originalDate))
+  const reverseOn = addDays(toCalendarDate(period.endDate), 1)
+  return reverseJournal(tx, ctx, journalId, {
+    date: reverseOn,
+    reason: 'Automatic reversal',
+  })
 }
 
 /**
@@ -228,6 +350,7 @@ export async function reverseJournal(
           description: true,
           customerId: true,
           vendorId: true,
+          trackingCategoryId: true,
         },
       },
     },
@@ -267,6 +390,7 @@ export async function reverseJournal(
       description: line.description,
       customerId: line.customerId,
       vendorId: line.vendorId,
+      trackingCategoryId: line.trackingCategoryId,
     })),
   })
 
@@ -340,7 +464,9 @@ async function assertAccountsPostable(tx: Tx, ctx: OrgContext, lines: RoundedLin
     }
     if (account._count.children > 0) {
       throw validation(
-        `Account ${account.code} ${account.name} is a grouping heading. Post to one of its sub-accounts.`,
+        account.systemKey
+          ? `Account ${account.code} ${account.name} is a grouping heading, but it is still bound as a system account (${account.systemKey.replaceAll('_', ' ').toLowerCase()}). Open Settings → Default accounts and rebind that role to one of its sub-accounts (or create a detail account such as 5010 and bind there).`
+          : `Account ${account.code} ${account.name} is a grouping heading. Post to one of its sub-accounts.`,
       )
     }
   }

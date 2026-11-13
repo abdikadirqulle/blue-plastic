@@ -2,6 +2,7 @@ import type { OrgContext } from '@/server/auth/context'
 import { permissionsFor } from '@/server/auth/permissions'
 import { db, type Tx } from '@/server/db'
 import { seedChartOfAccounts } from '@/server/accounting/chart-of-accounts'
+import { DEFAULT_FEATURE_FLAGS } from '@/lib/feature-flags'
 
 class Rollback extends Error {}
 
@@ -44,8 +45,12 @@ export async function makeOrg(tx: Tx, options: { fiscalYearStartMonth?: number }
       timeZone: 'UTC',
     },
     select: {
-      id: true, name: true, baseCurrency: true, fiscalYearStartMonth: true,
-      timeZone: true, allowNegativeStock: true,
+      id: true, name: true, legalName: true, baseCurrency: true, fiscalYearStartMonth: true,
+      timeZone: true, allowNegativeStock: true, posTillLedgerMode: true, parentOrgId: true,
+      addressLine1: true, addressLine2: true, city: true, region: true,
+      postalCode: true, country: true, phone: true, email: true, website: true,
+      brandMark: true, logoStorageKey: true, updatedAt: true,
+      accessRestricted: true, rentExpiresAt: true, maxUsers: true, rentNote: true,
     },
   })
 
@@ -68,13 +73,23 @@ export async function makeOrg(tx: Tx, options: { fiscalYearStartMonth?: number }
   const accounts: Record<string, string> = {}
   for (const row of rows) accounts[row.code] = row.id
 
+  const { logoStorageKey, ...orgFields } = organization
+
   return {
     ctx: {
       orgId: organization.id,
       userId: user.id,
       role: 'OWNER',
       permissions: permissionsFor('OWNER'),
-      organization,
+      isSystemOwner: false,
+      canConnect: false,
+      systemOwnerBreakGlass: false,
+      portalCustomerId: null,
+      features: DEFAULT_FEATURE_FLAGS,
+      organization: {
+        ...orgFields,
+        hasLogo: Boolean(logoStorageKey),
+      },
       user,
     },
     accounts,

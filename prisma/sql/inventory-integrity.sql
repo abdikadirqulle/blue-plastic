@@ -26,6 +26,13 @@ ALTER TABLE inventory_transactions
 -- design rests on. Corrections are adjustments, which are themselves movements.
 CREATE OR REPLACE FUNCTION forbid_inventory_movement_change() RETURNS trigger AS $$
 BEGIN
+  IF current_setting('app.allow_company_wipe', true) = 'on' THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+
   IF TG_OP = 'DELETE' THEN
     RAISE EXCEPTION
       'Stock movements cannot be deleted. Record an adjustment instead.'
@@ -47,7 +54,7 @@ BEGIN
     'Stock movements cannot be changed. Record an adjustment instead.'
     USING ERRCODE = 'check_violation';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_inventory_movement_immutable ON inventory_transactions;
 CREATE TRIGGER trg_inventory_movement_immutable
@@ -71,7 +78,7 @@ BEGIN
       USING ERRCODE = 'foreign_key_violation';
   END IF;
 
-  IF v_type <> 'INVENTORY' THEN
+  IF v_type <> 'INVENTORY' AND v_type <> 'INVENTORY_ASSEMBLY' THEN
     RAISE EXCEPTION
       '"%" is not a tracked inventory item, so it has no stock to move.', v_name
       USING ERRCODE = 'check_violation';
@@ -79,7 +86,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_movement_item_tracked ON inventory_transactions;
 CREATE TRIGGER trg_movement_item_tracked
@@ -139,7 +146,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_movement_continuity ON inventory_transactions;
 CREATE TRIGGER trg_movement_continuity

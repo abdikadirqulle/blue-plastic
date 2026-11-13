@@ -30,7 +30,7 @@ import { db, type Tx } from '@/server/db'
  */
 
 /** Accounts whose balance is naturally a debit. The rest are naturally credits. */
-export const DEBIT_NORMAL: AccountType[] = ['ASSET', 'EXPENSE']
+export const DEBIT_NORMAL: AccountType[] = ['ASSET', 'COGS', 'EXPENSE']
 
 export const isDebitNormal = (type: AccountType): boolean => DEBIT_NORMAL.includes(type)
 
@@ -210,6 +210,8 @@ export type LedgerEntry = {
   journalId: string
   journalNumber: string
   date: Date
+  /** When the journal was posted — the time shown beside the date on a register. */
+  recordedAt: Date
   memo: string | null
   description: string | null
   sourceType: string
@@ -222,15 +224,47 @@ export type LedgerEntry = {
   balance: Decimal
   /** The other accounts in the same journal — what a register shows in its "account" column. */
   contraAccounts: string
+  /** Subtypes of those other accounts, comma-separated, so a statement can name the type. */
+  contraSubtypes: string
+  /** Those same accounts, one by one, with the amount posted to each. */
+  splits: { code: string; name: string; amount: string }[]
   /** The customer or vendor the line was posted against, on a control account. */
   customerId: string | null
   vendorId: string | null
   partyName: string | null
 }
 
+function readSplits(value: unknown): { code: string; name: string; amount: string }[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const row = item as { code?: unknown; name?: unknown; amount?: unknown }
+    if (typeof row.code !== 'string' || typeof row.name !== 'string') return []
+    return [{ code: row.code, name: row.name, amount: String(row.amount ?? '0') }]
+  })
+}
+
+/** Self plus every descendant under `accountId` (breadth-first, capped). */
+async function accountFamilyIds(client: Tx | typeof db, orgId: string, accountId: string) {
+  const ids = [accountId]
+  let frontier = [accountId]
+  for (let depth = 0; depth < 8 && frontier.length > 0; depth += 1) {
+    const children = await client.ledgerAccount.findMany({
+      where: { orgId, parentId: { in: frontier } },
+      select: { id: true },
+    })
+    frontier = children.map((child) => child.id)
+    ids.push(...frontier)
+  }
+  return ids
+}
+
 /**
  * The general ledger for one account: every posted line, in date order, with a
  * running balance. This is the drill-down behind every figure on every report.
+ *
+ * When the account has sub-accounts (e.g. POS Banks → tills), lines on those
+ * children are included so the parent report rolls the family together.
  */
 export async function generalLedger(
   orgId: string,
@@ -247,12 +281,14 @@ export async function generalLedger(
     return { opening: ZERO, entries: [], closing: ZERO, type: 'ASSET' }
   }
 
+  const familyIds = await accountFamilyIds(client, orgId, accountId)
+
   const [openingRow] = await client.$queryRaw<{ debit: string; credit: string }[]>`
     SELECT COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit
       FROM journal_lines l
       JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
      WHERE l."orgId" = ${orgId}
-       AND l."accountId" = ${accountId}
+       AND l."accountId" = ANY(${familyIds})
        AND l."journalDate" < ${toDate(range.from)}
   `
 
@@ -264,6 +300,7 @@ export async function generalLedger(
       journalId: string
       journalNumber: string
       date: Date
+      recordedAt: Date
       memo: string | null
       description: string | null
       sourceType: string
@@ -272,6 +309,8 @@ export async function generalLedger(
       debit: string
       credit: string
       contraAccounts: string | null
+      contraSubtypes: string | null
+      splits: unknown
       customerId: string | null
       vendorId: string | null
       partyName: string | null
@@ -281,6 +320,7 @@ export async function generalLedger(
            j.id              AS "journalId",
            j."journalNumber" AS "journalNumber",
            j.date            AS "date",
+           j."postedAt"      AS "recordedAt",
            j.memo            AS "memo",
            l.description     AS "description",
            j."sourceType"::text AS "sourceType",
@@ -297,13 +337,36 @@ export async function generalLedger(
                JOIN ledger_accounts ca ON ca.id = cl."accountId"
               WHERE cl."journalId" = l."journalId"
                 AND cl."accountId" <> l."accountId"
-           ) AS "contraAccounts"
+           ) AS "contraAccounts",
+           (
+             SELECT string_agg(DISTINCT ca.subtype::text, ', ' ORDER BY ca.subtype::text)
+               FROM journal_lines cl
+               JOIN ledger_accounts ca ON ca.id = cl."accountId"
+              WHERE cl."journalId" = l."journalId"
+                AND cl."accountId" <> l."accountId"
+           ) AS "contraSubtypes",
+           COALESCE((
+             SELECT json_agg(
+                      json_build_object('code', s.code, 'name', s.name, 'amount', s.amount)
+                      ORDER BY s.code
+                    )
+               FROM (
+                 SELECT ca.code AS code,
+                        ca.name AS name,
+                        SUM(cl.debit - cl.credit) AS amount
+                   FROM journal_lines cl
+                   JOIN ledger_accounts ca ON ca.id = cl."accountId"
+                  WHERE cl."journalId" = l."journalId"
+                    AND cl."accountId" <> l."accountId"
+                  GROUP BY ca.code, ca.name
+               ) s
+           ), '[]'::json) AS splits
       FROM journal_lines l
       JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
       LEFT JOIN customers cu ON cu.id = l."customerId"
       LEFT JOIN vendors   ve ON ve.id = l."vendorId"
      WHERE l."orgId" = ${orgId}
-       AND l."accountId" = ${accountId}
+       AND l."accountId" = ANY(${familyIds})
        AND l."journalDate" >= ${toDate(range.from)}
        AND l."journalDate" <= ${toDate(range.to)}
      ORDER BY j.date ASC, j."journalNumber" ASC, l."lineNumber" ASC
@@ -320,6 +383,7 @@ export async function generalLedger(
       journalId: row.journalId,
       journalNumber: row.journalNumber,
       date: row.date,
+      recordedAt: row.recordedAt instanceof Date ? row.recordedAt : new Date(row.recordedAt),
       memo: row.memo,
       description: row.description,
       sourceType: row.sourceType,
@@ -329,6 +393,8 @@ export async function generalLedger(
       credit,
       balance: running,
       contraAccounts: row.contraAccounts ?? '—',
+      contraSubtypes: row.contraSubtypes ?? '',
+      splits: readSplits(row.splits),
       customerId: row.customerId,
       vendorId: row.vendorId,
       partyName: row.partyName,
@@ -336,4 +402,264 @@ export async function generalLedger(
   })
 
   return { opening, entries, closing: running, type: account.type }
+}
+
+export type LedgerBookLine = {
+  lineId: string
+  journalId: string
+  journalNumber: string
+  date: Date
+  recordedAt: Date
+  memo: string | null
+  description: string | null
+  sourceType: string
+  sourceId: string | null
+  status: string
+  debit: Decimal
+  credit: Decimal
+  /** Running balance on the section account’s natural side, after this line. */
+  balance: Decimal
+  customerId: string | null
+  vendorId: string | null
+  partyName: string | null
+}
+
+export type LedgerBookSection = {
+  id: string
+  code: string
+  name: string
+  type: AccountType
+  opening: Decimal
+  closing: Decimal
+  entries: LedgerBookLine[]
+}
+
+type BookAccount = {
+  id: string
+  code: string
+  name: string
+  type: AccountType
+  parentId: string | null
+}
+
+type BookLine = {
+  lineId: string
+  accountId: string
+  journalId: string
+  journalNumber: string
+  date: Date
+  recordedAt: Date | null
+  memo: string | null
+  description: string | null
+  sourceType: string
+  sourceId: string | null
+  status: string
+  debit: string
+  credit: string
+  customerId: string | null
+  vendorId: string | null
+  partyName: string | null
+  lineNumber: number
+}
+
+/**
+ * Self plus descendants, breadth-first, eight levels deep — the same family
+ * `generalLedger` walks, computed here from the chart instead of one query per hop.
+ */
+function accountFamilies(accounts: BookAccount[]): Map<string, string[]> {
+  const children = new Map<string, string[]>()
+  const ids = new Set(accounts.map((account) => account.id))
+  for (const account of accounts) {
+    if (!account.parentId || !ids.has(account.parentId)) continue
+    const list = children.get(account.parentId)
+    if (list) list.push(account.id)
+    else children.set(account.parentId, [account.id])
+  }
+
+  const families = new Map<string, string[]>()
+  for (const account of accounts) {
+    const family = [account.id]
+    const seen = new Set(family)
+    let frontier = family
+    for (let depth = 0; depth < 8 && frontier.length > 0; depth += 1) {
+      const next: string[] = []
+      for (const id of frontier) {
+        for (const child of children.get(id) ?? []) {
+          if (seen.has(child)) continue
+          seen.add(child)
+          next.push(child)
+        }
+      }
+      frontier = next
+      family.push(...next)
+    }
+    families.set(account.id, family)
+  }
+  return families
+}
+
+function asDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value)
+}
+
+function compareBookLines(a: BookLine, b: BookLine): number {
+  const byDate = asDate(a.date).getTime() - asDate(b.date).getTime()
+  if (byDate !== 0) return byDate
+  if (a.journalNumber !== b.journalNumber) return a.journalNumber < b.journalNumber ? -1 : 1
+  return a.lineNumber - b.lineNumber
+}
+
+/**
+ * Every account’s general ledger for a report, in two queries.
+ *
+ * Calling `generalLedger` once per account is a round trip (and three
+ * per-line lookups) for each row of the chart. On a hosted database that is
+ * minutes even for an empty month, because the opening balance still runs.
+ * A parent section still includes its sub-accounts, and still stops at
+ * `limit` lines — the same register the one-account ledger shows.
+ */
+export async function generalLedgerBook(
+  orgId: string,
+  range: { from: CalendarDate; to: CalendarDate },
+  options: { limit?: number; client?: Tx } = {},
+): Promise<LedgerBookSection[]> {
+  const client = options.client ?? db
+  const limit = options.limit ?? 500
+  const from = toDate(range.from)
+  const to = toDate(range.to)
+
+  const [accounts, openings, lines] = await Promise.all([
+    client.ledgerAccount.findMany({
+      where: { orgId },
+      select: { id: true, code: true, name: true, type: true, parentId: true },
+      orderBy: { code: 'asc' },
+    }),
+    client.$queryRaw<{ accountId: string; debit: string; credit: string }[]>`
+      SELECT l."accountId" AS "accountId",
+             COALESCE(SUM(l.debit), 0)::text  AS debit,
+             COALESCE(SUM(l.credit), 0)::text AS credit
+        FROM journal_lines l
+        JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+       WHERE l."orgId" = ${orgId}
+         AND l."journalDate" < ${from}
+       GROUP BY l."accountId"
+    `,
+    client.$queryRaw<BookLine[]>`
+      SELECT ranked."lineId"        AS "lineId",
+             ranked."accountId"     AS "accountId",
+             ranked."journalId"     AS "journalId",
+             ranked."journalNumber" AS "journalNumber",
+             ranked."date"          AS "date",
+             ranked."recordedAt"    AS "recordedAt",
+             ranked."memo"          AS "memo",
+             ranked."description"   AS "description",
+             ranked."sourceType"    AS "sourceType",
+             ranked."sourceId"      AS "sourceId",
+             ranked."status"        AS "status",
+             ranked."debit"         AS "debit",
+             ranked."credit"        AS "credit",
+             ranked."customerId"    AS "customerId",
+             ranked."vendorId"      AS "vendorId",
+             ranked."partyName"     AS "partyName",
+             ranked."lineNumber"    AS "lineNumber"
+        FROM (
+          SELECT l.id                   AS "lineId",
+                 l."accountId"          AS "accountId",
+                 j.id                   AS "journalId",
+                 j."journalNumber"      AS "journalNumber",
+                 j.date                 AS "date",
+                 j."postedAt"           AS "recordedAt",
+                 j.memo                 AS "memo",
+                 l.description          AS "description",
+                 j."sourceType"::text   AS "sourceType",
+                 j."sourceId"           AS "sourceId",
+                 j.status::text         AS "status",
+                 l.debit::text          AS "debit",
+                 l.credit::text         AS "credit",
+                 l."customerId"         AS "customerId",
+                 l."vendorId"           AS "vendorId",
+                 COALESCE(cu."displayName", ve."displayName") AS "partyName",
+                 l."lineNumber"         AS "lineNumber",
+                 ROW_NUMBER() OVER (
+                   PARTITION BY l."accountId"
+                   ORDER BY j.date ASC, j."journalNumber" ASC, l."lineNumber" ASC
+                 ) AS rn
+            FROM journal_lines l
+            JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+            LEFT JOIN customers cu ON cu.id = l."customerId"
+            LEFT JOIN vendors   ve ON ve.id = l."vendorId"
+           WHERE l."orgId" = ${orgId}
+             AND l."journalDate" >= ${from}
+             AND l."journalDate" <= ${to}
+        ) ranked
+       WHERE ranked.rn <= ${limit}
+    `,
+  ])
+
+  const openingByAccount = new Map(openings.map((row) => [row.accountId, row]))
+  const linesByAccount = new Map<string, BookLine[]>()
+  for (const line of lines) {
+    const list = linesByAccount.get(line.accountId)
+    if (list) list.push(line)
+    else linesByAccount.set(line.accountId, [line])
+  }
+  const families = accountFamilies(accounts)
+
+  const sections: LedgerBookSection[] = []
+  for (const account of accounts) {
+    const family = families.get(account.id) ?? [account.id]
+    let debit = ZERO
+    let credit = ZERO
+    const familyLines: BookLine[] = []
+    for (const id of family) {
+      const opening = openingByAccount.get(id)
+      if (opening) {
+        debit = debit.plus(opening.debit)
+        credit = credit.plus(opening.credit)
+      }
+      const own = linesByAccount.get(id)
+      if (own) familyLines.push(...own)
+    }
+    familyLines.sort(compareBookLines)
+    const shown = familyLines.slice(0, limit)
+    const opening = naturalBalance(account.type, debit, credit)
+    if (shown.length === 0 && opening.isZero()) continue
+
+    let running = opening
+    const entries = shown.map((line): LedgerBookLine => {
+      const lineDebit = new Decimal(line.debit)
+      const lineCredit = new Decimal(line.credit)
+      running = running.plus(naturalBalance(account.type, lineDebit, lineCredit))
+      return {
+        lineId: line.lineId,
+        journalId: line.journalId,
+        journalNumber: line.journalNumber,
+        date: asDate(line.date),
+        recordedAt: line.recordedAt ? asDate(line.recordedAt) : asDate(line.date),
+        memo: line.memo,
+        description: line.description,
+        sourceType: line.sourceType,
+        sourceId: line.sourceId,
+        status: line.status,
+        debit: lineDebit,
+        credit: lineCredit,
+        balance: running,
+        customerId: line.customerId,
+        vendorId: line.vendorId,
+        partyName: line.partyName,
+      }
+    })
+
+    sections.push({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: account.type,
+      opening,
+      closing: running,
+      entries,
+    })
+  }
+
+  return sections
 }

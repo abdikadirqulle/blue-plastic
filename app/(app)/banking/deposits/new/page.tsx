@@ -1,24 +1,31 @@
 import type { Metadata } from 'next'
-import Link from 'next/link'
-import { ArrowLeftIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { DepositForm } from '@/components/banking/deposit-form'
-import { buttonVariants } from '@/components/ui/button'
 import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
+import { peekDocumentNumber } from '@/server/sequences'
 import * as accountService from '@/server/services/account.service'
 import * as bankingService from '@/server/services/banking.service'
 
 export const metadata: Metadata = { title: 'Make a deposit' }
 
-export default async function NewDepositPage() {
+export default async function NewDepositPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireOrgContext('bank:transact')
+  const params = await searchParams
+  const bank =
+    typeof params.bank === 'string' && params.bank.length > 0 ? params.bank : undefined
 
-  const [payments, chart] = await Promise.all([
+  const [payments, chart, documentNumber] = await Promise.all([
     bankingService.undepositedPayments(ctx),
     accountService.selectableAccounts(ctx, { withBalances: true }),
+    peekDocumentNumber(db, ctx.orgId, 'DEPOSIT'),
   ])
 
   // Deposit *to* any account the business banks into; the rest of the chart is
@@ -34,9 +41,6 @@ export default async function NewDepositPage() {
 
   return (
     <>
-      <Link href="/banking" className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}>
-        <ArrowLeftIcon /> Banking
-      </Link>
 
       <PageHeader
         title="Make a deposit"
@@ -56,6 +60,8 @@ export default async function NewDepositPage() {
         }))}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
+        documentNumber={documentNumber}
+        defaultBankAccountId={bank}
       />
     </>
   )

@@ -27,6 +27,7 @@ const SOFT_DELETED_MODELS = new Set([
   'BankTransfer',
   'Deposit',
   'InventoryAdjustment',
+  'AssemblyBuild',
   'Item',
 ])
 
@@ -61,8 +62,12 @@ function withoutDeleted(args: QueryArgs): QueryArgs {
 function createClient() {
   const adapter = new PrismaPg({
     connectionString: env.DATABASE_URL,
-    // Serverless-friendly ceiling. Raise it for a long-lived Node server.
-    max: 10,
+    // One connection per serverless instance. Pair with DATABASE_URL
+    // pgbouncer=true and connection_limit=1 on the Supabase transaction pooler (:6543).
+    max: env.NODE_ENV === 'production' ? 1 : 5,
+    // Fail the page quickly when the pooler is paused or the host is wrong,
+    // instead of hanging until the platform kills the function.
+    connectionTimeoutMillis: 8_000,
   })
 
   const client = new PrismaClient({
@@ -100,9 +105,21 @@ function createClient() {
  * The dev-mode global is what stops Next.js's module re-evaluation from opening a
  * new pool on every file save until Postgres refuses the connections.
  */
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient }
+const globalForPrisma = globalThis as unknown as {
+  prisma?: PrismaClient
+  prismaSchema?: string
+}
 
-const getClient = (): PrismaClient => (globalForPrisma.prisma ??= createClient())
+/** Bump when `prisma generate` adds models the cached client does not know. */
+const PRISMA_SCHEMA = 'rate-limit-buckets'
+
+const getClient = (): PrismaClient => {
+  if (globalForPrisma.prismaSchema !== PRISMA_SCHEMA) {
+    globalForPrisma.prisma = undefined
+    globalForPrisma.prismaSchema = PRISMA_SCHEMA
+  }
+  return (globalForPrisma.prisma ??= createClient())
+}
 
 export const db: PrismaClient = new Proxy({} as PrismaClient, {
   get(_target, property) {

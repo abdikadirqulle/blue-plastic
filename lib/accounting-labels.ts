@@ -10,6 +10,7 @@ export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   LIABILITY: 'Liabilities',
   EQUITY: 'Equity',
   REVENUE: 'Income',
+  COGS: 'Cost of goods sold',
   EXPENSE: 'Expenses',
 }
 
@@ -19,6 +20,7 @@ export const ACCOUNT_TYPE_ORDER: AccountType[] = [
   'LIABILITY',
   'EQUITY',
   'REVENUE',
+  'COGS',
   'EXPENSE',
 ]
 
@@ -70,8 +72,14 @@ export const SUBTYPES_BY_TYPE: Record<AccountType, AccountSubtype[]> = {
   ],
   EQUITY: ['OWNERS_EQUITY', 'RETAINED_EARNINGS', 'OPENING_BALANCE_EQUITY', 'DRAWINGS'],
   REVENUE: ['INCOME', 'OTHER_INCOME', 'SALES_DISCOUNTS'],
-  EXPENSE: ['COST_OF_GOODS_SOLD', 'OPERATING_EXPENSE', 'OTHER_EXPENSE', 'DEPRECIATION'],
+  COGS: ['COST_OF_GOODS_SOLD'],
+  EXPENSE: ['OPERATING_EXPENSE', 'OTHER_EXPENSE', 'DEPRECIATION'],
 }
+
+/** Detail-type order inside Assets / Liabilities / … — Bank together, then AR, … */
+export const ACCOUNT_SUBTYPE_ORDER: AccountSubtype[] = ACCOUNT_TYPE_ORDER.flatMap(
+  (type) => SUBTYPES_BY_TYPE[type],
+)
 
 export const JOURNAL_SOURCE_LABELS: Record<JournalSourceType, string> = {
   MANUAL: 'Manual journal',
@@ -90,6 +98,13 @@ export const JOURNAL_SOURCE_LABELS: Record<JournalSourceType, string> = {
   TRANSFER: 'Transfer',
   DEPOSIT: 'Deposit',
   INVENTORY_ADJUSTMENT: 'Inventory adjustment',
+  ASSEMBLY_BUILD: 'Assembly build',
+  POS_CASH_MOVE: 'POS cash in/out',
+  POS_SESSION_CLOSE: 'POS session close',
+  POS_TIP: 'POS tip',
+  POS_TIP_PAYOUT: 'POS tip payout',
+  PAYROLL: 'Payroll',
+  PAYROLL_SETTLEMENT: 'Payroll settlement',
 }
 
 export const PERIOD_STATUS_LABELS: Record<PeriodStatus, string> = {
@@ -100,4 +115,8 @@ export const PERIOD_STATUS_LABELS: Record<PeriodStatus, string> = {
 
 /** Accounts of these types are naturally debits; the rest are naturally credits. */
 export const isDebitNormalType = (type: AccountType): boolean =>
-  type === 'ASSET' || type === 'EXPENSE'
+  type === 'ASSET' || type === 'COGS' || type === 'EXPENSE'
+
+/** Income, cost of goods sold, and expenses — the accounts a profit and loss closes. */
+export const isProfitAndLossType = (type: AccountType): boolean =>
+  type === 'REVENUE' || type === 'COGS' || type === 'EXPENSE'

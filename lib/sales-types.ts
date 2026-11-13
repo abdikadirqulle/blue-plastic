@@ -30,7 +30,27 @@ export const SALES_TYPES: SalesTypeConfig[] = [
     slug: 'estimates',
     singular: 'Estimate',
     plural: 'Estimates',
+    effect: 'An estimate. Nothing has happened yet, so nothing is posted to the ledger.',
+    needsDeposit: false,
+    posts: false,
+    createPermission: 'invoice:create',
+  },
+  {
+    type: 'QUOTATION',
+    slug: 'quotations',
+    singular: 'Quotation',
+    plural: 'Quotations',
     effect: 'A quotation. Nothing has happened yet, so nothing is posted to the ledger.',
+    needsDeposit: false,
+    posts: false,
+    createPermission: 'invoice:create',
+  },
+  {
+    type: 'SALES_ORDER',
+    slug: 'sales-orders',
+    singular: 'Sales order',
+    plural: 'Sales orders',
+    effect: 'The customer has ordered. Nothing is owed until they collect, when this becomes an invoice or a sales receipt.',
     needsDeposit: false,
     posts: false,
     createPermission: 'invoice:create',
@@ -67,6 +87,66 @@ export const SALES_TYPES: SalesTypeConfig[] = [
   },
 ]
 
+/** Estimates and quotations — proposals that do not post until converted. */
+export function isProposal(type: SalesDocumentType | string | undefined | null): boolean {
+  return type === 'ESTIMATE' || type === 'QUOTATION'
+}
+
+/** A placed order. It does not post until the customer collects it. */
+export function isSalesOrder(type: SalesDocumentType | string | undefined | null): boolean {
+  return type === 'SALES_ORDER'
+}
+
+/**
+ * Date caption on the merchant print paper.
+ * Proposals and orders must not say "Invoice date".
+ */
+export function paperDateLabel(type: SalesDocumentType | string | undefined | null): string {
+  switch (type) {
+    case 'QUOTATION':
+      return 'Quotation date'
+    case 'ESTIMATE':
+      return 'Estimate date'
+    case 'SALES_ORDER':
+      return 'Order date'
+    case 'SALES_RECEIPT':
+      return 'Receipt date'
+    case 'CREDIT_MEMO':
+      return 'Credit date'
+    case 'REFUND_RECEIPT':
+      return 'Refund date'
+    default:
+      return 'Invoice date'
+  }
+}
+
+/**
+ * True when the paper can show PAID / UNPAID from money applied.
+ * Quotations, estimates, and sales orders are not collectible yet.
+ */
+export function paperShowsMoneyStatus(type: SalesDocumentType | string | undefined | null): boolean {
+  return type === 'INVOICE' || type === 'CREDIT_MEMO' || type === 'SALES_RECEIPT' || type === 'REFUND_RECEIPT'
+}
+
+/** The figure printed under the lines. An order is not yet money owed. */
+export function customerPaperTotalLabel(type: SalesDocumentType, needsDeposit: boolean): string {
+  if (needsDeposit) return 'Amount received'
+  if (type === 'SALES_ORDER') return 'Order total'
+  if (isProposal(type)) return 'Total'
+  return 'Balance due'
+}
+
+/** Blank item rows a new sales sheet shows. Invoice gets more room; others stay at 10. */
+export function defaultLineRows(type?: SalesDocumentType): number {
+  if (type === 'INVOICE') return 20
+  return 10
+}
+
+/** Extra blank lines when printing a ruled sheet. */
+export function printSheetLinePad(type?: SalesDocumentType): number {
+  return defaultLineRows(type)
+}
+
 export const bySlug = (slug: string): SalesTypeConfig | undefined =>
   SALES_TYPES.find((config) => config.slug === slug)
 
@@ -75,6 +155,8 @@ export const byType = (type: SalesDocumentType): SalesTypeConfig =>
 
 export const STATUS_LABELS: Record<string, string> = {
   DRAFT: 'Draft',
+  PENDING_APPROVAL: 'Awaiting approval',
+  MATCH_HOLD: 'Match hold',
   OPEN: 'Open',
   PARTIAL: 'Part paid',
   PAID: 'Paid',
@@ -86,6 +168,8 @@ export const STATUS_LABELS: Record<string, string> = {
 
 export const STATUS_VARIANTS: Record<string, 'default' | 'secondary' | 'success' | 'destructive' | 'warning' | 'outline'> = {
   DRAFT: 'outline',
+  PENDING_APPROVAL: 'warning',
+  MATCH_HOLD: 'warning',
   OPEN: 'default',
   PARTIAL: 'warning',
   PAID: 'success',

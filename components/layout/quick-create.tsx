@@ -10,6 +10,12 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { contactDialogOptions, itemDialogOptions } from '@/app/(app)/quick-create/actions'
 import type { AccountOption } from '@/components/master-data/item-dialog'
 import type { AccountPickerOption } from '@/lib/account-options'
+import {
+  documentKindForPath,
+  isDocumentKindEnabled,
+  moduleForPath,
+  type OrgFeatureFlags,
+} from '@/lib/feature-flags'
 import { cn } from '@/lib/utils'
 import { startNavigationProgress } from './navigation-progress'
 
@@ -33,7 +39,9 @@ const COLUMNS: { heading: string; entries: Entry[] }[] = [
       { label: 'Receive payment', href: '/payments/new', permission: 'payment:create' },
       { label: 'Sales receipt', href: '/sales/sales-receipts/new', permission: 'invoice:create' },
       { label: 'Estimate', href: '/sales/estimates/new', permission: 'invoice:create' },
+      { label: 'Quotation', href: '/sales/quotations/new', permission: 'invoice:create' },
       { label: 'Credit memo', href: '/sales/credit-memos/new', permission: 'invoice:create' },
+      { label: 'Customer statement', href: '/reports/statements/customer', permission: 'report:read' },
       { label: 'Refund receipt', href: '/sales/refunds/new', permission: 'invoice:create' },
       { label: 'Add customer', opens: 'customer', permission: 'customer:create' },
     ],
@@ -44,7 +52,11 @@ const COLUMNS: { heading: string; entries: Entry[] }[] = [
       { label: 'Bill', href: '/purchases/bills/new', permission: 'bill:create' },
       { label: 'Expense', href: '/purchases/expenses/new', permission: 'expense:create' },
       { label: 'Pay bills', href: '/bill-payments/new', permission: 'expense:create' },
+      { label: 'Purchase request', href: '/purchases/purchase-requests/new', permission: 'bill:create' },
+      { label: 'RFQ', href: '/purchases/rfqs/new', permission: 'bill:create' },
       { label: 'Purchase order', href: '/purchases/purchase-orders/new', permission: 'bill:create' },
+      { label: 'Receive items', href: '/purchases/purchase-orders?status=open', permission: 'bill:create' },
+      { label: 'Delivery', href: '/purchases/delivery', permission: 'bill:read' },
       { label: 'Vendor credit', href: '/purchases/vendor-credits/new', permission: 'bill:create' },
       { label: 'Add vendor', opens: 'vendor', permission: 'vendor:create' },
     ],
@@ -62,6 +74,7 @@ const COLUMNS: { heading: string; entries: Entry[] }[] = [
     entries: [
       { label: 'Journal entry', href: '/journals/new', permission: 'journal:create' },
       { label: 'Inventory adjustment', href: '/inventory/adjustments/new', permission: 'inventory:adjust' },
+      { label: 'Project', href: '/projects/new', permission: 'project:create' },
       { label: 'Add product or service', opens: 'item', permission: 'item:create' },
       { label: 'Add account', href: '/accounts', permission: 'account:create' },
     ],
@@ -92,15 +105,54 @@ type DialogData =
  * you can begin one. Records that are dialogs open as dialogs, so adding a
  * customer does not throw away the page you were on.
  */
-export function QuickCreate({ permissions, currency }: { permissions: string[]; currency: string }) {
+export function QuickCreate({
+  permissions,
+  currency,
+  hiddenApps,
+  features,
+  trigger = 'header',
+}: {
+  permissions: string[]
+  currency: string
+  /** App keys switched off for this company — hide Create entries that open them. */
+  hiddenApps?: string[]
+  /** Nested document kinds from Apps & features. */
+  features?: OrgFeatureFlags
+  /** `pill` is the full-width New button on the accounting list. */
+  trigger?: 'header' | 'pill'
+}) {
   const router = useRouter()
   const [open, setOpen] = React.useState(false)
   const [dialog, setDialog] = React.useState<DialogData | null>(null)
   const allowed = React.useMemo(() => new Set(permissions), [permissions])
+  const blocked = React.useMemo(() => new Set(hiddenApps ?? []), [hiddenApps])
 
   const columns = COLUMNS.map((column) => ({
     ...column,
-    entries: column.entries.filter((entry) => !entry.permission || allowed.has(entry.permission)),
+    entries: column.entries.filter((entry) => {
+      if (entry.permission && !allowed.has(entry.permission)) return false
+      if ('href' in entry) {
+        const appModule = moduleForPath(entry.href)
+        if (appModule && blocked.has(appModule)) return false
+        if (features) {
+          const kind = documentKindForPath(entry.href)
+          if (kind && !isDocumentKindEnabled(features, kind.family, kind.kind)) return false
+        }
+      }
+      if ('opens' in entry) {
+        if (entry.opens === 'customer' && blocked.has('customers')) return false
+        if (entry.opens === 'vendor' && blocked.has('vendors')) return false
+        if (entry.opens === 'item' && blocked.has('inventory')) return false
+        if (
+          entry.opens === 'item' &&
+          features &&
+          !isDocumentKindEnabled(features, 'inventory', 'products')
+        ) {
+          return false
+        }
+      }
+      return true
+    }),
   })).filter((column) => column.entries.length > 0)
 
   async function choose(entry: Entry) {
@@ -125,12 +177,25 @@ export function QuickCreate({ permissions, currency }: { permissions: string[]; 
     setDialog({ kind: entry.opens, ...result.data })
   }
 
+  if (columns.length === 0) return null
+
   return (
     <>
-      <Button size="sm" onClick={() => setOpen(true)}>
-        <PlusIcon />
-        <span className="hidden sm:inline">Create</span>
-      </Button>
+      {trigger === 'pill' ? (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="flex w-full items-center justify-center gap-1.5 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+        >
+          <PlusIcon className="size-4" />
+          New
+        </button>
+      ) : (
+        <Button size="sm" onClick={() => setOpen(true)}>
+          <PlusIcon />
+          <span className="hidden sm:inline">Create</span>
+        </Button>
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent size="xl">

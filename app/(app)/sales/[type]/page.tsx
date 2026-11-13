@@ -1,25 +1,30 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { FileTextIcon, PlusIcon } from 'lucide-react'
+import { PlusIcon } from 'lucide-react'
 
-import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
-import { Pagination } from '@/components/data/pagination'
-import { RowActions } from '@/components/data/row-actions'
-import { SearchInput } from '@/components/data/search-input'
-import { TableToolbar } from '@/components/data/table-toolbar'
-import { readSort, SortableHeader } from '@/components/data/sortable-header'
-import { Badge } from '@/components/ui/badge'
+import { readSort } from '@/components/data/sortable-header'
 import { buttonVariants } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { formatTransactionDate, toCalendarDate, toDate, today } from '@/lib/date'
+import { isCollectionOverdue, overdueClock, partyFromContact } from '@/lib/invoice-overdue'
+import { isDatePreset, presetRange, readDatePreset } from '@/lib/list-filters'
 import { formatMoney } from '@/lib/money'
-import { bySlug, STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
-import { cn } from '@/lib/utils'
+import { EstimateHome } from '@/components/sales/estimate-home'
+import { EstimateRegister } from '@/components/sales/estimate-register'
+import { InvoiceHome } from '@/components/sales/invoice-home'
+import { InvoiceRegister } from '@/components/sales/invoice-register'
+import { ReceiptHome } from '@/components/sales/receipt-home'
+import { ReceiptRegister } from '@/components/sales/receipt-register'
+import { SalesOrderHome } from '@/components/sales/sales-order-home'
+import { SalesOrderRegister } from '@/components/sales/sales-order-register'
+import { SalesSheetRegister } from '@/components/sales/sales-sheet-register'
+import { bySlug, isProposal, isSalesOrder, STATUS_LABELS } from '@/lib/sales-types'
 import { parseListQuery } from '@/lib/validation/common'
+import { isDatabaseUnavailable } from '@/lib/db-error'
 import { requireOrgContext } from '@/server/auth/context'
+import { trailsFor } from '@/server/services/audit.service'
+import { loadDepositAccounts } from '@/server/services/sales-options'
 import * as salesService from '@/server/services/sales.service'
 
 export async function generateMetadata({
@@ -33,11 +38,55 @@ export async function generateMetadata({
 
 const SORTABLE = ['number', 'date', 'customer', 'dueDate', 'total', 'status'] as const
 
-const FILTERS = [
+const INVOICE_FILTERS = [
+  { value: '', label: 'All' },
+  { value: 'open', label: 'Unpaid' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'notdue', label: 'Not due yet' },
+  { value: 'paid', label: 'Paid' },
+  { value: 'draft', label: 'Drafts' },
+]
+
+const INVOICE_DATES = [
+  { value: 'all', label: 'All dates' },
+  { value: 'today', label: 'Today' },
+  { value: 'month', label: 'This month' },
+  { value: 'last', label: 'Last month' },
+  { value: 'last3', label: 'Last 3 months' },
+  { value: 'year', label: 'This year' },
+  { value: 'last12', label: 'Last 12 months' },
+]
+
+const RECEIPT_FILTERS = [
+  { value: '', label: 'All' },
+  { value: 'draft', label: 'Drafts' },
+]
+
+const ESTIMATE_FILTERS = [
   { value: '', label: 'All' },
   { value: 'open', label: 'Open' },
-  { value: 'overdue', label: 'Overdue' },
+  { value: 'accepted', label: 'Accepted' },
+  { value: 'declined', label: 'Declined' },
+  { value: 'invoiced', label: 'Invoiced' },
   { value: 'draft', label: 'Drafts' },
+]
+
+const SALES_ORDER_FILTERS = [
+  { value: '', label: 'All' },
+  { value: 'open', label: 'Open' },
+  { value: 'invoiced', label: 'Invoiced' },
+  { value: 'receipt', label: 'Receipt' },
+  { value: 'draft', label: 'Drafts' },
+]
+
+const ESTIMATE_DATES = [
+  { value: 'all', label: 'All dates' },
+  { value: 'today', label: 'Today' },
+  { value: 'month', label: 'This month' },
+  { value: 'last', label: 'Last month' },
+  { value: 'last3', label: 'Last 3 months' },
+  { value: 'year', label: 'This year' },
+  { value: 'last12', label: 'Last 12 months' },
 ]
 
 export default async function SalesListPage({
@@ -53,19 +102,127 @@ export default async function SalesListPage({
   const ctx = await requireOrgContext('invoice:read')
   const search = await searchParams
   const query = parseListQuery(search)
-  const status = typeof search.status === 'string' ? search.status : undefined
+  const statusOptions =
+    config.type === 'INVOICE'
+      ? INVOICE_FILTERS
+      : config.type === 'SALES_RECEIPT'
+        ? RECEIPT_FILTERS
+        : isProposal(config.type)
+          ? ESTIMATE_FILTERS
+          : isSalesOrder(config.type)
+            ? SALES_ORDER_FILTERS
+            : null
+  const statusRaw = typeof search.status === 'string' ? search.status : ''
+  const status = statusOptions?.some((option) => option.value === statusRaw) ? statusRaw : undefined
+  const customerId = typeof search.customer === 'string' && search.customer ? search.customer : undefined
+  const rawDate = typeof search.date === 'string' ? search.date : undefined
+  const dashboard =
+    config.type === 'INVOICE' ||
+    config.type === 'SALES_RECEIPT' ||
+    isProposal(config.type) ||
+    isSalesOrder(config.type)
+  // Invoices, sales receipts, estimates, quotations, and sales orders open on the
+  // last three months. "All dates" is an explicit choice.
+  const datePreset = dashboard
+    ? rawDate === 'all'
+      ? ''
+      : rawDate && isDatePreset(rawDate) && rawDate !== ''
+        ? rawDate
+        : 'last3'
+    : readDatePreset(search.date)
+  const range = presetRange(datePreset, today(ctx.organization.timeZone))
   const sort = readSort(search, SORTABLE, { sort: 'date', dir: 'desc' })
 
-  const page = await salesService.list(ctx, config.type, query, { status, ...sort })
+  const listOptions = {
+    status,
+    customerId,
+    ...sort,
+    from: range?.from,
+    to: range?.to,
+    takeMax: salesService.SALES_REGISTER_TAKE,
+  }
+  const loadLists = async () => {
+    const listPromise = salesService.list(ctx, config.type, query, listOptions)
+    const receiptHomeP =
+      config.type === 'SALES_RECEIPT' ? salesService.receiptHome(ctx) : Promise.resolve(null)
+    const invoiceHomeP =
+      config.type === 'INVOICE' ? salesService.invoiceHome(ctx) : Promise.resolve(null)
+    const estimateHomeP = isProposal(config.type)
+      ? salesService.estimateHome(ctx, config.type as 'ESTIMATE' | 'QUOTATION')
+      : Promise.resolve(null)
+    const orderHomeP = isSalesOrder(config.type)
+      ? salesService.salesOrderHome(ctx)
+      : Promise.resolve(null)
+    const choicesP = salesService.customerChoices(ctx)
+    const depositAccountsP =
+      (isSalesOrder(config.type) || isProposal(config.type)) &&
+      ctx.permissions.has('invoice:create')
+        ? loadDepositAccounts(ctx)
+        : Promise.resolve([])
+
+    const pageResult = await listPromise
+    const [receiptHome, invoiceHome, estimateHome, orderHome, choices, depositAccounts, trails] =
+      await Promise.all([
+        receiptHomeP,
+        invoiceHomeP,
+        estimateHomeP,
+        orderHomeP,
+        choicesP,
+        depositAccountsP,
+        trailsFor(
+          ctx,
+          pageResult.rows.map((row) => row.id),
+        ),
+      ])
+    return {
+      page: pageResult,
+      receiptHome,
+      invoiceHome,
+      estimateHome,
+      orderHome,
+      choices,
+      depositAccounts,
+      trails,
+    }
+  }
+  let page: Awaited<ReturnType<typeof salesService.list>>
+  let receiptHome: Awaited<ReturnType<typeof salesService.receiptHome>> | null
+  let invoiceHome: Awaited<ReturnType<typeof salesService.invoiceHome>> | null
+  let estimateHome: Awaited<ReturnType<typeof salesService.estimateHome>> | null
+  let orderHome: Awaited<ReturnType<typeof salesService.salesOrderHome>> | null
+  let choices: Awaited<ReturnType<typeof salesService.customerChoices>>
+  let depositAccounts: Awaited<ReturnType<typeof loadDepositAccounts>>
+  let trails: Awaited<ReturnType<typeof trailsFor>>
+  try {
+    ;({ page, receiptHome, invoiceHome, estimateHome, orderHome, choices, depositAccounts, trails } =
+      await loadLists())
+  } catch (error) {
+    if (!isDatabaseUnavailable(error)) throw error
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    ;({ page, receiptHome, invoiceHome, estimateHome, orderHome, choices, depositAccounts, trails } =
+      await loadLists())
+  }
   const currency = ctx.organization.baseCurrency
-  const now = today(ctx.organization.timeZone)
+  const timeZone = ctx.organization.timeZone
+  const now = today(timeZone)
+  const clock = overdueClock(timeZone)
 
   const basePath = `/sales/${config.slug}`
-  const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
+  const customers = choices.map((customer) => ({ value: customer.id, label: customer.displayName }))
+  const linkParams = {
+    q: query.q,
+    status: status || undefined,
+    customer: customerId,
+    date: dashboard ? datePreset || 'all' : datePreset || undefined,
+    sort: sort.sort,
+    dir: sort.dir,
+  }
 
   const canCreate = ctx.permissions.has(config.createPermission)
+  const canCreateInvoice = ctx.permissions.has('invoice:create')
   const canEditDocuments = ctx.permissions.has('invoice:update')
-  const canDelete = ctx.permissions.has('invoice:void')
+  const canDelete = ctx.features.allowDocumentDelete && ctx.permissions.has('invoice:void')
+  const convertToday = today(ctx.organization.timeZone)
   const newButton = canCreate ? (
     <Link href={`/sales/${config.slug}/new`} className={buttonVariants({ size: 'sm' })}>
       <PlusIcon /> New {config.singular.toLowerCase()}
@@ -74,139 +231,286 @@ export default async function SalesListPage({
 
   return (
     <>
-      <PageHeader title={config.plural} description={config.effect} actions={newButton} />
-
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <SearchInput placeholder="Search number, reference or customer" />
-        {config.type === 'INVOICE' ? (
-          <div className="flex gap-1">
-            {FILTERS.map((filter) => {
-              const active = (status ?? '') === filter.value
-              const href = filter.value
-                ? `/sales/${config.slug}?status=${filter.value}`
-                : `/sales/${config.slug}`
-              return (
-                <Link
-                  key={filter.label}
-                  href={href}
-                  className={cn(
-                    'rounded-md px-2.5 py-1 text-sm transition-colors',
-                    active ? 'bg-secondary font-medium' : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  {filter.label}
-                </Link>
-              )
-            })}
-          </div>
-        ) : null}
-        <TableToolbar exportHref={`/api/exports/${config.slug}?${new URLSearchParams(
-          Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
-        ).toString()}`} />
-      </div>
-
-      {page.total === 0 ? (
-        <EmptyState
-          icon={FileTextIcon}
-          title={query.q || status ? `No ${config.plural.toLowerCase()} match` : `No ${config.plural.toLowerCase()} yet`}
-          description={query.q || status ? 'Try a different search or filter.' : config.effect}
-          action={!query.q && !status ? newButton : undefined}
+      {receiptHome ? (
+        <ReceiptHome
+          currency={currency}
+          canCreate={canCreate}
+          active={datePreset || 'all'}
+          params={linkParams}
+          home={receiptHome}
+        />
+      ) : invoiceHome ? (
+        <InvoiceHome
+          currency={currency}
+          canCreate={canCreate}
+          active={status ?? ''}
+          params={linkParams}
+          home={invoiceHome}
+        />
+      ) : estimateHome ? (
+        <EstimateHome
+          currency={currency}
+          canCreate={canCreate}
+          active={status ?? ''}
+          params={linkParams}
+          home={estimateHome}
+          basePath={basePath}
+          singular={config.singular}
+          plural={config.plural}
+        />
+      ) : orderHome ? (
+        <SalesOrderHome
+          currency={currency}
+          canCreate={canCreate}
+          active={status ?? ''}
+          params={linkParams}
+          home={orderHome}
         />
       ) : (
-        <Card className="overflow-hidden p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortableHeader column="number" label="Number" state={sort} basePath={basePath} params={linkParams} className="w-32" />
-                <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" defaultDirection="desc" />
-                <SortableHeader column="customer" label="Customer" state={sort} basePath={basePath} params={linkParams} />
-                {config.type === 'INVOICE' ? (
-                  <SortableHeader column="dueDate" label="Due" state={sort} basePath={basePath} params={linkParams} className="w-28" />
-                ) : null}
-                <SortableHeader column="total" label="Total" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
-                {config.type === 'INVOICE' ? (
-                  <TableHead className="numeric w-32">Outstanding</TableHead>
-                ) : null}
-                <SortableHeader column="status" label="Status" state={sort} basePath={basePath} params={linkParams} className="w-28" />
-                <TableHead className="w-10 print:hidden" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {page.rows.map((row) => {
-                const overdue =
-                  row.dueDate &&
-                  toCalendarDate(row.dueDate) < now &&
-                  (row.status === 'OPEN' || row.status === 'PARTIAL')
+        <PageHeader title={config.plural} description={config.effect} actions={newButton} />
+      )}
 
-                return (
-                  <TableRow key={row.id}>
-                    <TableCell>
-                      <Link
-                        href={`/sales/${config.slug}/${row.id}`}
-                        className="tabular font-medium underline-offset-4 hover:underline"
-                      >
-                        {row.number}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="tabular whitespace-nowrap text-muted-foreground">
-                      {formatDate(toCalendarDate(row.date))}
-                    </TableCell>
-                    <TableCell>{row.customer.displayName}</TableCell>
-                    {config.type === 'INVOICE' ? (
-                      <TableCell
-                        className={cn(
-                          'tabular whitespace-nowrap',
-                          overdue ? 'font-medium text-destructive' : 'text-muted-foreground',
-                        )}
-                      >
-                        {row.dueDate ? formatDate(toCalendarDate(row.dueDate)) : '—'}
-                      </TableCell>
-                    ) : null}
-                    <TableCell className="numeric tabular">{formatMoney(row.total, currency)}</TableCell>
-                    {config.type === 'INVOICE' ? (
-                      <TableCell className="numeric tabular font-medium">
-                        {Number(row.balance) === 0 ? (
-                          <span className="text-muted-foreground">—</span>
-                        ) : (
-                          formatMoney(row.balance, currency)
-                        )}
-                      </TableCell>
-                    ) : null}
-                    <TableCell>
-                      <Badge variant={STATUS_VARIANTS[row.status] ?? 'secondary'}>
-                        {STATUS_LABELS[row.status] ?? row.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="print:hidden">
-                      <RowActions
-                        actions={[
-                          { label: 'Open', href: `${basePath}/${row.id}`, icon: 'open' as const },
-                          ...(canEditDocuments && row.status !== 'VOID'
-                            ? [{ label: 'Edit', href: `${basePath}/${row.id}/edit`, icon: 'edit' as const }]
-                            : []),
-                          { label: 'Print', href: `${basePath}/${row.id}/print`, icon: 'print' as const },
-                        ]}
-                        onDelete={
-                          canDelete
-                            ? { kind: 'sales', id: row.id, number: row.number }
-                            : undefined
-                        }
-                      />
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-          <Pagination
-            page={page.page}
-            pageCount={page.pageCount}
-            total={page.total}
-            pageSize={page.pageSize}
-            basePath={`/sales/${config.slug}`}
-            params={linkParams}
-          />
-        </Card>
+      {page.total > page.rows.length ? (
+        <p className="mx-auto w-full px-[clamp(0.75rem,2vw,2.5rem)] pb-2 text-sm text-muted-foreground">
+          Showing the first {page.rows.length.toLocaleString()} of {page.total.toLocaleString()}{' '}
+          {config.plural.toLowerCase()}. Narrow the date or search to find the rest.
+        </p>
+      ) : null}
+
+      {invoiceHome ? (
+        <InvoiceRegister
+          customers={customers}
+          rows={page.rows.map((row) => {
+            const due = row.dueDate ? toCalendarDate(row.dueDate) : null
+            const promisedDate = row.promisedDate ? toCalendarDate(row.promisedDate) : null
+            const open = row.status === 'OPEN' || row.status === 'PARTIAL'
+            const party = partyFromContact(row.customer)
+            const overdue = isCollectionOverdue(
+              {
+                status: row.status,
+                dueDate: due,
+                promisedDate,
+                excludeFromOverdue: row.excludeFromOverdue,
+                date: toCalendarDate(row.date),
+                ...party,
+              },
+              now,
+              clock,
+            )
+            const collectionDue = promisedDate ?? party.partyBalanceDate ?? party.partyAgreementDate ?? due
+            const days =
+              overdue && collectionDue
+                ? Math.round((toDate(now).getTime() - toDate(collectionDue).getTime()) / 86_400_000)
+                : 0
+            const trail = trails.get(row.id)
+            const later = trail?.changed && trail.changed.name !== trail.entered?.name
+            return {
+              id: row.id,
+              number: row.number,
+              date: formatTransactionDate(toCalendarDate(row.date), row.createdAt, timeZone),
+              due,
+              promisedDate,
+              excludeFromOverdue: row.excludeFromOverdue,
+              customer: row.customer.displayName,
+              amount: formatMoney(row.total, currency),
+              balance: formatMoney(row.balance, currency),
+              statusText: overdue
+                ? days > 0
+                  ? `Overdue ${days} ${days === 1 ? 'day' : 'days'}`
+                  : 'Overdue'
+                : (STATUS_LABELS[row.status] ?? row.status),
+              overdue,
+              href: `${basePath}/${row.id}`,
+              editHref: canEditDocuments && row.status !== 'VOID' ? `${basePath}/${row.id}/edit` : null,
+              printHref: `${basePath}/${row.id}/print`,
+              payHref:
+                ctx.permissions.has('payment:create') && open ? `/payments/new?customer=${row.customer.id}` : null,
+              recorded: trail?.entered ? (later ? `${trail.entered.name} · ${trail.changed?.name}` : trail.entered.name) : null,
+              canDelete,
+              canEditCollections: canEditDocuments && open,
+            }
+          })}
+          basePath={basePath}
+          params={linkParams}
+          sort={sort}
+          statusOptions={INVOICE_FILTERS}
+          dateOptions={INVOICE_DATES}
+          status={status ?? ''}
+          date={datePreset || 'all'}
+          canCreate={canCreate}
+          canPay={ctx.permissions.has('payment:create')}
+          page={page.page}
+          pageCount={page.pageCount}
+          total={page.total}
+          pageSize={page.pageSize}
+        />
+      ) : null}
+
+      {receiptHome ? (
+        <ReceiptRegister
+          customers={customers}
+          rows={page.rows.map((row) => {
+            const trail = trails.get(row.id)
+            const later = trail?.changed && trail.changed.name !== trail.entered?.name
+            const account = row.depositAccount
+            return {
+              id: row.id,
+              number: row.number,
+              date: formatTransactionDate(toCalendarDate(row.date), row.createdAt, timeZone),
+              customer: row.customer.displayName,
+              amount: formatMoney(row.total, currency),
+              deposit: account ? `${account.code} ${account.name}` : '—',
+              statusText:
+                row.status === 'OPEN' || row.status === 'PAID' ? 'Paid' : (STATUS_LABELS[row.status] ?? row.status),
+              href: `${basePath}/${row.id}`,
+              editHref: canEditDocuments && row.status !== 'VOID' ? `${basePath}/${row.id}/edit` : null,
+              printHref: `${basePath}/${row.id}/print`,
+              recorded: trail?.entered ? (later ? `${trail.entered.name} · ${trail.changed?.name}` : trail.entered.name) : null,
+              canDelete,
+            }
+          })}
+          basePath={basePath}
+          params={linkParams}
+          sort={sort}
+          statusOptions={RECEIPT_FILTERS}
+          dateOptions={INVOICE_DATES}
+          status={status ?? ''}
+          date={datePreset || 'all'}
+          canCreate={canCreate}
+          page={page.page}
+          pageCount={page.pageCount}
+          total={page.total}
+          pageSize={page.pageSize}
+        />
+      ) : null}
+
+      {estimateHome ? (
+        <EstimateRegister
+          customers={customers}
+          rows={page.rows.map((row) => {
+            const trail = trails.get(row.id)
+            const later = trail?.changed && trail.changed.name !== trail.entered?.name
+            const canConvert =
+              canCreateInvoice &&
+              row.status !== 'VOID' &&
+              row.status !== 'DECLINED' &&
+              row.status !== 'CLOSED'
+            return {
+              id: row.id,
+              number: row.number,
+              date: formatTransactionDate(toCalendarDate(row.date), row.createdAt, timeZone),
+              customer: row.customer.displayName,
+              amount: formatMoney(row.total, currency),
+              statusText:
+                row.status === 'CLOSED' ? 'Invoiced' : (STATUS_LABELS[row.status] ?? row.status),
+              href: `${basePath}/${row.id}`,
+              editHref: canEditDocuments && row.status !== 'VOID' ? `${basePath}/${row.id}/edit` : null,
+              printHref: `${basePath}/${row.id}/print`,
+              recorded: trail?.entered
+                ? later
+                  ? `${trail.entered.name} · ${trail.changed?.name}`
+                  : trail.entered.name
+                : null,
+              canDelete,
+              canConvert,
+            }
+          })}
+          basePath={basePath}
+          params={linkParams}
+          sort={sort}
+          statusOptions={ESTIMATE_FILTERS}
+          dateOptions={ESTIMATE_DATES}
+          status={status ?? ''}
+          date={datePreset || 'all'}
+          canCreate={canCreate}
+          convertToday={convertToday}
+          depositAccounts={depositAccounts}
+          sourceType={config.type as 'ESTIMATE' | 'QUOTATION'}
+          page={page.page}
+          pageCount={page.pageCount}
+          total={page.total}
+          pageSize={page.pageSize}
+          singular={config.singular}
+          plural={config.plural}
+          exportSlug={config.slug}
+        />
+      ) : null}
+
+      {orderHome ? (
+        <SalesOrderRegister
+          customers={customers}
+          rows={page.rows.map((row) => {
+            const trail = trails.get(row.id)
+            const later = trail?.changed && trail.changed.name !== trail.entered?.name
+            const canFulfill =
+              canCreateInvoice &&
+              row.status !== 'VOID' &&
+              row.status !== 'CLOSED'
+            const statusText =
+              row.status === 'CLOSED'
+                ? row.convertedTo.some((child) => child.type === 'SALES_RECEIPT')
+                  ? 'Receipt'
+                  : 'Invoiced'
+                : (STATUS_LABELS[row.status] ?? row.status)
+            return {
+              id: row.id,
+              number: row.number,
+              date: formatTransactionDate(toCalendarDate(row.date), row.createdAt, timeZone),
+              customer: row.customer.displayName,
+              amount: formatMoney(row.total, currency),
+              statusText,
+              href: `${basePath}/${row.id}`,
+              editHref:
+                canEditDocuments && row.status !== 'VOID' && row.status !== 'CLOSED'
+                  ? `${basePath}/${row.id}/edit`
+                  : null,
+              printHref: `${basePath}/${row.id}/print`,
+              recorded: trail?.entered
+                ? later
+                  ? `${trail.entered.name} · ${trail.changed?.name}`
+                  : trail.entered.name
+                : null,
+              canDelete,
+              canFulfill,
+            }
+          })}
+          params={linkParams}
+          sort={sort}
+          statusOptions={SALES_ORDER_FILTERS}
+          dateOptions={ESTIMATE_DATES}
+          status={status ?? ''}
+          date={datePreset || 'all'}
+          canCreate={canCreate}
+          convertToday={convertToday}
+          depositAccounts={depositAccounts}
+          total={page.total}
+        />
+      ) : null}
+
+      {invoiceHome || receiptHome || estimateHome || orderHome ? null : (
+        <SalesSheetRegister
+          customers={customers}
+          basePath={basePath}
+          params={linkParams}
+          sort={sort}
+          canCreate={canCreate}
+          singular={config.singular}
+          plural={config.plural}
+          exportSlug={config.slug}
+          rows={page.rows.map((row) => ({
+            id: row.id,
+            number: row.number,
+            date: formatTransactionDate(toCalendarDate(row.date), row.createdAt, timeZone),
+            customer: row.customer.displayName,
+            amount: formatMoney(row.total, currency),
+            status: row.status,
+            href: `${basePath}/${row.id}`,
+            editHref: canEditDocuments && row.status !== 'VOID' ? `${basePath}/${row.id}/edit` : null,
+            printHref: `${basePath}/${row.id}/print`,
+            canDelete,
+            trail: trails.get(row.id),
+          }))}
+        />
       )}
     </>
   )

@@ -1,12 +1,15 @@
 'use client'
 
 import { useActionState, useEffect, useRef, useState } from 'react'
+
+import { usePropState } from '@/lib/use-prop-state'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
+import { LockedNumber } from '@/components/forms/locked-number'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
@@ -20,23 +23,35 @@ export function TransferForm({
   accounts,
   today,
   currency,
+  documentNumber,
+  defaultFromAccountId,
 }: {
   accounts: AccountPickerOption[]
   today: string
   currency: string
+  documentNumber: string
+  /** Pre-select the account money leaves (e.g. from the account ⋯ menu). */
+  defaultFromAccountId?: string
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(saveTransferForm, idleState)
+  const [number, setNumber] = usePropState(documentNumber)
   const [date, setDate] = useState(today)
-  const [fromAccountId, setFrom] = useState(accounts[0]?.id ?? '')
-  const [toAccountId, setTo] = useState(accounts[1]?.id ?? '')
+  const initialFrom =
+    (defaultFromAccountId && accounts.some((a) => a.id === defaultFromAccountId)
+      ? defaultFromAccountId
+      : accounts[0]?.id) ?? ''
+  const [fromAccountId, setFrom] = useState(initialFrom)
+  const [toAccountId, setTo] = useState(
+    () => accounts.find((a) => a.id !== initialFrom)?.id ?? accounts[1]?.id ?? '',
+  )
   const handled = useRef(false)
 
   useEffect(() => {
     if (state.status === 'success' && !handled.current) {
       handled.current = true
       toast.success(state.message ?? 'Recorded.')
-      router.push('/banking')
+      router.push('/banking/accounts')
       router.refresh()
     }
     if (state.status !== 'success') handled.current = false
@@ -83,6 +98,12 @@ export function TransferForm({
           </div>
 
           <div className="grid gap-4 sm:grid-cols-3">
+            <LockedNumber
+              label="Transfer number"
+              value={number}
+              onChange={setNumber}
+              error={e?.number}
+            />
             <Field name="date" label="Date" required error={e?.date}>
               <DateField id="date" name="date" value={date} onChange={setDate} today={today} required />
             </Field>
@@ -107,7 +128,7 @@ export function TransferForm({
       </Card>
 
       <div className="mt-4 flex justify-end gap-2">
-        <Button type="button" variant="outline" onClick={() => router.push('/banking')}>
+        <Button type="button" variant="outline" onClick={() => router.push('/banking/accounts')}>
           Cancel
         </Button>
         <SubmitButton disabled={sameAccount} pendingLabel="Recording…">

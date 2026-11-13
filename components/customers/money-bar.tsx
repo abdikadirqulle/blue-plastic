@@ -1,0 +1,82 @@
+import Link from 'next/link'
+import { bandDetail, type CustomerBand, type BandKey } from '@/lib/customer-bands'
+import { MONEY_BAR } from '@/lib/money-bar-bands'
+import { Decimal, formatMoney } from '@/lib/money'
+import { cn } from '@/lib/utils'
+
+const LOOK: Record<BandKey, { title: string; bar: string }> = {
+  estimates: { title: 'Estimates', bar: MONEY_BAR.estimates.bar },
+  overdue: { title: 'Overdue', bar: MONEY_BAR.overdue.bar },
+  open: { title: 'Open', bar: MONEY_BAR.open.bar },
+  paid: { title: 'Recently paid', bar: MONEY_BAR.paid.bar },
+}
+
+/**
+ * The strip above the customer list. Each block is a filter: click Overdue and
+ * the list shows only the customers who have an invoice past its due date.
+ */
+export function CustomerMoneyBar({
+  bands,
+  currency,
+  active,
+  baseQuery,
+}: {
+  bands: CustomerBand[]
+  currency: string
+  active?: BandKey
+  baseQuery: Record<string, string | undefined>
+}) {
+  const total = bands.reduce((sum, band) => sum.plus(new Decimal(band.amount).abs()), new Decimal(0))
+
+  const hrefFor = (key: BandKey) => {
+    const next = new URLSearchParams()
+    for (const [name, value] of Object.entries(baseQuery)) {
+      if (value) next.set(name, value)
+    }
+    if (active !== key) next.set('band', key)
+    const query = next.toString()
+    return query ? `/customers?${query}` : '/customers'
+  }
+
+  return (
+    <div className="mb-3 bg-muted/70 px-5 py-4">
+      <div className="grid grid-cols-2 gap-6 lg:grid-cols-4">
+        {bands.map((band) => {
+          const look = LOOK[band.key]
+          const selected = active === band.key
+          return (
+            <Link
+              key={band.key}
+              href={hrefFor(band.key)}
+              className={cn('rounded-md px-1 py-1', selected && 'bg-card shadow-sm ring-1 ring-border')}
+              aria-current={selected ? 'true' : undefined}
+            >
+              <p className="tabular text-2xl font-medium leading-none tracking-tight text-foreground">
+                {formatMoney(band.amount, currency)}
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                <span className="sr-only">{look.title}. </span>
+                {bandDetail(band)}
+              </p>
+            </Link>
+          )
+        })}
+      </div>
+      <div className="mt-4 flex h-2.5 overflow-hidden bg-border/50">
+        {bands.map((band) => {
+          const amount = new Decimal(band.amount).abs()
+          if (amount.isZero()) return null
+          const share = total.isZero() ? 0 : amount.dividedBy(total).times(100).toNumber()
+          return (
+            <span
+              key={band.key}
+              className={LOOK[band.key].bar}
+              style={{ width: `${Math.max(share, 1.5)}%` }}
+              title={`${LOOK[band.key].title}: ${formatMoney(band.amount, currency)}`}
+            />
+          )
+        })}
+      </div>
+    </div>
+  )
+}

@@ -1,6 +1,8 @@
 'use client'
 
 import { useActionState, useEffect, useMemo, useRef, useState } from 'react'
+
+import { usePropState } from '@/lib/use-prop-state'
 import { useRouter } from 'next/navigation'
 import { PlusIcon, Trash2Icon } from 'lucide-react'
 import { toast } from 'sonner'
@@ -8,6 +10,7 @@ import { toast } from 'sonner'
 import { idleState } from '@/components/forms/action-state'
 import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
+import { LockedNumber } from '@/components/forms/locked-number'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
@@ -35,17 +38,26 @@ export function DepositForm({
   payments,
   today,
   currency,
+  documentNumber,
+  defaultBankAccountId,
 }: {
   bankAccounts: AccountPickerOption[]
   otherAccounts: AccountPickerOption[]
   payments: Payment[]
   today: string
   currency: string
+  documentNumber: string
+  defaultBankAccountId?: string
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(saveDepositForm, idleState)
 
-  const [bankAccountId, setBankAccountId] = useState(bankAccounts[0]?.id ?? '')
+  const [number, setNumber] = usePropState(documentNumber)
+  const [bankAccountId, setBankAccountId] = useState(
+    defaultBankAccountId && bankAccounts.some((a) => a.id === defaultBankAccountId)
+      ? defaultBankAccountId
+      : (bankAccounts[0]?.id ?? ''),
+  )
   const [date, setDate] = useState(today)
   const [reference, setReference] = useState('')
   const [memo, setMemo] = useState('')
@@ -58,7 +70,7 @@ export function DepositForm({
     if (state.status === 'success' && !handled.current) {
       handled.current = true
       toast.success(state.message ?? 'Recorded.')
-      router.push('/banking')
+      router.push('/banking/accounts')
       router.refresh()
     }
     if (state.status !== 'success') handled.current = false
@@ -76,6 +88,7 @@ export function DepositForm({
   }, [payments, selected, otherLines])
 
   const payload = JSON.stringify({
+    number,
     bankAccountId,
     date,
     reference,
@@ -93,6 +106,13 @@ export function DepositForm({
       <Card>
         <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
           <FormStatus state={state} />
+
+          <LockedNumber
+            label="Deposit number"
+            value={number}
+            onChange={setNumber}
+            error={state.fieldErrors?.number}
+          />
 
           <Field name="bankAccountId" label="Deposit to" required error={state.fieldErrors?.bankAccountId}>
             <AccountPicker
@@ -265,7 +285,7 @@ export function DepositForm({
           <span className="text-muted-foreground">Deposit total </span>
           <span className="tabular text-base font-semibold">{formatMoney(total, currency)}</span>
         </span>
-        <Button type="button" variant="outline" onClick={() => router.push('/banking')}>
+        <Button type="button" variant="outline" onClick={() => router.push('/banking/accounts')}>
           Cancel
         </Button>
         <SubmitButton disabled={!total.greaterThan(0) || bankAccountId === ''} pendingLabel="Recording…">

@@ -247,8 +247,9 @@ year-end close.
 
 ## Phase 11 — The practical gaps
 
-**Not started.** Written on 2026-09-01 after reviewing the system against what
-QuickBooks Online and Desktop actually give a small trading business day to day.
+**In progress** (started 2026-10-16). Written on 2026-09-01 after reviewing the
+system against what QuickBooks Online and Desktop actually give a small trading
+business day to day. Task detail: [phases/phase-11-practical-gaps.md](./phases/phase-11-practical-gaps.md).
 
 The selection rule was deliberate and narrow: **something a real business does
 every week, that this system either cannot do or makes somebody do by hand.** Not
@@ -302,3 +303,47 @@ customer-facing portal.
 
 Each is a real QuickBooks feature. Each is also a subsystem rather than a
 feature, and none of them is what stops this system being used tomorrow morning.
+
+---
+
+## Phases 13–17 — SME completion (2026-11-02)
+
+| Phase | Focus | Detail |
+| --- | --- | --- |
+| 13 | Ledger depth | [phase-13-ledger-depth.md](./phases/phase-13-ledger-depth.md) — fixed assets, FX open balances, rate limit, invite email |
+| 14 | Equity lite | [phase-14-equity.md](./phases/phase-14-equity.md) — shareholders, draws/dividends, owners equity statement, group P&L |
+| 15 | HRIS lite | [phase-15-hris.md](./phases/phase-15-hris.md) — lifecycle, recruitment, appraisals |
+| 16 | Collab lite | [phase-16-collab.md](./phases/phase-16-collab.md) — Sign, Appointments, Discuss, Planning, Surveys |
+| 17 | Insight | [phase-17-insight.md](./phases/phase-17-insight.md) — KPI pins, cycle smoke test, SME non-goals |
+
+**SME scope for phases 1–17 is complete.** Phase 18 deepens the lite people/collab/CRM/BOM modules so they follow real stage rules.
+
+## Phase 18 — Lite to ERP depth (2026-11-04)
+
+Detail: [phases/phase-18-erp-depth.md](./phases/phase-18-erp-depth.md). Sign tokens, ATS pipeline, CRM, nested BOM, cap table, group balance sheet.
+
+## Phase 21 — Legal SME layers (2026-11-04)
+
+Detail: [phases/phase-21-legal-layers.md](./phases/phase-21-legal-layers.md). Hedge documentation, kitchen display, first-party marketplace, bins/picks, sign certificate, training, payroll JSON backup.
+
+## Phase 19 — Remaining operational gaps (2026-11-04)
+
+Detail: [phases/phase-19-full-erp.md](./phases/phase-19-full-erp.md). MRP page, notify gateway, tickets, home KPIs, [IC] journals, backup dump **and restore** of BOM, people, equity, CRM, and collab. Eternal non-goals stay out.
+
+## Phase 20 — Operating close (2026-11-04)
+
+Detail: [phases/phase-20-operating-close.md](./phases/phase-20-operating-close.md). Restore extras on backup, customer portal quotes, appointment-type create. SME loops 1–20 are complete.
+
+## Phase 22 — Platform + AI surface (2026-11-05)
+
+Detail: [phases/phase-22-platform-ai.md](./phases/phase-22-platform-ai.md). Layer model in [06-erp-layers.md](./06-erp-layers.md). Capability registry, org API keys, `/api/v1` + OpenAPI, MCP tool mirror. Domain logic stays in services ([ADR-0014](./decisions/0014-machine-api-single-service.md)).
+
+### Waves after 22 (owner-gated)
+
+| Phase | Layer | Slice |
+| --- | --- | --- |
+| 23 | L3 | Hard 3-way match + variance hold on bill post |
+| 24 | L4 | Lot/serial on receive/issue |
+| 25 | L6 | Project profitability |
+| 26 | L8 | Scheduled report packs |
+| 27 | L1 / L7 | One-jurisdiction VAT or payroll statutory export |

@@ -1,27 +1,25 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { PlusIcon, ReceiptIcon } from 'lucide-react'
+import { PlusIcon } from 'lucide-react'
 
-import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
-import { Pagination } from '@/components/data/pagination'
-import { RowActions } from '@/components/data/row-actions'
-import { SearchInput } from '@/components/data/search-input'
-import { TableToolbar } from '@/components/data/table-toolbar'
-import { readSort, SortableHeader } from '@/components/data/sortable-header'
-import { Badge } from '@/components/ui/badge'
+import { readSort } from '@/components/data/sortable-header'
 import { buttonVariants } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { formatDate, formatTransactionDate, toCalendarDate, today } from '@/lib/date'
+import { isCollectionOverdue, overdueClock, partyFromContact } from '@/lib/invoice-overdue'
+import { DATE_PRESETS, presetRange, readDatePreset } from '@/lib/list-filters'
 import { formatMoney } from '@/lib/money'
+import { BillHome } from '@/components/purchases/bill-home'
+import { PurchaseDocumentRegister } from '@/components/purchases/purchase-document-register'
+import { VendorCreditHome } from '@/components/purchases/vendor-credit-home'
 import { purchaseBySlug } from '@/lib/purchase-types'
-import { STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
-import { cn } from '@/lib/utils'
 import { parseListQuery } from '@/lib/validation/common'
 import { requireOrgContext } from '@/server/auth/context'
+import { trailsFor } from '@/server/services/audit.service'
 import * as purchaseService from '@/server/services/purchase.service'
+import { ExpenseScreen } from '../expense-screen'
+import { PurchaseOrderScreen } from '../purchase-order-screen'
 
 export async function generateMetadata({
   params,
@@ -31,10 +29,19 @@ export async function generateMetadata({
   return { title: purchaseBySlug((await params).type)?.plural ?? 'Purchases' }
 }
 
-const FILTERS = [
+const BILL_FILTERS = [
   { value: '', label: 'All' },
   { value: 'open', label: 'Unpaid' },
   { value: 'overdue', label: 'Overdue' },
+  { value: 'notdue', label: 'Not due yet' },
+  { value: 'paid', label: 'Paid' },
+  { value: 'draft', label: 'Drafts' },
+]
+
+const VENDOR_CREDIT_FILTERS = [
+  { value: '', label: 'All' },
+  { value: 'open', label: 'Open' },
+  { value: 'paid', label: 'Applied' },
   { value: 'draft', label: 'Drafts' },
 ]
 
@@ -50,21 +57,51 @@ export default async function PurchaseListPage({
   const config = purchaseBySlug((await params).type)
   if (!config) notFound()
 
-  const ctx = await requireOrgContext('bill:read')
   const search = await searchParams
+  if (config.type === 'PURCHASE_ORDER') return <PurchaseOrderScreen search={search} />
+  if (config.type === 'EXPENSE') return <ExpenseScreen search={search} />
+
+  const ctx = await requireOrgContext('bill:read')
   const query = parseListQuery(search)
-  const status = typeof search.status === 'string' ? search.status : undefined
+  const statusOptions =
+    config.type === 'BILL' ? BILL_FILTERS : config.type === 'VENDOR_CREDIT' ? VENDOR_CREDIT_FILTERS : null
+  const statusRaw = typeof search.status === 'string' ? search.status : ''
+  const status = statusOptions?.some((option) => option.value === statusRaw) ? statusRaw : undefined
+  const vendorId = typeof search.vendorId === 'string' ? search.vendorId : undefined
+  const datePreset = readDatePreset(search.date)
+  const range = presetRange(datePreset, today(ctx.organization.timeZone))
   const sort = readSort(search, SORTABLE, { sort: 'date', dir: 'desc' })
 
-  const page = await purchaseService.list(ctx, config.type, query, { status, ...sort })
+  const [page, billHome, creditHome, vendorRows] = await Promise.all([
+    purchaseService.list(ctx, config.type, query, {
+      status,
+      vendorId,
+      ...sort,
+      from: range?.from,
+      to: range?.to,
+    }),
+    config.type === 'BILL' ? purchaseService.billHome(ctx) : Promise.resolve(null),
+    config.type === 'VENDOR_CREDIT' ? purchaseService.vendorCreditHome(ctx) : Promise.resolve(null),
+    purchaseService.vendorChoices(ctx),
+  ])
+  const trails = await trailsFor(ctx, page.rows.map((row) => row.id))
   const basePath = `/purchases/${config.slug}`
   const canEditDocuments = ctx.permissions.has('bill:update')
-  const canDelete = ctx.permissions.has('bill:void')
-  const linkParams = { q: query.q, status, sort: sort.sort, dir: sort.dir }
+  const canDelete = ctx.features.allowDocumentDelete && ctx.permissions.has('bill:void')
+  const canCreate = ctx.permissions.has('bill:create')
+  const linkParams = {
+    q: query.q,
+    status: status || undefined,
+    vendorId: vendorId || undefined,
+    date: datePreset || undefined,
+    sort: sort.sort,
+    dir: sort.dir,
+  }
   const currency = ctx.organization.baseCurrency
   const now = today(ctx.organization.timeZone)
+  const clock = overdueClock(ctx.organization.timeZone)
 
-  const newButton = ctx.permissions.has('bill:create') ? (
+  const newButton = canCreate ? (
     <Link href={`/purchases/${config.slug}/new`} className={buttonVariants({ size: 'sm' })}>
       <PlusIcon /> New {config.singular.toLowerCase()}
     </Link>
@@ -72,152 +109,76 @@ export default async function PurchaseListPage({
 
   return (
     <>
-      <PageHeader title={config.plural} description={config.effect} actions={newButton} />
-
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <SearchInput placeholder="Search number, reference or vendor" />
-        {config.type === 'BILL' ? (
-          <div className="flex gap-1">
-            {FILTERS.map((filter) => {
-              const active = (status ?? '') === filter.value
-              return (
-                <Link
-                  key={filter.label}
-                  href={filter.value ? `/purchases/${config.slug}?status=${filter.value}` : `/purchases/${config.slug}`}
-                  className={cn(
-                    'rounded-md px-2.5 py-1 text-sm transition-colors',
-                    active ? 'bg-secondary font-medium' : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  {filter.label}
-                </Link>
-              )
-            })}
-          </div>
-        ) : null}
-        <TableToolbar exportHref={`/api/exports/${config.slug}?${new URLSearchParams(
-          Object.entries(linkParams).filter((entry): entry is [string, string] => Boolean(entry[1])),
-        ).toString()}`} />
-      </div>
-
-      {page.total === 0 ? (
-        <EmptyState
-          icon={ReceiptIcon}
-          title={query.q || status ? `No ${config.plural.toLowerCase()} match` : `No ${config.plural.toLowerCase()} yet`}
-          description={query.q || status ? 'Try a different search or filter.' : config.effect}
-          action={!query.q && !status ? newButton : undefined}
+      {billHome ? (
+        <BillHome
+          currency={currency}
+          canCreate={canCreate}
+          active={status ?? ''}
+          params={linkParams}
+          home={billHome}
+        />
+      ) : creditHome ? (
+        <VendorCreditHome
+          currency={currency}
+          canCreate={canCreate}
+          active={status ?? ''}
+          params={linkParams}
+          home={creditHome}
         />
       ) : (
-        <Card className="overflow-hidden p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <SortableHeader column="number" label="Number" state={sort} basePath={basePath} params={linkParams} className="w-32" />
-                <SortableHeader column="date" label="Date" state={sort} basePath={basePath} params={linkParams} className="w-28" defaultDirection="desc" />
-                <SortableHeader column="vendor" label="Vendor" state={sort} basePath={basePath} params={linkParams} />
-                <SortableHeader column="reference" label="Their ref" state={sort} basePath={basePath} params={linkParams} />
-                {config.type === 'BILL' ? (
-                  <SortableHeader column="dueDate" label="Due" state={sort} basePath={basePath} params={linkParams} className="w-28" />
-                ) : null}
-                <SortableHeader column="total" label="Total" state={sort} basePath={basePath} params={linkParams} className="w-32" numeric defaultDirection="desc" />
-                {config.type === 'BILL' ? <TableHead className="numeric w-32">Owing</TableHead> : null}
-                <SortableHeader column="status" label="Status" state={sort} basePath={basePath} params={linkParams} className="w-24" />
-                <TableHead className="w-10 print:hidden" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {page.rows.map((row) => {
-                const overdue =
-                  row.dueDate &&
-                  toCalendarDate(row.dueDate) < now &&
-                  (row.status === 'OPEN' || row.status === 'PARTIAL')
-
-                return (
-                  <TableRow key={row.id}>
-                    <TableCell>
-                      <Link
-                        href={`/purchases/${config.slug}/${row.id}`}
-                        className="tabular font-medium underline-offset-4 hover:underline"
-                      >
-                        {row.number}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="tabular whitespace-nowrap text-muted-foreground">
-                      {formatDate(toCalendarDate(row.date))}
-                    </TableCell>
-                    <TableCell>{row.vendor.displayName}</TableCell>
-                    <TableCell className="text-muted-foreground">{row.reference ?? '—'}</TableCell>
-                    {config.type === 'BILL' ? (
-                      <TableCell
-                        className={cn(
-                          'tabular whitespace-nowrap',
-                          overdue ? 'font-medium text-destructive' : 'text-muted-foreground',
-                        )}
-                      >
-                        {row.dueDate ? formatDate(toCalendarDate(row.dueDate)) : '—'}
-                      </TableCell>
-                    ) : null}
-                    <TableCell className="numeric tabular">{formatMoney(row.total, currency)}</TableCell>
-                    {config.type === 'BILL' ? (
-                      <TableCell className="numeric tabular font-medium">
-                        {Number(row.balance) === 0 ? (
-                          <span className="text-muted-foreground">—</span>
-                        ) : (
-                          formatMoney(row.balance, currency)
-                        )}
-                      </TableCell>
-                    ) : null}
-                    <TableCell>
-                      <Badge variant={STATUS_VARIANTS[row.status] ?? 'secondary'}>
-                        {STATUS_LABELS[row.status] ?? row.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="print:hidden">
-                      <RowActions
-                        actions={[
-                          { label: 'Open', href: `${basePath}/${row.id}`, icon: 'open' as const },
-                          ...(canEditDocuments && row.status !== 'VOID'
-                            ? [{ label: 'Edit', href: `${basePath}/${row.id}/edit`, icon: 'edit' as const }]
-                            : []),
-                          // Booking a delivery in is the thing most often done to
-                          // an order, so it belongs on the row and not two screens
-                          // away.
-                          ...(config.type === 'PURCHASE_ORDER' &&
-                          ctx.permissions.has('bill:create') &&
-                          row.status !== 'VOID' &&
-                          row.status !== 'DRAFT' &&
-                          row.status !== 'CLOSED'
-                            ? [
-                                {
-                                  label: 'Receive items',
-                                  href: `/purchases/purchase-orders/${row.id}/receive`,
-                                  icon: 'open' as const,
-                                },
-                              ]
-                            : []),
-                        ]}
-                        onDelete={
-                          canDelete
-                            ? { kind: 'purchase', id: row.id, number: row.number }
-                            : undefined
-                        }
-                      />
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-          <Pagination
-            page={page.page}
-            pageCount={page.pageCount}
-            total={page.total}
-            pageSize={page.pageSize}
-            basePath={`/purchases/${config.slug}`}
-            params={linkParams}
-          />
-        </Card>
+        <PageHeader title={config.plural} description={config.effect} actions={newButton} />
       )}
+
+      <PurchaseDocumentRegister
+        vendors={vendorRows.map((vendor) => ({ value: vendor.id, label: vendor.displayName }))}
+        basePath={basePath}
+        params={linkParams}
+        sort={sort}
+        statusOptions={statusOptions ?? []}
+        dateOptions={[...DATE_PRESETS.map((preset) => ({ value: preset.value || 'all', label: preset.label }))]}
+        status={status ?? ''}
+        date={datePreset || 'all'}
+        canCreate={canCreate}
+        singular={config.singular}
+        plural={config.plural}
+        exportSlug={config.slug}
+        showBalance={config.type === 'BILL'}
+        showDue={config.type === 'BILL'}
+        rows={page.rows.map((row) => {
+          const overdue = isCollectionOverdue(
+            {
+              status: row.status,
+              dueDate: row.dueDate ? toCalendarDate(row.dueDate) : null,
+              date: toCalendarDate(row.date),
+              ...partyFromContact(row.vendor),
+            },
+            now,
+            clock,
+          )
+          return {
+            id: row.id,
+            number: row.number,
+            date: formatTransactionDate(toCalendarDate(row.date), row.createdAt, ctx.organization.timeZone),
+            vendor: row.vendor?.displayName ?? '—',
+            reference: row.reference,
+            due: row.dueDate ? formatDate(toCalendarDate(row.dueDate)) : null,
+            overdue,
+            amount: formatMoney(row.total, currency),
+            balance:
+              config.type === 'BILL'
+                ? Number(row.balance) === 0
+                  ? '—'
+                  : formatMoney(row.balance, currency)
+                : null,
+            status: row.status,
+            href: `${basePath}/${row.id}`,
+            editHref: canEditDocuments && row.status !== 'VOID' ? `${basePath}/${row.id}/edit` : null,
+            printHref: `${basePath}/${row.id}/print`,
+            canDelete,
+            trail: trails.get(row.id),
+          }
+        })}
+      />
     </>
   )
 }

@@ -1,41 +1,103 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useEffect, useState, useTransition, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
 import { MoreHorizontalIcon } from 'lucide-react'
 import { toast } from 'sonner'
+import type { AccountSubtype } from '@prisma/client'
 
+import { StartReconciliationButton } from '@/components/banking/start-reconciliation'
 import { Button } from '@/components/ui/button'
+import { TableCell, TableRow } from '@/components/ui/table'
+import { floatingPanelZIndex } from '@/lib/dialog-stack'
+import { cn } from '@/lib/utils'
+import { deleteAccount, setAccountActive } from '@/app/(app)/accounts/actions'
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import { setAccountActive } from './actions'
-import { EditAccountDialog, type AccountFormValues, type ParentOption } from './account-dialog'
+  EditAccountDialog,
+  type AccountFormValues,
+  type ParentOption,
+} from '@/app/(app)/accounts/account-dialog'
+import { MergeIntoDialog } from '@/components/master-data/merge-into-dialog'
 
-export function AccountRowActions({
+type AccountRow = AccountFormValues & { isActive: boolean; subtype: AccountSubtype }
+
+const RECONCILABLE = new Set<AccountSubtype>(['BANK', 'CREDIT_CARD'])
+const MONEY = new Set<AccountSubtype>(['BANK', 'CREDIT_CARD', 'UNDEPOSITED_FUNDS'])
+
+/**
+ * Account row: click opens the register; ⋯ opens actions (transfer, edit,
+ * quick report, active/inactive) — same pattern as QuickBooks.
+ */
+export function AccountTableRow({
   account,
   parents,
   canEdit,
   canArchive,
+  canDelete = false,
+  canReport,
+  canReconcile,
+  canTransact,
+  today,
+  className,
+  children,
 }: {
-  account: AccountFormValues & { isActive: boolean }
+  account: AccountRow
   parents: ParentOption[]
   canEdit: boolean
   canArchive: boolean
+  /** Delete / merge — owner by default; grant account:delete in Settings → Users. */
+  canDelete?: boolean
+  canReport: boolean
+  canReconcile: boolean
+  canTransact?: boolean
+  today: string
+  className?: string
+  children: ReactNode
 }) {
   const router = useRouter()
+  const [point, setPoint] = useState<{ x: number; y: number } | null>(null)
   const [editing, setEditing] = useState(false)
+  const [merging, setMerging] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
   const [isPending, startTransition] = useTransition()
 
+  useEffect(() => {
+    if (!point) return
+    const close = () => setPoint(null)
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [point])
+
+  const openAt = (x: number, y: number) => {
+    const width = 260
+    const height = 360
+    setPoint({
+      x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
+    })
+  }
+
+  const go = (href: string) => {
+    setPoint(null)
+    router.push(href)
+  }
+
   const toggle = () => {
+    setPoint(null)
     startTransition(async () => {
       const result = await setAccountActive({ id: account.id, isActive: !account.isActive })
       if (result.ok) {
-        toast.success(account.isActive ? 'Account archived.' : 'Account restored.')
+        toast.success(account.isActive ? 'Account made inactive.' : 'Account made active.')
         router.refresh()
       } else {
         toast.error(result.error.message)
@@ -43,38 +105,196 @@ export function AccountRowActions({
     })
   }
 
+  const remove = () => {
+    setPoint(null)
+    if (
+      !window.confirm(
+        'Delete this account? Only works when it has no transactions or links. Otherwise merge it into another account.',
+      )
+    ) {
+      return
+    }
+    startTransition(async () => {
+      const result = await deleteAccount({ id: account.id })
+      if (result.ok) {
+        toast.success('Account deleted.')
+        router.refresh()
+      } else {
+        toast.error(result.error.message)
+      }
+    })
+  }
+
+  const isMoney = MONEY.has(account.subtype)
+  const showReconcile = canReconcile && RECONCILABLE.has(account.subtype) && account.isActive
+  const showInactive = canArchive && !account.isSystem
+  const showMerge = canDelete && !account.isSystem
+  const showDelete = canDelete && !account.isSystem
+  const showTransfer = Boolean(canTransact) && isMoney && account.isActive
+  const showDeposit =
+    Boolean(canTransact) &&
+    account.isActive &&
+    (account.subtype === 'BANK' || account.subtype === 'CREDIT_CARD')
+
   return (
-    <>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            disabled={isPending}
-            aria-label={`Actions for ${account.name}`}
-          >
-            <MoreHorizontalIcon />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
-          {canEdit ? <DropdownMenuItem onSelect={() => setEditing(true)}>Edit</DropdownMenuItem> : null}
-          {canArchive && !account.isSystem ? (
-            <>
-              {canEdit ? <DropdownMenuSeparator /> : null}
-              <DropdownMenuItem
-                variant={account.isActive ? 'destructive' : 'default'}
-                onSelect={toggle}
-              >
-                {account.isActive ? 'Archive' : 'Restore'}
-              </DropdownMenuItem>
-            </>
-          ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
+    <TableRow
+      title={`Open ${account.name}`}
+      data-state={point ? 'selected' : undefined}
+      className={cn('cursor-pointer', className)}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        openAt(event.clientX, event.clientY)
+      }}
+      onClick={(event) => {
+        const target = event.target
+        if (!(target instanceof Element)) return
+        if (target.closest('a, button, input, select, textarea, summary, details, label')) return
+        router.push(`/accounts/${account.id}`)
+      }}
+    >
+      {children}
+      <TableCell className="print:hidden">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={isPending}
+          aria-label={`Actions for ${account.name}`}
+          onClick={(event) => {
+            event.stopPropagation()
+            const box = event.currentTarget.getBoundingClientRect()
+            openAt(box.right, box.bottom)
+          }}
+        >
+          <MoreHorizontalIcon />
+        </Button>
+      </TableCell>
+
+      {point
+        ? createPortal(
+            <div
+              role="menu"
+              className="fixed min-w-60 overflow-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
+              style={{ left: point.x, top: point.y, zIndex: floatingPanelZIndex() }}
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <MenuItem onSelect={() => go(`/accounts/${account.id}`)}>
+                View all transactions
+              </MenuItem>
+              {canReport ? (
+                <MenuItem
+                  onSelect={() => go(`/reports/transaction-detail?account=${account.id}`)}
+                >
+                  Quick report
+                </MenuItem>
+              ) : null}
+              {showTransfer || showDeposit || showReconcile ? (
+                <div className="my-1 h-px bg-border" />
+              ) : null}
+              {showTransfer ? (
+                <MenuItem onSelect={() => go(`/banking/transfers/new?from=${account.id}`)}>
+                  Transfer
+                </MenuItem>
+              ) : null}
+              {showDeposit ? (
+                <MenuItem onSelect={() => go(`/banking/deposits/new?bank=${account.id}`)}>
+                  Make a deposit
+                </MenuItem>
+              ) : null}
+              {showReconcile ? (
+                <MenuItem
+                  onSelect={() => {
+                    setPoint(null)
+                    setReconciling(true)
+                  }}
+                >
+                  Reconcile
+                </MenuItem>
+              ) : null}
+              {canEdit || showInactive || showMerge || showDelete ? (
+                <div className="my-1 h-px bg-border" />
+              ) : null}
+              {canEdit ? (
+                <MenuItem
+                  onSelect={() => {
+                    setPoint(null)
+                    setEditing(true)
+                  }}
+                >
+                  Edit account
+                </MenuItem>
+              ) : null}
+              {showInactive ? (
+                <MenuItem tone={account.isActive ? 'danger' : 'default'} onSelect={toggle}>
+                  {account.isActive ? 'Make inactive' : 'Make active'}
+                </MenuItem>
+              ) : null}
+              {showMerge ? (
+                <MenuItem
+                  onSelect={() => {
+                    setPoint(null)
+                    setMerging(true)
+                  }}
+                >
+                  Merge into…
+                </MenuItem>
+              ) : null}
+              {showDelete ? (
+                <MenuItem tone="danger" onSelect={remove}>
+                  Delete
+                </MenuItem>
+              ) : null}
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {merging ? (
+        <MergeIntoDialog
+          open={merging}
+          onClose={() => setMerging(false)}
+          kind="account"
+          absorbId={account.id}
+          absorbLabel={`${account.code} ${account.name}`}
+        />
+      ) : null}
 
       {editing ? (
         <EditAccountDialog account={account} parents={parents} onClose={() => setEditing(false)} />
       ) : null}
-    </>
+      {reconciling ? (
+        <StartReconciliationButton
+          startOpen
+          accountId={account.id}
+          accountName={account.name}
+          today={today}
+          onClose={() => setReconciling(false)}
+        />
+      ) : null}
+    </TableRow>
+  )
+}
+
+function MenuItem({
+  children,
+  onSelect,
+  tone = 'default',
+}: {
+  children: ReactNode
+  onSelect: () => void
+  tone?: 'default' | 'danger'
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      className={
+        tone === 'danger'
+          ? 'flex w-full rounded-sm px-2 py-1.5 text-left text-sm text-destructive outline-none hover:bg-destructive/10'
+          : 'flex w-full rounded-sm px-2 py-1.5 text-left text-sm outline-none hover:bg-accent'
+      }
+      onClick={onSelect}
+    >
+      {children}
+    </button>
   )
 }

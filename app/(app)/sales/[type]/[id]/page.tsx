@@ -1,19 +1,35 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon, PencilIcon, PrinterIcon } from 'lucide-react'
+import { PencilIcon } from 'lucide-react'
 
+import { ApprovalTrailPanel } from '@/app/(app)/approvals/approval-trail-panel'
+import { DocumentAttachments } from '@/components/data/document-attachments'
+import { DocumentHistory } from '@/components/data/document-history'
 import { PageHeader } from '@/components/data/page-header'
-import { ConvertEstimateButton } from '@/components/sales/document-actions'
+import { RecordedBy } from '@/components/data/recorded-by'
+import { ConvertSalesDocumentActions } from '@/components/sales/document-actions'
+import { SalesPaperFrame } from '@/components/sales/paper-width'
 import { DeleteButton } from '@/components/data/delete-record'
+import { DocumentActions } from '@/components/print/document-actions'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, toCalendarDate, today } from '@/lib/date'
+import { documentStampLines } from '@/lib/document-stamp'
+import { formatDate, formatTransactionDate, toCalendarDate, today } from '@/lib/date'
+import {
+  documentEmailBody,
+  documentEmailSubject,
+} from '@/lib/document-email'
 import { formatMoney } from '@/lib/money'
-import { bySlug, STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
+import { bySlug, byType, isSalesOrder, STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
 import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
+import { listForSale } from '@/server/files/ledger-files'
+import { historyFor, trailFor } from '@/server/services/audit.service'
+import { loadDepositAccounts } from '@/server/services/sales-options'
+import * as approvalService from '@/server/services/approval.service'
 import * as salesService from '@/server/services/sales.service'
 
 export const metadata: Metadata = { title: 'Document' }
@@ -29,49 +45,114 @@ export default async function SalesDocumentPage({
 
   const ctx = await requireOrgContext('invoice:read')
   const document = await salesService.get(ctx, id).catch(() => null)
-  if (!document) notFound()
+  if (!document || document.type !== config.type) notFound()
+  const canConvert =
+    (config.type === 'ESTIMATE' ||
+      config.type === 'QUOTATION' ||
+      isSalesOrder(config.type)) &&
+    ctx.permissions.has('invoice:create') &&
+    document.status !== 'VOID' &&
+    document.status !== 'DECLINED' &&
+    document.status !== 'CLOSED'
+  const [trail, history, papers, deliveryNote, depositAccounts] = await Promise.all([
+    trailFor(ctx, document.id),
+    historyFor(ctx, document.id),
+    listForSale(ctx, document.id),
+    config.type === 'INVOICE' || config.type === 'SALES_RECEIPT'
+      ? db.deliveryNote.findFirst({
+          where: { orgId: ctx.orgId, salesDocumentId: id, status: 'POSTED' },
+          select: { id: true, number: true },
+        })
+      : Promise.resolve(null),
+    canConvert ? loadDepositAccounts(ctx) : Promise.resolve([]),
+  ])
 
+  const approvals = await approvalService.latestApprovals(ctx.orgId, [id])
+  const approval = approvals.get(id) ?? null
   const currency = ctx.organization.baseCurrency
   // A draft can now be deleted, so the control shows for it too — what it does
   // is decided by `disposition` below.
-  const canDelete = ctx.permissions.has('invoice:void') && document.status !== 'VOID'
+  const canDelete = ctx.features.allowDocumentDelete && ctx.permissions.has('invoice:void') && document.status !== 'VOID'
 
   // The same rule the service enforces: a voided document cannot be edited, and
   // neither can one with money already applied to it — the payment would have to
   // be unpicked first. Better to hide the button than to explain the refusal.
   const applied = document.applications.length > 0
-  const canEdit = ctx.permissions.has('invoice:update') && document.status !== 'VOID' && !applied
-  const canConvert =
-    config.type === 'ESTIMATE' &&
-    ctx.permissions.has('invoice:create') &&
-    !document.convertedTo &&
-    document.status !== 'VOID'
+  const canEdit =
+    ctx.permissions.has('invoice:update') &&
+    document.status !== 'VOID' &&
+    document.status !== 'CLOSED' &&
+    !applied
+
+  const shareBody = documentEmailBody({
+    partyName: document.customer.displayName,
+    singular: config.singular,
+    number: document.number,
+    extraLines: [
+      `Date: ${formatTransactionDate(toCalendarDate(document.date), document.createdAt, ctx.organization.timeZone)}`,
+      document.createdByName ? `Sales person: ${document.createdByName}` : null,
+      document.workSite || document.project?.siteLocation
+        ? `Work site: ${document.workSite || document.project?.siteLocation}`
+        : null,
+      document.workScope
+        ? `Work / job: ${document.workScope} · Client: ${document.customer.displayName}`
+        : null,
+      `Total: ${formatMoney(document.total, currency)}`,
+      Number(document.balance) > 0
+        ? `Amount due: ${formatMoney(document.balance, currency)}`
+        : null,
+      ...documentStampLines({
+        createdBy: document.createdByName,
+        approvedBy: approval?.name,
+        approvedAt: approval?.at,
+        status: document.status,
+      }),
+    ],
+  })
+  const emailSubject = documentEmailSubject(
+    config.singular,
+    document.number,
+    ctx.organization.name,
+  )
+  const fileBase = `${config.slug.replace(/s$/, '')}-${document.number
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')}`
 
   return (
-    <>
-      <Link
-        href={`/sales/${config.slug}`}
-        className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}
-      >
-        <ArrowLeftIcon /> {config.plural}
-      </Link>
-
+    <SalesPaperFrame type={config.type}>
       <PageHeader
         title={`${config.singular} ${document.number}`}
         description={document.customer.displayName}
         actions={
           <>
-            <Link
-              href={`/sales/${config.slug}/${id}/print`}
-              className={buttonVariants({ variant: 'outline', size: 'sm' })}
-            >
-              <PrinterIcon /> Print
-            </Link>
+            <DocumentActions
+              paper={config.singular.toLowerCase()}
+              printHref={`/sales/${config.slug}/${id}/print`}
+              pdfHref={`/api/sales/${id}/pdf`}
+              excelHref={`/api/sales/${id}/xlsx`}
+              filename={fileBase}
+              defaultTo={document.customer.email ?? ''}
+              defaultSubject={emailSubject}
+              defaultBody={shareBody}
+              whatsappPhone={document.customer.phone}
+              whatsappText={shareBody}
+              canEmail={ctx.permissions.has('invoice:send')}
+            />
+            {deliveryNote ? (
+              <Link
+                href={`/sales/delivery/${deliveryNote.id}`}
+                className={buttonVariants({ variant: 'outline', size: 'sm' })}
+              >
+                Delivery {deliveryNote.number}
+              </Link>
+            ) : null}
             {canConvert ? (
-              <ConvertEstimateButton
+              <ConvertSalesDocumentActions
                 id={id}
                 number={document.number}
+                sourceType={config.type as 'ESTIMATE' | 'QUOTATION' | 'SALES_ORDER'}
                 today={today(ctx.organization.timeZone)}
+                depositAccounts={depositAccounts}
               />
             ) : null}
             {canEdit ? (
@@ -94,21 +175,55 @@ export default async function SalesDocumentPage({
         }
       />
 
+      <RecordedBy trail={trail} timeZone={ctx.organization.timeZone} />
+
+      <DocumentAttachments
+        target={{ kind: 'sale', id }}
+        files={papers}
+        canEdit={canEdit}
+        hint="Signed copy, delivery note, or photo · PDF or image · 4 MB or smaller"
+      />
+
       <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Detail label="Status">
+        <Detail
+          label="Status"
+          tone={
+            document.status === 'PAID' || document.status === 'ACCEPTED'
+              ? 'success'
+              : document.status === 'VOID' || document.status === 'DECLINED'
+                ? 'danger'
+                : document.status === 'PARTIAL'
+                  ? 'warning'
+                  : 'info'
+          }
+        >
           <Badge variant={STATUS_VARIANTS[document.status] ?? 'secondary'}>
             {STATUS_LABELS[document.status] ?? document.status}
           </Badge>
         </Detail>
-        <Detail label="Date">{formatDate(toCalendarDate(document.date))}</Detail>
+        <Detail label="Date" tone="zero">
+          {formatTransactionDate(toCalendarDate(document.date), document.createdAt, ctx.organization.timeZone)}
+        </Detail>
         {document.dueDate ? (
-          <Detail label="Due">{formatDate(toCalendarDate(document.dueDate))}</Detail>
+          <Detail label="Due" tone="warning">
+            {formatDate(toCalendarDate(document.dueDate))}
+          </Detail>
         ) : null}
-        <Detail label="Total">
+        <Detail label="Total" tone="money">
           <span className="tabular font-semibold">{formatMoney(document.total, currency)}</span>
         </Detail>
+        {document.project ? (
+          <Detail label="Project" tone="info">
+            <Link
+              href={`/projects/${document.project.id}`}
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              {document.project.number} · {document.project.name}
+            </Link>
+          </Detail>
+        ) : null}
         {config.type === 'INVOICE' ? (
-          <Detail label="Outstanding">
+          <Detail label="Outstanding" tone="sales">
             <span className="tabular font-semibold">{formatMoney(document.balance, currency)}</span>
           </Detail>
         ) : null}
@@ -122,11 +237,40 @@ export default async function SalesDocumentPage({
         </div>
       ) : null}
 
-      {document.convertedTo ? (
+      {document.convertedTo.length > 0 ? (
         <div className="mb-4 rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-          Became invoice{' '}
-          <Link href={`/sales/invoices/${document.convertedTo.id}`} className="font-medium underline underline-offset-4">
-            {document.convertedTo.number}
+          {isSalesOrder(config.type) || config.type === 'ESTIMATE' || config.type === 'QUOTATION'
+            ? 'Invoiced on '
+            : 'Became '}
+          {document.convertedTo.map((child, index) => {
+            const childConfig = byType(child.type)
+            return (
+              <span key={child.id}>
+                {index > 0 ? ', ' : ''}
+                <Link
+                  href={`/sales/${childConfig.slug}/${child.id}`}
+                  className="font-medium underline underline-offset-4"
+                >
+                  {child.number}
+                </Link>
+              </span>
+            )
+          })}
+          {document.status === 'CLOSED'
+            ? '. Nothing on this paper is still to bill.'
+            : document.status === 'PARTIAL'
+              ? '. Part of it is still outstanding.'
+              : '.'}
+        </div>
+      ) : null}
+      {document.convertedFrom ? (
+        <div className="mb-4 rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          Created from {byType(document.convertedFrom.type).singular.toLowerCase()}{' '}
+          <Link
+            href={`/sales/${byType(document.convertedFrom.type).slug}/${document.convertedFrom.id}`}
+            className="font-medium underline underline-offset-4"
+          >
+            {document.convertedFrom.number}
           </Link>
           .
         </div>
@@ -214,15 +358,26 @@ export default async function SalesDocumentPage({
           {config.posts ? 'Not posted to the ledger yet.' : config.effect}
         </p>
       )}
-    </>
+
+      <ApprovalTrailPanel entityType="SALES_DOCUMENT" entityId={document.id} />
+      <DocumentHistory events={history} timeZone={ctx.organization.timeZone} />
+    </SalesPaperFrame>
   )
 }
 
-function Detail({ label, children }: { label: string; children: React.ReactNode }) {
+function Detail({
+  label,
+  children,
+  tone = 'neutral',
+}: {
+  label: string
+  children: React.ReactNode
+  tone?: 'neutral' | 'zero' | 'warning' | 'success' | 'danger' | 'money' | 'sales' | 'info'
+}) {
   return (
-    <Card>
+    <Card tone={tone}>
       <CardContent className="p-3">
-        <p className="text-xs text-muted-foreground">{label}</p>
+        <p className="text-xs font-medium uppercase tracking-wider">{label}</p>
         <div className="mt-0.5 text-sm font-medium">{children}</div>
       </CardContent>
     </Card>

@@ -1,33 +1,115 @@
 import { z } from 'zod'
 
-import { ASSIGNABLE_ROLES } from '@/lib/roles'
+import { PERMISSIONS } from '@/lib/permissions-catalog'
+import { optionalPhone } from './auth'
 import { cuid, email, password, requiredText } from './common'
 
-const assignableRole = z.enum(ASSIGNABLE_ROLES as [string, ...string[]])
+const assignableOrCustom = z.enum([
+  'ADMIN',
+  'MANAGER',
+  'ACCOUNTANT',
+  'BOOKKEEPER',
+  'SALES_MANAGER',
+  'SALES',
+  'AR_CLERK',
+  'PURCHASING_MANAGER',
+  'PURCHASING',
+  'AP_CLERK',
+  'BANK_CLERK',
+  'POS_SUPERVISOR',
+  'CASHIER',
+  'WAREHOUSE_MANAGER',
+  'STORE_KEEPER',
+  'PROJECT_MANAGER',
+  'MASTER_DATA',
+  'AUDITOR',
+  'VIEWER',
+  'CUSTOM',
+])
 
-export const inviteUserSchema = z.object({
-  name: requiredText('Name', 120),
-  email,
-  role: assignableRole,
-  /**
-   * Email delivery does not exist yet, so an invited user is created with a
-   * password set by the inviter. Phase 10 replaces this with a signed invitation
-   * link; the shape of this action does not change.
-   */
-  temporaryPassword: password,
-})
+const permissionKey = z.enum(PERMISSIONS as unknown as [string, ...string[]])
+
+const permissionsOverrideSchema = z.array(permissionKey).max(PERMISSIONS.length)
+
+/**
+ * Invite: either a ready-made role (permissionsOverride empty) or manual access
+ * (role CUSTOM + at least one permission).
+ */
+export const inviteUserSchema = z
+  .object({
+    name: requiredText('Name', 120),
+    email,
+    role: assignableOrCustom,
+    permissionsOverride: permissionsOverrideSchema.default([]),
+    /**
+     * Email delivery does not exist yet, so an invited user is created with a
+     * password set by the inviter. Phase 10 replaces this with a signed invitation
+     * link; the shape of this action does not change.
+     */
+    temporaryPassword: password,
+  })
+  .superRefine((value, ctx) => {
+    if (value.role === 'CUSTOM' && value.permissionsOverride.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['permissionsOverride'],
+        message: 'Choose at least one permission for custom access.',
+      })
+    }
+  })
 
 export type InviteUserInput = z.infer<typeof inviteUserSchema>
 
-export const updateMemberRoleSchema = z.object({
-  membershipId: cuid,
-  role: assignableRole,
-})
+export const updateMemberRoleSchema = z
+  .object({
+    membershipId: cuid,
+    role: assignableOrCustom,
+    permissionsOverride: permissionsOverrideSchema.default([]),
+  })
+  .superRefine((value, ctx) => {
+    if (value.role === 'CUSTOM' && value.permissionsOverride.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['permissionsOverride'],
+        message: 'Choose at least one permission for custom access.',
+      })
+    }
+  })
+
+export type UpdateMemberRoleInput = z.infer<typeof updateMemberRoleSchema>
 
 export const membershipIdSchema = z.object({ membershipId: cuid })
 
+/** Company admin sets a new work password — never reads the old one. */
+export const resetMemberPasswordSchema = z.object({
+  membershipId: cuid,
+  temporaryPassword: password,
+})
+
+export type ResetMemberPasswordInput = z.infer<typeof resetMemberPasswordSchema>
+
+/** System owner sets a new work password for any login on the installation. */
+export const resetSystemUserPasswordSchema = z.object({
+  userId: cuid,
+  temporaryPassword: password,
+})
+
+export type ResetSystemUserPasswordInput = z.infer<typeof resetSystemUserPasswordSchema>
+
 export const updateProfileSchema = z.object({
   name: requiredText('Name', 120),
+  phone: optionalPhone,
+})
+
+export const twoFactorCodeOnlySchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, 'Enter the 6-digit code'),
+})
+
+export const disableTwoFactorSchema = z.object({
+  currentPassword: z.string().min(1, 'Enter your current password'),
 })
 
 export const changePasswordSchema = z

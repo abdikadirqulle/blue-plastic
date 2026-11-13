@@ -1,12 +1,29 @@
 import 'server-only'
 
-import { toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
+import type { JournalSourceType } from '@prisma/client'
+
+import { JOURNAL_SOURCE_LABELS } from '@/lib/accounting-labels'
+import { addDays, formatDateTime, toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
+import { postedLineParts } from '@/lib/ledger-text'
+import { accountTenderTotals, type PosSaleTender } from '@/lib/pos-change'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
+import { formatQty } from '@/lib/quantity'
 import type { OrgContext } from '@/server/auth/context'
 import { db } from '@/server/db'
-import { generalLedger } from '@/server/accounting/balances'
+import { generalLedgerBook } from '@/server/accounting/balances'
+import { resolveSources, sourceFor } from '@/server/services/journal-sources'
 import { valuation } from '@/server/accounting/inventory'
 import type { Tx } from '@/server/db'
+import { BUCKET_LABELS, type AgingBucket } from '@/server/services/receivables.service'
+import { MODULE_LIST_REPORTS } from './module-lists'
+
+function agingBucketFor(daysOverdue: number | null): AgingBucket {
+  if (daysOverdue === null || daysOverdue <= 0) return 'current'
+  if (daysOverdue <= 30) return 'd1_30'
+  if (daysOverdue <= 60) return 'd31_60'
+  if (daysOverdue <= 90) return 'd61_90'
+  return 'd90_plus'
+}
 
 /**
  * The reports that are a **table** rather than a financial statement.
@@ -24,7 +41,7 @@ import type { Tx } from '@/server/db'
  * Every figure is read from the ledger or from the documents that produced it —
  * never from a stored total.
  */
-export type ColumnFormat = 'text' | 'money' | 'number' | 'date' | 'badge'
+export type ColumnFormat = 'text' | 'money' | 'number' | 'signed' | 'date' | 'datetime' | 'badge'
 
 export type ReportColumn = {
   key: string
@@ -32,6 +49,13 @@ export type ReportColumn = {
   format?: ColumnFormat
   /** Narrow columns keep a wide table readable. */
   width?: string
+  /**
+   * How the shared report grid treats this column. `kind` overrides `format`
+   * for sorting and display. `total: false` keeps a running balance out of the
+   * Total row.
+   */
+  kind?: 'text' | 'money' | 'number' | 'signed' | 'date' | 'datetime'
+  total?: boolean
 }
 
 export type ReportCell = string | null
@@ -40,6 +64,8 @@ export type ReportRow = {
   cells: Record<string, ReportCell>
   /** Drill-down: where this row came from. */
   href?: string | null
+  /** Per-column links (e.g. ticket number → print view). */
+  cellHrefs?: Record<string, string>
   /** A subtotal or grouping row, rendered heavier. */
   emphasis?: boolean
 }
@@ -55,11 +81,28 @@ export type ReportTable = {
   empty?: string
 }
 
+export type ReportEntityFilters = {
+  customerId?: string
+  vendorId?: string
+  itemId?: string
+  accountId?: string
+  storeId?: string
+}
+
 export type ReportContext = {
   ctx: OrgContext
   range: { from: CalendarDate; to: CalendarDate }
   asOf: CalendarDate
+  /** Optional entity narrowing from the URL (`customerId`, `vendorId`, …). */
+  filters?: ReportEntityFilters
+  /**
+   * Tests pass the transaction they are about to roll back. Production omits
+   * it and the report reads the live client.
+   */
+  client?: Tx
 }
+
+export type ReportFilterKind = 'customer' | 'vendor' | 'item' | 'account' | 'store'
 
 export type TableReport = {
   key: string
@@ -68,21 +111,30 @@ export type TableReport = {
   group: string
   /** A range report covers a period; an as-of report states a position at a date. */
   mode: 'range' | 'asOf'
+  /** Entity pickers shown on the shared table-report page. */
+  filterKinds?: ReportFilterKind[]
   build: (input: ReportContext) => Promise<ReportTable>
 }
 
 const money = (value: Decimal.Value) => toMoneyString(value, 2)
 const date = (value: Date | null) => (value ? toCalendarDate(value) : null)
+/** ISO timestamp so a date column can show the time the row was recorded. */
+const recorded = (value: Date | null | undefined) => {
+  if (!value) return null
+  const time = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(time.getTime()) ? null : time.toISOString()
+}
 
 /* --- Customers ------------------------------------------------------------ */
 
 const customerBalances: TableReport = {
   key: 'customer-balances',
-  title: 'Customer balances',
+  title: 'Customer Balance Summary',
   description: 'What every customer owes, and how much of it is overdue.',
-  group: 'Customers',
+  group: 'Who owes you',
   mode: 'asOf',
-  async build({ ctx, asOf }) {
+  filterKinds: ['customer'],
+  async build({ ctx, asOf, filters }) {
     const rows = await db.$queryRaw<
       {
         id: string
@@ -97,8 +149,10 @@ const customerBalances: TableReport = {
              c."displayName"                        AS name,
              c.email                                AS email,
              COALESCE(SUM(d.total - COALESCE(a.applied, 0)), 0)  AS outstanding,
-             COALESCE(SUM(CASE WHEN d."dueDate" < ${toDate(asOf)}
-                               THEN d.total - COALESCE(a.applied, 0) ELSE 0 END), 0) AS overdue,
+             COALESCE(SUM(CASE
+               WHEN d."excludeFromOverdue" = false
+                AND COALESCE(d."promisedDate", d."dueDate") < ${toDate(asOf)}
+               THEN d.total - COALESCE(a.applied, 0) ELSE 0 END), 0) AS overdue,
              COUNT(d.id)::int                       AS "openCount"
         FROM customers c
         JOIN sales_documents d
@@ -110,6 +164,7 @@ const customerBalances: TableReport = {
           SELECT SUM(amount) AS applied FROM sales_applications WHERE "invoiceId" = d.id
         ) a ON true
        WHERE c."orgId" = ${ctx.orgId}
+         AND (${filters?.customerId ?? null}::text IS NULL OR c.id = ${filters?.customerId ?? null})
        GROUP BY c.id, c."displayName", c.email
       HAVING COALESCE(SUM(d.total - COALESCE(a.applied, 0)), 0) <> 0
        ORDER BY 4 DESC
@@ -146,20 +201,23 @@ const customerBalances: TableReport = {
 
 const openInvoices: TableReport = {
   key: 'open-invoices',
-  title: 'Open invoices',
+  title: 'Open Invoices',
   description: 'Every unpaid invoice, oldest first, with what is still owed on it.',
-  group: 'Customers',
+  group: 'Who owes you',
   mode: 'asOf',
-  async build({ ctx, asOf }) {
+  filterKinds: ['customer'],
+  async build({ ctx, asOf, filters }) {
     const invoices = await db.salesDocument.findMany({
       where: {
         orgId: ctx.orgId,
         type: 'INVOICE',
         status: { in: ['OPEN', 'PARTIAL'] },
         date: { lte: toDate(asOf) },
+        ...(filters?.customerId ? { customerId: filters.customerId } : {}),
       },
       select: {
-        id: true, number: true, date: true, dueDate: true, total: true, reference: true,
+        id: true, number: true, date: true, dueDate: true, promisedDate: true,
+        excludeFromOverdue: true, total: true, reference: true,
         customer: { select: { id: true, displayName: true } },
         applications: { select: { amount: true } },
       },
@@ -176,9 +234,11 @@ const openInvoices: TableReport = {
       if (!balance.greaterThan(0)) continue
       outstanding = outstanding.plus(balance)
 
-      const daysOverdue = invoice.dueDate
-        ? Math.floor((asOfTime - invoice.dueDate.getTime()) / 86_400_000)
-        : 0
+      const collectionDue = invoice.promisedDate ?? invoice.dueDate
+      const daysOverdue =
+        !invoice.excludeFromOverdue && collectionDue
+          ? Math.floor((asOfTime - collectionDue.getTime()) / 86_400_000)
+          : 0
 
       rows.push({
         href: `/sales/invoices/${invoice.id}`,
@@ -186,7 +246,7 @@ const openInvoices: TableReport = {
           number: invoice.number,
           customer: invoice.customer.displayName,
           date: date(invoice.date),
-          dueDate: date(invoice.dueDate),
+          dueDate: date(collectionDue ?? invoice.dueDate),
           overdue: daysOverdue > 0 ? `${daysOverdue} days` : null,
           total: money(invoice.total.toString()),
           paid: money(applied),
@@ -213,18 +273,102 @@ const openInvoices: TableReport = {
   },
 }
 
+/** One open invoice per row — which paper, dated when, which aging bucket. */
+const arAgingDetail: TableReport = {
+  key: 'ar-aging-detail',
+  title: 'A/R Aging Detail',
+  description: 'Every unpaid invoice in its aging bucket — which paper, dated when.',
+  group: 'Who owes you',
+  mode: 'asOf',
+  filterKinds: ['customer'],
+  async build({ ctx, asOf, filters }) {
+    const asOfDate = toDate(asOf)
+    const invoices = await db.salesDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'INVOICE',
+        status: { in: ['OPEN', 'PARTIAL'] },
+        date: { lte: asOfDate },
+        excludeFromOverdue: false,
+        ...(filters?.customerId ? { customerId: filters.customerId } : {}),
+      },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        dueDate: true,
+        promisedDate: true,
+        total: true,
+        customer: { select: { displayName: true } },
+        applications: { select: { amount: true } },
+      },
+      orderBy: [{ customer: { displayName: 'asc' } }, { dueDate: 'asc' }, { date: 'asc' }],
+    })
+
+    const asOfTime = asOfDate.getTime()
+    const rows: ReportRow[] = []
+    let outstanding = ZERO
+
+    for (const invoice of invoices) {
+      const applied = invoice.applications.reduce((sum, a) => sum.plus(a.amount.toString()), ZERO)
+      const balance = new Decimal(invoice.total.toString()).minus(applied)
+      if (!balance.greaterThan(0)) continue
+      outstanding = outstanding.plus(balance)
+
+      const collectionDue = invoice.promisedDate ?? invoice.dueDate
+      const days =
+        collectionDue != null
+          ? Math.floor((asOfTime - collectionDue.getTime()) / 86_400_000)
+          : null
+      const bucket = agingBucketFor(days)
+
+      rows.push({
+        href: `/sales/invoices/${invoice.id}`,
+        cells: {
+          customer: invoice.customer.displayName,
+          number: invoice.number,
+          date: date(invoice.date),
+          dueDate: date(collectionDue ?? invoice.dueDate),
+          days: days != null && days > 0 ? String(days) : '0',
+          bucket: BUCKET_LABELS[bucket],
+          balance: money(balance),
+        },
+      })
+    }
+
+    return {
+      columns: [
+        { key: 'customer', label: 'Customer' },
+        { key: 'number', label: 'Invoice', width: 'w-32' },
+        { key: 'date', label: 'Date', format: 'date', width: 'w-28' },
+        { key: 'dueDate', label: 'Due', format: 'date', width: 'w-28' },
+        { key: 'days', label: 'Days', format: 'number', width: 'w-20' },
+        { key: 'bucket', label: 'Age', width: 'w-36' },
+        { key: 'balance', label: 'Owing', format: 'money', width: 'w-32' },
+      ],
+      rows,
+      totals: { customer: 'Total', balance: money(outstanding) },
+      empty: 'No open invoices at this date.',
+      note: 'Same invoices as A/R Aging Summary, listed one per row for collection work.',
+    }
+  },
+}
+
 const paymentsReceived: TableReport = {
   key: 'payments-received',
-  title: 'Payments received',
+  title: 'Invoice Payment List',
   description: 'Money in from customers, with what each payment settled.',
-  group: 'Customers',
+  group: 'Who owes you',
   mode: 'range',
-  async build({ ctx, range }) {
+  filterKinds: ['customer', 'account'],
+  async build({ ctx, range, filters }) {
     const payments = await db.customerPayment.findMany({
       where: {
         orgId: ctx.orgId,
         status: { not: 'VOID' },
         date: { gte: toDate(range.from), lte: toDate(range.to) },
+        ...(filters?.customerId ? { customerId: filters.customerId } : {}),
+        ...(filters?.accountId ? { depositAccountId: filters.accountId } : {}),
       },
       select: {
         id: true, number: true, date: true, amount: true, method: true, reference: true,
@@ -277,11 +421,12 @@ const paymentsReceived: TableReport = {
 
 const vendorBalances: TableReport = {
   key: 'vendor-balances',
-  title: 'Vendor balances',
+  title: 'Vendor Balance Summary',
   description: 'What the business owes each vendor, and how much of it is overdue.',
-  group: 'Vendors',
+  group: 'What you owe',
   mode: 'asOf',
-  async build({ ctx, asOf }) {
+  filterKinds: ['vendor'],
+  async build({ ctx, asOf, filters }) {
     const rows = await db.$queryRaw<
       { id: string; name: string; email: string | null; outstanding: string; overdue: string; openCount: number }[]
     >`
@@ -302,6 +447,7 @@ const vendorBalances: TableReport = {
           SELECT SUM(amount) AS applied FROM purchase_applications WHERE "billId" = d.id
         ) a ON true
        WHERE v."orgId" = ${ctx.orgId}
+         AND (${filters?.vendorId ?? null}::text IS NULL OR v.id = ${filters?.vendorId ?? null})
        GROUP BY v.id, v."displayName", v.email
       HAVING COALESCE(SUM(d.total - COALESCE(a.applied, 0)), 0) <> 0
        ORDER BY 4 DESC
@@ -338,17 +484,19 @@ const vendorBalances: TableReport = {
 
 const unpaidBills: TableReport = {
   key: 'unpaid-bills',
-  title: 'Unpaid bills',
+  title: 'Unpaid Bills',
   description: 'Everything still owed, oldest first — the list worked through on pay day.',
-  group: 'Vendors',
+  group: 'What you owe',
   mode: 'asOf',
-  async build({ ctx, asOf }) {
+  filterKinds: ['vendor'],
+  async build({ ctx, asOf, filters }) {
     const bills = await db.purchaseDocument.findMany({
       where: {
         orgId: ctx.orgId,
         type: 'BILL',
         status: { in: ['OPEN', 'PARTIAL'] },
         date: { lte: toDate(asOf) },
+        ...(filters?.vendorId ? { vendorId: filters.vendorId } : {}),
       },
       select: {
         id: true, number: true, date: true, dueDate: true, total: true, reference: true,
@@ -376,7 +524,7 @@ const unpaidBills: TableReport = {
         href: `/purchases/bills/${bill.id}`,
         cells: {
           number: bill.number,
-          vendor: bill.vendor.displayName,
+          vendor: bill.vendor?.displayName ?? '—',
           reference: bill.reference,
           date: date(bill.date),
           dueDate: date(bill.dueDate),
@@ -405,18 +553,99 @@ const unpaidBills: TableReport = {
   },
 }
 
+/** One open bill per row — which paper, dated when, which aging bucket. */
+const apAgingDetail: TableReport = {
+  key: 'ap-aging-detail',
+  title: 'A/P Aging Detail',
+  description: 'Every unpaid bill in its aging bucket — which paper, dated when.',
+  group: 'What you owe',
+  mode: 'asOf',
+  filterKinds: ['vendor'],
+  async build({ ctx, asOf, filters }) {
+    const asOfDate = toDate(asOf)
+    const bills = await db.purchaseDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'BILL',
+        status: { in: ['OPEN', 'PARTIAL'] },
+        date: { lte: asOfDate },
+        ...(filters?.vendorId ? { vendorId: filters.vendorId } : {}),
+      },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        dueDate: true,
+        total: true,
+        vendor: { select: { displayName: true } },
+        applications: { select: { amount: true } },
+      },
+      orderBy: [{ vendor: { displayName: 'asc' } }, { dueDate: 'asc' }, { date: 'asc' }],
+    })
+
+    const asOfTime = asOfDate.getTime()
+    const rows: ReportRow[] = []
+    let outstanding = ZERO
+
+    for (const bill of bills) {
+      const applied = bill.applications.reduce((sum, a) => sum.plus(a.amount.toString()), ZERO)
+      const balance = new Decimal(bill.total.toString()).minus(applied)
+      if (!balance.greaterThan(0)) continue
+      outstanding = outstanding.plus(balance)
+
+      const days =
+        bill.dueDate != null
+          ? Math.floor((asOfTime - bill.dueDate.getTime()) / 86_400_000)
+          : null
+      const bucket = agingBucketFor(days)
+
+      rows.push({
+        href: `/purchases/bills/${bill.id}`,
+        cells: {
+          vendor: bill.vendor?.displayName ?? '—',
+          number: bill.number,
+          date: date(bill.date),
+          dueDate: date(bill.dueDate),
+          days: days != null && days > 0 ? String(days) : '0',
+          bucket: BUCKET_LABELS[bucket],
+          balance: money(balance),
+        },
+      })
+    }
+
+    return {
+      columns: [
+        { key: 'vendor', label: 'Vendor' },
+        { key: 'number', label: 'Bill', width: 'w-32' },
+        { key: 'date', label: 'Date', format: 'date', width: 'w-28' },
+        { key: 'dueDate', label: 'Due', format: 'date', width: 'w-28' },
+        { key: 'days', label: 'Days', format: 'number', width: 'w-20' },
+        { key: 'bucket', label: 'Age', width: 'w-36' },
+        { key: 'balance', label: 'Owing', format: 'money', width: 'w-32' },
+      ],
+      rows,
+      totals: { vendor: 'Total', balance: money(outstanding) },
+      empty: 'No open bills at this date.',
+      note: 'Same bills as A/P Aging Summary, listed one per row for pay-day work.',
+    }
+  },
+}
+
 const paymentsMade: TableReport = {
   key: 'payments-made',
-  title: 'Payments made',
+  title: 'Bill Payment List',
   description: 'Money out to vendors, and the account each payment left.',
-  group: 'Vendors',
+  group: 'What you owe',
   mode: 'range',
-  async build({ ctx, range }) {
+  filterKinds: ['vendor', 'account'],
+  async build({ ctx, range, filters }) {
     const payments = await db.billPayment.findMany({
       where: {
         orgId: ctx.orgId,
         status: { not: 'VOID' },
         date: { gte: toDate(range.from), lte: toDate(range.to) },
+        ...(filters?.vendorId ? { vendorId: filters.vendorId } : {}),
+        ...(filters?.accountId ? { paymentAccountId: filters.accountId } : {}),
       },
       select: {
         id: true, number: true, date: true, amount: true, method: true, reference: true,
@@ -469,11 +698,12 @@ const paymentsMade: TableReport = {
 
 const expensesByVendor: TableReport = {
   key: 'expenses-by-vendor',
-  title: 'Expenses by vendor',
+  title: 'Expenses by Vendor Summary',
   description: 'What was spent with each vendor, net of tax, credits deducted.',
-  group: 'Vendors',
+  group: 'Expenses and vendors',
   mode: 'range',
-  async build({ ctx, range }) {
+  filterKinds: ['vendor'],
+  async build({ ctx, range, filters }) {
     const rows = await db.$queryRaw<
       { id: string; name: string; amount: string; count: number }[]
     >`
@@ -488,6 +718,7 @@ const expensesByVendor: TableReport = {
         AND d."deletedAt" IS NULL
          AND d.type IN ('BILL', 'EXPENSE', 'VENDOR_CREDIT')
          AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
+         AND (${filters?.vendorId ?? null}::text IS NULL OR v.id = ${filters?.vendorId ?? null})
        GROUP BY v.id, v."displayName"
        ORDER BY 3 DESC
     `
@@ -522,20 +753,30 @@ const expensesByVendor: TableReport = {
 
 const purchasesByItem: TableReport = {
   key: 'purchases-by-item',
-  title: 'Purchases by product or service',
+  title: 'Purchases by Product/Service',
   description: 'What was bought, by quantity and value.',
-  group: 'Purchases',
+  group: 'Expenses and vendors',
   mode: 'range',
-  async build({ ctx, range }) {
+  filterKinds: ['item', 'vendor'],
+  async build({ ctx, range, filters }) {
     const rows = await db.$queryRaw<
-      { id: string; name: string; sku: string | null; amount: string; quantity: string; count: number }[]
+      {
+        id: string
+        name: string
+        sku: string | null
+        amount: string
+        quantity: string
+        count: number
+        unitOfMeasure: string | null
+      }[]
     >`
       SELECT i.id   AS id,
              i.name AS name,
              i.sku  AS sku,
              COALESCE(SUM(CASE WHEN d.type = 'VENDOR_CREDIT' THEN -l.amount ELSE l.amount END), 0) AS amount,
              COALESCE(SUM(CASE WHEN d.type = 'VENDOR_CREDIT' THEN -l.quantity ELSE l.quantity END), 0) AS quantity,
-             COUNT(DISTINCT d.id)::int AS count
+             COUNT(DISTINCT d.id)::int AS count,
+             i."unitOfMeasure" AS "unitOfMeasure"
         FROM purchase_document_lines l
         JOIN purchase_documents d ON d.id = l."documentId"
         JOIN items i ON i.id = l."itemId"
@@ -544,7 +785,9 @@ const purchasesByItem: TableReport = {
         AND d."deletedAt" IS NULL
          AND d.type IN ('BILL', 'EXPENSE', 'VENDOR_CREDIT')
          AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
-       GROUP BY i.id, i.name, i.sku
+         AND (${filters?.itemId ?? null}::text IS NULL OR i.id = ${filters?.itemId ?? null})
+         AND (${filters?.vendorId ?? null}::text IS NULL OR d."vendorId" = ${filters?.vendorId ?? null})
+       GROUP BY i.id, i.name, i.sku, i."unitOfMeasure"
        ORDER BY 4 DESC
     `
 
@@ -564,7 +807,7 @@ const purchasesByItem: TableReport = {
           name: row.name,
           sku: row.sku,
           count: String(row.count),
-          quantity: new Decimal(row.quantity).toFixed(2),
+          quantity: formatQty(new Decimal(row.quantity).toFixed(2), row.unitOfMeasure),
           amount: money(row.amount),
         },
       })),
@@ -576,21 +819,30 @@ const purchasesByItem: TableReport = {
 
 const productProfitability: TableReport = {
   key: 'product-profitability',
-  title: 'Product profitability',
+  title: 'Product Profitability',
   description:
     'Income against cost of goods sold, item by item — the margin each product actually earned.',
   group: 'Sales',
   mode: 'range',
-  async build({ ctx, range }) {
+  filterKinds: ['item'],
+  async build({ ctx, range, filters }) {
     // Income comes from the sales lines; cost comes from the stock ledger, which
     // is what was actually issued and at what average. Taking the cost from the
     // item's purchase price instead would report a margin nobody earned.
     const income = await db.$queryRaw<
-      { id: string; name: string; sku: string | null; amount: string; quantity: string }[]
+      {
+        id: string
+        name: string
+        sku: string | null
+        amount: string
+        quantity: string
+        unitOfMeasure: string | null
+      }[]
     >`
       SELECT i.id AS id, i.name AS name, i.sku AS sku,
              COALESCE(SUM(CASE WHEN d.type IN ('CREDIT_MEMO', 'REFUND_RECEIPT') THEN -l.amount ELSE l.amount END), 0) AS amount,
-             COALESCE(SUM(CASE WHEN d.type IN ('CREDIT_MEMO', 'REFUND_RECEIPT') THEN -l.quantity ELSE l.quantity END), 0) AS quantity
+             COALESCE(SUM(CASE WHEN d.type IN ('CREDIT_MEMO', 'REFUND_RECEIPT') THEN -l.quantity ELSE l.quantity END), 0) AS quantity,
+             i."unitOfMeasure" AS "unitOfMeasure"
         FROM sales_document_lines l
         JOIN sales_documents d ON d.id = l."documentId"
         JOIN items i ON i.id = l."itemId"
@@ -599,7 +851,8 @@ const productProfitability: TableReport = {
         AND d."deletedAt" IS NULL
          AND d.type IN ('INVOICE', 'SALES_RECEIPT', 'CREDIT_MEMO', 'REFUND_RECEIPT')
          AND d.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
-       GROUP BY i.id, i.name, i.sku
+         AND (${filters?.itemId ?? null}::text IS NULL OR i.id = ${filters?.itemId ?? null})
+       GROUP BY i.id, i.name, i.sku, i."unitOfMeasure"
     `
 
     const cost = await db.$queryRaw<{ id: string; value: string }[]>`
@@ -609,6 +862,7 @@ const productProfitability: TableReport = {
        WHERE t."orgId" = ${ctx.orgId}
          AND t.type IN ('SALE', 'SALE_RETURN')
          AND t.date BETWEEN ${toDate(range.from)} AND ${toDate(range.to)}
+         AND (${filters?.itemId ?? null}::text IS NULL OR t."itemId" = ${filters?.itemId ?? null})
        GROUP BY t."itemId"
     `
 
@@ -630,7 +884,7 @@ const productProfitability: TableReport = {
           cells: {
             name: row.name,
             sku: row.sku,
-            quantity: new Decimal(row.quantity).toFixed(2),
+            quantity: formatQty(new Decimal(row.quantity).toFixed(2), row.unitOfMeasure),
             income: money(revenue),
             cost: money(cogs),
             profit: money(margin),
@@ -675,12 +929,16 @@ const productProfitability: TableReport = {
 
 const stockValuation: TableReport = {
   key: 'inventory-valuation',
-  title: 'Stock valuation',
+  title: 'Inventory Valuation Summary',
   description: 'What is on hand and what it is worth, item by item.',
   group: 'Inventory',
   mode: 'asOf',
-  async build({ ctx }) {
+  filterKinds: ['item'],
+  async build({ ctx, filters }) {
     const stock = await valuation(db as unknown as Tx, ctx.orgId)
+    const items = filters?.itemId
+      ? stock.items.filter((item) => item.itemId === filters.itemId)
+      : stock.items
 
     return {
       columns: [
@@ -691,18 +949,21 @@ const stockValuation: TableReport = {
         { key: 'value', label: 'Value', format: 'money', width: 'w-32' },
         { key: 'price', label: 'Sales price', format: 'money', width: 'w-32' },
       ],
-      rows: stock.items.map((item) => ({
+      rows: items.map((item) => ({
         href: `/inventory/${item.itemId}`,
         cells: {
           name: item.name,
           sku: item.sku,
-          quantity: item.quantity.toFixed(2),
+          quantity: formatQty(item.quantity.toFixed(2), item.unitOfMeasure),
           cost: money(item.averageCost),
           value: money(item.value),
           price: item.salesPrice ? money(item.salesPrice) : null,
         },
       })),
-      totals: { name: 'Total', value: money(stock.totalValue) },
+      totals: {
+        name: 'Total',
+        value: money(items.reduce((sum, item) => sum.plus(item.value), ZERO)),
+      },
       note:
         'Stock is valued as the stock ledger holds it *now*, not as at a past date — ' +
         'the movement chain carries its running position on each row, so a historical ' +
@@ -713,22 +974,161 @@ const stockValuation: TableReport = {
   },
 }
 
+const stockCostChange: TableReport = {
+  key: 'inventory-cost-change',
+  title: 'Inventory cost change',
+  description: 'Whether each item’s cost rose or fell, beside the inventory account it posts to.',
+  group: 'Inventory',
+  mode: 'range',
+  filterKinds: ['item'],
+  async build({ ctx, range, filters }) {
+    const [stock, items, opening] = await Promise.all([
+      valuation(db as unknown as Tx, ctx.orgId),
+      db.item.findMany({
+        where: {
+          orgId: ctx.orgId,
+          type: 'INVENTORY',
+          deletedAt: null,
+          ...(filters?.itemId ? { id: filters.itemId } : {}),
+        },
+        select: {
+          id: true,
+          inventoryAccount: { select: { code: true, name: true } },
+          store: { select: { name: true } },
+        },
+      }),
+      db.$queryRaw<{ itemId: string; quantity: string; value: string }[]>`
+        SELECT DISTINCT ON (t."itemId")
+               t."itemId" AS "itemId",
+               t."runningQuantity" AS "quantity",
+               t."runningValue" AS "value"
+          FROM inventory_transactions t
+         WHERE t."orgId" = ${ctx.orgId}
+           AND t.date < ${toDate(range.from)}
+         ORDER BY t."itemId", t.sequence DESC
+      `,
+    ])
+
+    const byId = new Map(items.map((item) => [item.id, item]))
+    const before = new Map(opening.map((row) => [row.itemId, row]))
+    let rose = 0
+    let fell = 0
+    const scoped = filters?.itemId
+      ? stock.items.filter((item) => item.itemId === filters.itemId)
+      : stock.items
+
+    const rows = scoped.map((item) => {
+      const prior = before.get(item.itemId)
+      const priorQty = new Decimal(prior?.quantity ?? '0')
+      const priorValue = new Decimal(prior?.value ?? '0')
+      const priorCost = prior && !priorQty.isZero() ? priorValue.dividedBy(priorQty) : null
+      const change = priorCost ? item.averageCost.minus(priorCost) : null
+      const direction = !change || change.isZero() ? 'Same' : change.isPositive() ? 'Higher' : 'Lower'
+      if (direction === 'Higher') rose += 1
+      if (direction === 'Lower') fell += 1
+      const info = byId.get(item.itemId)
+      return {
+        href: `/inventory/${item.itemId}`,
+        cells: {
+          name: item.name,
+          store: info?.store?.name ?? null,
+          account: info?.inventoryAccount ? `${info.inventoryAccount.code} ${info.inventoryAccount.name}` : null,
+          before: priorCost ? money(priorCost) : null,
+          cost: money(item.averageCost),
+          change: change ? money(change) : null,
+          direction,
+        },
+      }
+    })
+
+    return {
+      columns: [
+        { key: 'name', label: 'Item' },
+        { key: 'store', label: 'Store', width: 'w-36' },
+        { key: 'account', label: 'Inventory account', width: 'w-56' },
+        { key: 'before', label: 'Cost before', format: 'money', width: 'w-32' },
+        { key: 'cost', label: 'Cost now', format: 'money', width: 'w-32' },
+        { key: 'change', label: 'Change', format: 'money', width: 'w-28' },
+        { key: 'direction', label: 'Higher or lower', width: 'w-36' },
+      ],
+      rows,
+      totals: { name: 'Items', direction: `${rose} higher · ${fell} lower` },
+      note: 'Higher means the average cost rose. Lower means it fell. Damage that stays on the item, and cost you add, both show as higher. The inventory account is the one on the chart.',
+      empty: 'No tracked products yet.',
+    }
+  },
+}
+
+/**
+ * Prisma where for a store shelf: null storeId is counted at the office, so
+ * filtering to the office store includes those older rows.
+ */
+async function storeShelfWhere(
+  orgId: string,
+  storeId: string | undefined,
+): Promise<
+  | { storeId: string }
+  | { OR: [{ storeId: string }, { storeId: null }] }
+  | Record<string, never>
+> {
+  if (!storeId) return {}
+  const store = await db.store.findFirst({
+    where: { id: storeId, orgId, isActive: true },
+    select: { id: true, isOffice: true },
+  })
+  if (!store) return { storeId }
+  if (store.isOffice) return { OR: [{ storeId: store.id }, { storeId: null }] }
+  return { storeId: store.id }
+}
+
 const stockMovements: TableReport = {
   key: 'inventory-movements',
-  title: 'Stock movements',
+  title: 'Inventory Movement',
   description: 'Every movement of stock in the period, and what it did to the value.',
   group: 'Inventory',
   mode: 'range',
-  async build({ ctx, range }) {
+  filterKinds: ['item', 'store'],
+  async build({ ctx, range, filters }) {
+    const shelf = await storeShelfWhere(ctx.orgId, filters?.storeId)
+    const itemFilter = filters?.itemId ? { itemId: filters.itemId } : {}
+    const storeScoped = Boolean(filters?.storeId)
+
+    const office = await db.store.findFirst({
+      where: { orgId: ctx.orgId, isActive: true, isOffice: true },
+      select: { id: true, name: true },
+    })
+
+    // Opening qty per item on this shelf, so "on hand after" is store-true when
+    // a store is picked — company runningQuantity would be the wrong shelf.
+    const openingByItem = new Map<string, Decimal>()
+    if (storeScoped) {
+      const prior = await db.inventoryTransaction.groupBy({
+        by: ['itemId'],
+        where: {
+          orgId: ctx.orgId,
+          date: { lt: toDate(range.from) },
+          ...itemFilter,
+          ...shelf,
+        },
+        _sum: { quantity: true },
+      })
+      for (const row of prior) {
+        openingByItem.set(row.itemId, new Decimal(row._sum.quantity?.toString() ?? '0'))
+      }
+    }
+
     const movements = await db.inventoryTransaction.findMany({
       where: {
         orgId: ctx.orgId,
         date: { gte: toDate(range.from), lte: toDate(range.to) },
+        ...itemFilter,
+        ...shelf,
       },
       select: {
-        id: true, date: true, type: true, quantity: true, unitCost: true, value: true,
-        runningQuantity: true, sourceType: true,
+        id: true, date: true, createdAt: true, type: true, quantity: true, unitCost: true, value: true,
+        runningQuantity: true, storeId: true, sourceType: true,
         item: { select: { id: true, name: true, sku: true } },
+        store: { select: { id: true, name: true, isOffice: true } },
         journal: { select: { id: true, journalNumber: true } },
       },
       orderBy: [{ date: 'asc' }, { sequence: 'asc' }],
@@ -736,49 +1136,72 @@ const stockMovements: TableReport = {
     })
 
     let net = ZERO
+    const running = new Map(openingByItem)
+    const narrowed = Boolean(filters?.itemId || filters?.storeId)
 
     return {
       columns: [
-        { key: 'date', label: 'Date', format: 'date', width: 'w-28' },
+        { key: 'date', label: 'Date', format: 'datetime', width: 'w-44' },
         { key: 'item', label: 'Item' },
+        { key: 'store', label: 'Store', width: 'w-36' },
         { key: 'type', label: 'Movement', width: 'w-32' },
         { key: 'entry', label: 'Entry', width: 'w-28' },
-        { key: 'quantity', label: 'Quantity', format: 'number', width: 'w-28' },
+        { key: 'quantity', label: 'Quantity', format: 'signed', width: 'w-28' },
         { key: 'cost', label: 'Unit cost', format: 'money', width: 'w-28' },
         { key: 'value', label: 'Value', format: 'money', width: 'w-32' },
         { key: 'onHand', label: 'On hand after', format: 'number', width: 'w-32' },
       ],
       rows: movements.map((movement) => {
         net = net.plus(movement.value.toString())
+        let onHand: string
+        if (storeScoped) {
+          const next = (running.get(movement.item.id) ?? ZERO).plus(movement.quantity.toString())
+          running.set(movement.item.id, next)
+          onHand = next.toFixed(2)
+        } else {
+          onHand = new Decimal(movement.runningQuantity.toString()).toFixed(2)
+        }
+        const storeName =
+          movement.store?.name ??
+          (movement.storeId ? null : office?.name ? `${office.name} (office)` : 'Office')
         return {
           href: movement.journal ? `/journals/${movement.journal.id}` : `/inventory/${movement.item.id}`,
           cells: {
-            date: date(movement.date),
+            date: recorded(movement.createdAt),
             item: movement.item.sku ? `${movement.item.sku} — ${movement.item.name}` : movement.item.name,
+            store: storeName,
             type: movement.type.replace('_', ' ').toLowerCase(),
             entry: movement.journal?.journalNumber ?? null,
             quantity: new Decimal(movement.quantity.toString()).toFixed(2),
             cost: money(movement.unitCost.toString()),
             value: money(movement.value.toString()),
-            onHand: new Decimal(movement.runningQuantity.toString()).toFixed(2),
+            onHand,
           },
         }
       }),
       totals: { date: 'Net change in stock value', value: money(net) },
-      empty: 'No stock moved in this period.',
+      note: storeScoped
+        ? 'On hand after is this store’s shelf for each item, not the company total.'
+        : undefined,
+      empty: narrowed
+        ? 'No stock moved for this filter in the period.'
+        : 'No stock moved in this period.',
     }
   },
 }
 
 const reorder: TableReport = {
   key: 'inventory-reorder',
-  title: 'Reorder list',
+  title: 'Products to Reorder',
   description: 'Products at or below their reorder point.',
   group: 'Inventory',
   mode: 'asOf',
-  async build({ ctx }) {
+  filterKinds: ['item'],
+  async build({ ctx, filters }) {
     const stock = await valuation(db as unknown as Tx, ctx.orgId)
-    const low = stock.items.filter((item) => item.belowReorder)
+    const low = stock.items
+      .filter((item) => item.belowReorder)
+      .filter((item) => (filters?.itemId ? item.itemId === filters.itemId : true))
 
     return {
       columns: [
@@ -795,9 +1218,13 @@ const reorder: TableReport = {
         cells: {
           name: item.name,
           sku: item.sku,
-          quantity: item.quantity.toFixed(2),
-          reorderPoint: item.reorderPoint?.toFixed(2) ?? null,
-          shortfall: item.reorderPoint ? item.reorderPoint.minus(item.quantity).toFixed(2) : null,
+          quantity: formatQty(item.quantity.toFixed(2), item.unitOfMeasure),
+          reorderPoint: item.reorderPoint
+            ? formatQty(item.reorderPoint.toFixed(2), item.unitOfMeasure)
+            : null,
+          shortfall: item.reorderPoint
+            ? formatQty(item.reorderPoint.minus(item.quantity).toFixed(2), item.unitOfMeasure)
+            : null,
           cost: money(item.averageCost),
         },
       })),
@@ -810,23 +1237,17 @@ const reorder: TableReport = {
 
 const generalLedgerReport: TableReport = {
   key: 'general-ledger',
-  title: 'General ledger',
+  title: 'General Ledger',
   description: 'Every posted line, account by account, with a running balance.',
-  group: 'Accounting',
+  group: 'For my accountant',
   mode: 'range',
   async build({ ctx, range }) {
-    const accounts = await db.ledgerAccount.findMany({
-      where: { orgId: ctx.orgId },
-      select: { id: true, code: true, name: true },
-      orderBy: { code: 'asc' },
-    })
+    const book = await generalLedgerBook(ctx.orgId, range, { limit: 500 })
 
     const rows: ReportRow[] = []
+    const pending: { row: ReportRow; sourceType: string; sourceId: string | null; journalId: string }[] = []
 
-    for (const account of accounts) {
-      const ledger = await generalLedger(ctx.orgId, account.id, range, { limit: 500 })
-      if (ledger.entries.length === 0 && ledger.opening.isZero()) continue
-
+    for (const account of book) {
       rows.push({
         emphasis: true,
         href: `/reports/transaction-detail?account=${account.id}&period=custom&from=${range.from}&to=${range.to}`,
@@ -834,25 +1255,45 @@ const generalLedgerReport: TableReport = {
           date: null,
           account: `${account.code} — ${account.name}`,
           entry: null,
+          type: null,
+          document: null,
+          name: null,
           description: 'Opening balance',
           debit: null,
           credit: null,
-          balance: money(ledger.opening),
+          balance: money(account.opening),
         },
       })
 
-      for (const entry of ledger.entries) {
-        rows.push({
+      for (const entry of account.entries) {
+        const sourceLabel = JOURNAL_SOURCE_LABELS[entry.sourceType as keyof typeof JOURNAL_SOURCE_LABELS] ?? entry.sourceType
+        const parts = postedLineParts({
+          sourceLabel,
+          memo: entry.memo,
+          description: entry.description,
+          partyName: entry.partyName,
+        })
+        const row: ReportRow = {
           href: `/journals/${entry.journalId}`,
           cells: {
-            date: date(entry.date),
+            date: recorded(entry.recordedAt),
             account: null,
             entry: entry.journalNumber,
-            description: entry.description ?? entry.memo ?? entry.contraAccounts,
+            type: sourceLabel,
+            document: null,
+            name: parts.name,
+            description: parts.note,
             debit: entry.debit.isZero() ? null : money(entry.debit),
             credit: entry.credit.isZero() ? null : money(entry.credit),
             balance: money(entry.balance),
           },
+        }
+        rows.push(row)
+        pending.push({
+          row,
+          sourceType: entry.sourceType,
+          sourceId: entry.sourceId,
+          journalId: entry.journalId,
         })
       }
 
@@ -862,26 +1303,50 @@ const generalLedgerReport: TableReport = {
           date: null,
           account: null,
           entry: null,
+          type: null,
+          document: null,
+          name: null,
           description: `Closing balance — ${account.code} ${account.name}`,
           debit: null,
           credit: null,
-          balance: money(ledger.closing),
+          balance: money(account.closing),
         },
       })
     }
 
+    const sources = await resolveSources(
+      ctx.orgId,
+      pending.map((item) => ({
+        sourceType: item.sourceType as JournalSourceType,
+        sourceId: item.sourceId,
+      })),
+    )
+    for (const item of pending) {
+      const source = sourceFor(sources, {
+        sourceType: item.sourceType as JournalSourceType,
+        sourceId: item.sourceId,
+      })
+      const href = source.href ?? `/journals/${item.journalId}`
+      item.row.href = href
+      item.row.cells.document = source.number
+      item.row.cellHrefs = { type: href, entry: href, document: href }
+    }
+
     return {
       columns: [
-        { key: 'date', label: 'Date', format: 'date', width: 'w-28' },
+        { key: 'date', label: 'Date', format: 'datetime', width: 'w-44' },
         { key: 'account', label: 'Account' },
         { key: 'entry', label: 'Entry', width: 'w-28' },
+        { key: 'type', label: 'Type', width: 'w-36' },
+        { key: 'document', label: 'Document', width: 'w-32' },
+        { key: 'name', label: 'Name', width: 'w-44' },
         { key: 'description', label: 'Description' },
         { key: 'debit', label: 'Debit', format: 'money', width: 'w-32' },
         { key: 'credit', label: 'Credit', format: 'money', width: 'w-32' },
-        { key: 'balance', label: 'Balance', format: 'money', width: 'w-32' },
+        { key: 'balance', label: 'Balance', format: 'money', width: 'w-32', total: false },
       ],
       rows,
-      note: 'Balances are shown on each account’s natural side. Up to 500 entries per account.',
+      note: 'Balances are shown on each account’s natural side. The name is the customer, vendor, or item. Up to 500 entries per account.',
       empty: 'Nothing posted in this period.',
     }
   },
@@ -889,9 +1354,9 @@ const generalLedgerReport: TableReport = {
 
 const journalReport: TableReport = {
   key: 'journal-report',
-  title: 'Journal report',
+  title: 'Journal',
   description: 'Every entry in the period with both sides, the document and the party.',
-  group: 'Accounting',
+  group: 'For my accountant',
   mode: 'range',
   async build({ ctx, range }) {
     const journals = await db.journal.findMany({
@@ -901,7 +1366,7 @@ const journalReport: TableReport = {
         date: { gte: toDate(range.from), lte: toDate(range.to) },
       },
       select: {
-        id: true, journalNumber: true, date: true, memo: true, sourceType: true, status: true,
+        id: true, journalNumber: true, date: true, postedAt: true, memo: true, sourceType: true, sourceId: true, status: true,
         lines: {
           orderBy: { lineNumber: 'asc' },
           select: {
@@ -916,21 +1381,35 @@ const journalReport: TableReport = {
       take: 500,
     })
 
+    const sources = await resolveSources(
+      ctx.orgId,
+      journals.map((journal) => ({ sourceType: journal.sourceType, sourceId: journal.sourceId })),
+    )
+
     const rows: ReportRow[] = []
     let totalDebit = ZERO
 
     for (const journal of journals) {
+      const source = sourceFor(sources, { sourceType: journal.sourceType, sourceId: journal.sourceId })
+      const href = source.href ?? `/journals/${journal.id}`
+      const sourceLabel = JOURNAL_SOURCE_LABELS[journal.sourceType] ?? journal.sourceType
       for (const [index, line] of journal.lines.entries()) {
         totalDebit = totalDebit.plus(line.debit.toString())
         rows.push({
-          href: `/journals/${journal.id}`,
+          href,
+          cellHrefs: index === 0 ? { entry: href, source: href } : undefined,
           cells: {
-            date: index === 0 ? date(journal.date) : null,
+            date: index === 0 ? recorded(journal.postedAt) : null,
             entry: index === 0 ? journal.journalNumber : null,
-            source: index === 0 ? journal.sourceType.replace('_', ' ').toLowerCase() : null,
+            source: index === 0 ? sourceLabel : null,
             account: `${line.account.code} — ${line.account.name}`,
             party: line.customer?.displayName ?? line.vendor?.displayName ?? null,
-            description: line.description ?? journal.memo,
+            description: postedLineParts({
+              sourceLabel,
+              memo: journal.memo,
+              description: line.description,
+              partyName: line.customer?.displayName ?? line.vendor?.displayName ?? null,
+            }).note,
             debit: line.debit.toString() === '0' ? null : money(line.debit.toString()),
             credit: line.credit.toString() === '0' ? null : money(line.credit.toString()),
           },
@@ -940,7 +1419,7 @@ const journalReport: TableReport = {
 
     return {
       columns: [
-        { key: 'date', label: 'Date', format: 'date', width: 'w-28' },
+        { key: 'date', label: 'Date', format: 'datetime', width: 'w-44' },
         { key: 'entry', label: 'Entry', width: 'w-28' },
         { key: 'source', label: 'Source', width: 'w-32' },
         { key: 'account', label: 'Account' },
@@ -959,9 +1438,9 @@ const journalReport: TableReport = {
 
 const accountBalances: TableReport = {
   key: 'account-balances',
-  title: 'Account balances',
+  title: 'Account List',
   description: 'Every account with its opening balance, movement and closing balance.',
-  group: 'Accounting',
+  group: 'For my accountant',
   mode: 'range',
   async build({ ctx, range }) {
     const rows = await db.$queryRaw<
@@ -992,7 +1471,9 @@ const accountBalances: TableReport = {
 
     // Presented on the natural side, so income reads positive.
     const natural = (type: string, raw: string) =>
-      type === 'ASSET' || type === 'EXPENSE' ? new Decimal(raw) : new Decimal(raw).negated()
+      type === 'ASSET' || type === 'COGS' || type === 'EXPENSE'
+        ? new Decimal(raw)
+        : new Decimal(raw).negated()
 
     return {
       columns: [
@@ -1020,24 +1501,766 @@ const accountBalances: TableReport = {
   },
 }
 
+const DOCUMENT_STATUS: Record<string, string> = {
+  DRAFT: 'Draft',
+  OPEN: 'Open',
+  PARTIAL: 'Partial',
+  PAID: 'Paid',
+  VOID: 'Void',
+  ACCEPTED: 'Accepted',
+  CLOSED: 'Closed',
+}
+
+/** The live client, or the transaction a test is about to roll back. */
+function books(input: ReportContext): Tx {
+  return input.client ?? (db as unknown as Tx)
+}
+
+/**
+ * Every invoice in the period, paid or not.
+ *
+ * Open Invoices is the unpaid subset. This is the full list, which is what an
+ * import check and a period review both need.
+ */
+const invoiceList: TableReport = {
+  key: 'invoice-list',
+  title: 'Invoice List',
+  description: 'Every invoice dated in the period, with its status and what is still open.',
+  group: 'Who owes you',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const invoices = await books(input).salesDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'INVOICE',
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: {
+        id: true, number: true, date: true, createdAt: true, dueDate: true, total: true, status: true,
+        customer: { select: { displayName: true } },
+        applications: { select: { amount: true } },
+      },
+      orderBy: [{ date: 'asc' }, { number: 'asc' }],
+    })
+
+    let open = ZERO
+    const rows = invoices.map((invoice) => {
+      const applied = invoice.applications.reduce((sum, row) => sum.plus(row.amount.toString()), ZERO)
+      const balance =
+        invoice.status === 'VOID' || invoice.status === 'DRAFT'
+          ? ZERO
+          : Decimal.max(new Decimal(invoice.total.toString()).minus(applied), ZERO)
+      open = open.plus(balance)
+      return {
+        href: `/sales/invoices/${invoice.id}`,
+        cells: {
+          date: recorded(invoice.createdAt),
+          number: invoice.number,
+          customer: invoice.customer.displayName,
+          dueDate: date(invoice.dueDate),
+          status: DOCUMENT_STATUS[invoice.status] ?? invoice.status,
+          total: money(invoice.total.toString()),
+          balance: money(balance),
+        },
+      }
+    })
+
+    return {
+      columns: [
+        { key: 'date', label: 'Date', format: 'datetime', width: 'w-44' },
+        { key: 'number', label: 'No.', width: 'w-32' },
+        { key: 'customer', label: 'Customer' },
+        { key: 'dueDate', label: 'Due', format: 'date', width: 'w-28' },
+        { key: 'status', label: 'Status', width: 'w-28' },
+        { key: 'total', label: 'Amount', format: 'money', width: 'w-32' },
+        { key: 'balance', label: 'Open balance', format: 'money', width: 'w-36' },
+      ],
+      rows,
+      totals: { date: 'Total', balance: money(open) },
+      empty: 'No invoices in this period.',
+      note: 'Drafts and voids are listed, and they do not add to the open balance.',
+    }
+  },
+}
+
+/**
+ * Invoices that are past their due date and still have a balance.
+ *
+ * A draft is not collectible, and an invoice due today is not yet overdue.
+ */
+const collectionsReport: TableReport = {
+  key: 'collections',
+  title: 'Collections Report',
+  description: 'Invoices past their due date that still have a balance, with a way to reach the customer.',
+  group: 'Who owes you',
+  mode: 'asOf',
+  async build(input) {
+    const { ctx, asOf } = input
+    const asOfTime = toDate(asOf).getTime()
+    const invoices = await books(input).salesDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'INVOICE',
+        status: { in: ['OPEN', 'PARTIAL'] },
+        excludeFromOverdue: false,
+        date: { lte: toDate(asOf) },
+      },
+      select: {
+        id: true, number: true, date: true, dueDate: true, promisedDate: true, total: true,
+        customer: { select: { displayName: true, phone: true, mobile: true, email: true } },
+        applications: { select: { amount: true } },
+      },
+      orderBy: [{ dueDate: 'asc' }, { date: 'asc' }],
+    })
+
+    const rows: ReportRow[] = []
+    let outstanding = ZERO
+
+    for (const invoice of invoices) {
+      const due = invoice.promisedDate ?? invoice.dueDate ?? invoice.date
+      if (due.getTime() >= asOfTime) continue
+      const applied = invoice.applications.reduce((sum, row) => sum.plus(row.amount.toString()), ZERO)
+      const balance = new Decimal(invoice.total.toString()).minus(applied)
+      if (!balance.greaterThan(0)) continue
+      outstanding = outstanding.plus(balance)
+      const days = Math.floor((asOfTime - due.getTime()) / 86_400_000)
+      rows.push({
+        href: `/sales/invoices/${invoice.id}`,
+        cells: {
+          customer: invoice.customer.displayName,
+          phone: invoice.customer.phone ?? invoice.customer.mobile,
+          email: invoice.customer.email,
+          number: invoice.number,
+          dueDate: date(due),
+          overdue: `${days} days`,
+          balance: money(balance),
+        },
+      })
+    }
+
+    return {
+      columns: [
+        { key: 'customer', label: 'Customer' },
+        { key: 'phone', label: 'Phone', width: 'w-36' },
+        { key: 'email', label: 'Email' },
+        { key: 'number', label: 'Invoice', width: 'w-32' },
+        { key: 'dueDate', label: 'Due', format: 'date', width: 'w-28' },
+        { key: 'overdue', label: 'Past due', width: 'w-28' },
+        { key: 'balance', label: 'Open balance', format: 'money', width: 'w-36' },
+      ],
+      rows,
+      totals: { customer: 'Total', balance: money(outstanding) },
+      empty: 'Nothing is past due.',
+    }
+  },
+}
+
+/** Every bill in the period. Unpaid Bills is the outstanding subset. */
+const billList: TableReport = {
+  key: 'bill-list',
+  title: 'Bill List',
+  description: 'Every bill dated in the period, with its status and what is still open.',
+  group: 'What you owe',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const bills = await books(input).purchaseDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'BILL',
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: {
+        id: true, number: true, date: true, createdAt: true, dueDate: true, total: true, status: true,
+        vendor: { select: { displayName: true } },
+        applications: { select: { amount: true } },
+      },
+      orderBy: [{ date: 'asc' }, { number: 'asc' }],
+    })
+
+    let open = ZERO
+    const rows = bills.map((bill) => {
+      const applied = bill.applications.reduce((sum, row) => sum.plus(row.amount.toString()), ZERO)
+      const balance =
+        bill.status === 'VOID' || bill.status === 'DRAFT'
+          ? ZERO
+          : Decimal.max(new Decimal(bill.total.toString()).minus(applied), ZERO)
+      open = open.plus(balance)
+      return {
+        href: `/purchases/bills/${bill.id}`,
+        cells: {
+          date: recorded(bill.createdAt),
+          number: bill.number,
+          vendor: bill.vendor?.displayName ?? '—',
+          dueDate: date(bill.dueDate),
+          status: DOCUMENT_STATUS[bill.status] ?? bill.status,
+          total: money(bill.total.toString()),
+          balance: money(balance),
+        },
+      }
+    })
+
+    return {
+      columns: [
+        { key: 'date', label: 'Date', format: 'datetime', width: 'w-44' },
+        { key: 'number', label: 'No.', width: 'w-32' },
+        { key: 'vendor', label: 'Vendor' },
+        { key: 'dueDate', label: 'Due', format: 'date', width: 'w-28' },
+        { key: 'status', label: 'Status', width: 'w-28' },
+        { key: 'total', label: 'Amount', format: 'money', width: 'w-32' },
+        { key: 'balance', label: 'Open balance', format: 'money', width: 'w-36' },
+      ],
+      rows,
+      totals: { date: 'Total', balance: money(open) },
+      empty: 'No bills in this period.',
+      note: 'Drafts and voids are listed, and they do not add to the open balance.',
+    }
+  },
+}
+
+/* --- Data analysis -------------------------------------------------------- */
+
+const ACTION_LABEL: Record<string, string> = {
+  CREATE: 'Entered',
+  UPDATE: 'Changed',
+  DELETE: 'Deleted',
+  ARCHIVE: 'Archived',
+  RESTORE: 'Restored',
+  LOGIN: 'Signed in',
+  LOGIN_FAILED: 'Sign-in failed',
+  LOGOUT: 'Signed out',
+  POST: 'Posted',
+  REVERSE: 'Reversed',
+  CLOSE_PERIOD: 'Closed the period',
+  REOPEN_PERIOD: 'Reopened the period',
+}
+
+const ENTITY_LABEL: Record<string, string> = {
+  SalesDocument: 'Sale',
+  PurchaseDocument: 'Purchase',
+  Journal: 'Journal',
+  Customer: 'Customer',
+  Vendor: 'Vendor',
+  CustomerPayment: 'Customer payment',
+  BillPayment: 'Bill payment',
+  Item: 'Item',
+  LedgerAccount: 'Account',
+}
+
+const SALES_SLUG: Record<string, string> = {
+  INVOICE: 'invoices',
+  ESTIMATE: 'estimates',
+  QUOTATION: 'quotations',
+  SALES_ORDER: 'sales-orders',
+  SALES_RECEIPT: 'sales-receipts',
+  CREDIT_MEMO: 'credit-memos',
+  REFUND_RECEIPT: 'refunds',
+}
+
+const PURCHASE_SLUG: Record<string, string> = {
+  BILL: 'bills',
+  EXPENSE: 'expenses',
+  VENDOR_CREDIT: 'vendor-credits',
+  PURCHASE_ORDER: 'purchase-orders',
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function detailOf(after: unknown): string | null {
+  const record = recordOf(after)
+  if (!record) return null
+  for (const key of ['number', 'displayName', 'name', 'memo']) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return null
+}
+
+function activityHref(entity: string, entityId: string, after: unknown): string | null {
+  const type = typeof recordOf(after)?.type === 'string' ? String(recordOf(after)?.type) : ''
+  if (entity === 'Journal') return `/journals/${entityId}`
+  if (entity === 'SalesDocument' && SALES_SLUG[type]) return `/sales/${SALES_SLUG[type]}/${entityId}`
+  if (entity === 'PurchaseDocument' && PURCHASE_SLUG[type]) return `/purchases/${PURCHASE_SLUG[type]}/${entityId}`
+  if (entity === 'Customer') return `/customers?id=${entityId}`
+  if (entity === 'Vendor') return `/vendors/${entityId}`
+  if (entity === 'CustomerPayment') return '/payments'
+  if (entity === 'BillPayment') return '/bill-payments'
+  if (entity === 'Item') return `/inventory/${entityId}`
+  if (entity === 'LedgerAccount') return `/accounts/${entityId}`
+  return null
+}
+
+const userActivity: TableReport = {
+  key: 'user-activity',
+  title: 'User Activity',
+  description: 'Who entered, changed, or posted each record in the period.',
+  group: 'Data analysis',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const logs = await books(input).auditLog.findMany({
+      where: {
+        orgId: ctx.orgId,
+        at: { gte: toDate(range.from), lt: toDate(addDays(range.to, 1)) },
+      },
+      select: {
+        id: true,
+        at: true,
+        action: true,
+        entity: true,
+        entityId: true,
+        after: true,
+        actor: { select: { name: true } },
+      },
+      orderBy: { at: 'desc' },
+      take: 1000,
+    })
+
+    return {
+      columns: [
+        { key: 'when', label: 'When', width: 'w-44' },
+        { key: 'user', label: 'User' },
+        { key: 'action', label: 'Action', width: 'w-36' },
+        { key: 'record', label: 'Record', width: 'w-40' },
+        { key: 'detail', label: 'Detail' },
+      ],
+      rows: logs.map((log) => ({
+        href: log.action === 'DELETE' ? null : activityHref(log.entity, log.entityId, log.after),
+        cells: {
+          when: formatDateTime(log.at, ctx.organization.timeZone),
+          user: log.actor?.name ?? 'System',
+          action: ACTION_LABEL[log.action] ?? log.action,
+          record: ENTITY_LABEL[log.entity] ?? log.entity.replace(/([a-z])([A-Z])/g, '$1 $2'),
+          detail: detailOf(log.after),
+        },
+      })),
+      empty: 'No one recorded anything in this period.',
+      note:
+        logs.length === 1000
+          ? 'Showing the latest 1,000 actions in this period. A deleted record stays in Trash and does not open here.'
+          : 'Click a row to open the record. A deleted record stays in Trash and does not open here.',
+    }
+  },
+}
+
+const activityByUser: TableReport = {
+  key: 'activity-by-user',
+  title: 'Activity by User',
+  description: 'How much each person entered, changed, and posted in the period.',
+  group: 'Data analysis',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const logs = await books(input).auditLog.findMany({
+      where: {
+        orgId: ctx.orgId,
+        at: { gte: toDate(range.from), lt: toDate(addDays(range.to, 1)) },
+      },
+      select: { action: true, actor: { select: { name: true } } },
+    })
+
+    const byUser = new Map<string, { total: number; entered: number; changed: number; posted: number }>()
+    for (const log of logs) {
+      const name = log.actor?.name ?? 'System'
+      const current = byUser.get(name) ?? { total: 0, entered: 0, changed: 0, posted: 0 }
+      current.total += 1
+      if (log.action === 'CREATE') current.entered += 1
+      if (log.action === 'UPDATE') current.changed += 1
+      if (log.action === 'POST') current.posted += 1
+      byUser.set(name, current)
+    }
+
+    const rows = [...byUser.entries()]
+      .sort((a, b) => b[1].total - a[1].total || a[0].localeCompare(b[0]))
+      .map(([name, counts]) => ({
+        cells: {
+          user: name,
+          total: String(counts.total),
+          entered: String(counts.entered),
+          changed: String(counts.changed),
+          posted: String(counts.posted),
+        },
+      }))
+
+    return {
+      columns: [
+        { key: 'user', label: 'User' },
+        { key: 'total', label: 'Actions', format: 'number', width: 'w-28' },
+        { key: 'entered', label: 'Entered', format: 'number', width: 'w-28' },
+        { key: 'changed', label: 'Changed', format: 'number', width: 'w-28' },
+        { key: 'posted', label: 'Posted', format: 'number', width: 'w-28' },
+      ],
+      rows,
+      totals: {
+        user: 'Total',
+        total: String(logs.length),
+        entered: String(logs.filter((log) => log.action === 'CREATE').length),
+        changed: String(logs.filter((log) => log.action === 'UPDATE').length),
+        posted: String(logs.filter((log) => log.action === 'POST').length),
+      },
+      empty: 'No one recorded anything in this period.',
+    }
+  },
+}
+
+const salesByDeposit: TableReport = {
+  key: 'sales-by-deposit',
+  title: 'Sales by Deposit Account',
+  description:
+    'Cash sales by the account that received them. New till sales sit in that register’s bank account. Older receipts stay on the wallet account they were posted to. Till change is taken out of the same account, so the net is what that account kept.',
+  group: 'Data analysis',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const receipts = await books(input).salesDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'SALES_RECEIPT',
+        status: { notIn: ['VOID', 'DRAFT'] },
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: {
+        total: true,
+        depositAccount: { select: { id: true, code: true, name: true } },
+        posOrder: {
+          select: {
+            changeAmount: true,
+            changePaymentMethodId: true,
+            changeLedgerAccountId: true,
+            depositLedgerAccountId: true,
+            depositAccount: { select: { id: true, code: true, name: true } },
+            changePaymentMethod: { select: { name: true } },
+            payments: {
+              select: {
+                amount: true,
+                ledgerAccountId: true,
+                paymentMethod: { select: { name: true } },
+              },
+            },
+          },
+        },
+      },
+    })
+
+    type Bucket = { id: string; label: string; count: number; tendered: Decimal; change: Decimal }
+    const grouped = new Map<string, Bucket>()
+    const touch = (id: string, label: string) => {
+      const current = grouped.get(id) ?? { id, label, count: 0, tendered: ZERO, change: ZERO }
+      if (current.label === id && label !== id) current.label = label
+      grouped.set(id, current)
+      return current
+    }
+
+    const accountIds = new Set<string>()
+    for (const receipt of receipts) {
+      for (const payment of receipt.posOrder?.payments ?? []) accountIds.add(payment.ledgerAccountId)
+      if (receipt.posOrder?.changeLedgerAccountId) accountIds.add(receipt.posOrder.changeLedgerAccountId)
+    }
+    const accountRows = accountIds.size
+      ? await books(input).ledgerAccount.findMany({
+          where: { orgId: ctx.orgId, id: { in: [...accountIds] } },
+          select: { id: true, code: true, name: true },
+        })
+      : []
+    const accountLabel = new Map(accountRows.map((account) => [account.id, `${account.code} ${account.name}`]))
+
+    for (const receipt of receipts) {
+      const order = receipt.posOrder
+      if (order && order.payments.length > 0 && order.depositLedgerAccountId) {
+        const tendered = order.payments.reduce(
+          (sum, payment) => sum.plus(payment.amount.toString()),
+          ZERO,
+        )
+        const label = order.depositAccount
+          ? `${order.depositAccount.code} ${order.depositAccount.name}`
+          : 'Register bank'
+        const row = touch(order.depositLedgerAccountId, label)
+        row.count += 1
+        row.tendered = row.tendered.plus(tendered)
+        row.change = row.change.plus(order.changeAmount.toString())
+        continue
+      }
+
+      if (order && order.payments.length > 0) {
+        const sale: PosSaleTender = {
+          payments: order.payments.map((payment) => ({
+            methodId: payment.ledgerAccountId,
+            methodName: payment.paymentMethod.name,
+            accountId: payment.ledgerAccountId,
+            amount: payment.amount.toString(),
+          })),
+          changeAmount: order.changeAmount.toString(),
+          changeMethodId: order.changePaymentMethodId,
+          changeMethodName: order.changePaymentMethod?.name ?? null,
+          changeAccountId: order.changeLedgerAccountId,
+        }
+        const seen = new Set<string>()
+        for (const total of accountTenderTotals([sale])) {
+          const label = accountLabel.get(total.accountId) ?? total.methodName
+          const row = touch(total.accountId, label)
+          if (!seen.has(total.accountId)) {
+            row.count += 1
+            seen.add(total.accountId)
+          }
+          row.tendered = row.tendered.plus(total.tendered)
+          row.change = row.change.plus(total.change)
+        }
+        continue
+      }
+
+      const account = receipt.depositAccount
+      const id = account?.id ?? 'none'
+      const label = account ? `${account.code} ${account.name}` : 'No deposit account'
+      const row = touch(id, label)
+      row.count += 1
+      row.tendered = row.tendered.plus(receipt.total.toString())
+    }
+
+    const rows = [...grouped.values()]
+      .sort((a, b) => b.tendered.minus(b.change).comparedTo(a.tendered.minus(a.change)))
+      .map((row) => ({
+        href: row.id === 'none' ? null : `/reports/transaction-detail?account=${row.id}&period=custom&from=${range.from}&to=${range.to}`,
+        cells: {
+          account: row.label,
+          count: String(row.count),
+          tendered: money(row.tendered),
+          change: money(row.change),
+          amount: money(row.tendered.minus(row.change)),
+        },
+      }))
+
+    const tendered = [...grouped.values()].reduce((sum, row) => sum.plus(row.tendered), ZERO)
+    const change = [...grouped.values()].reduce((sum, row) => sum.plus(row.change), ZERO)
+
+    return {
+      columns: [
+        { key: 'account', label: 'Deposit to' },
+        { key: 'count', label: 'Receipts', format: 'number', width: 'w-28' },
+        { key: 'tendered', label: 'Tendered', format: 'money', width: 'w-32' },
+        { key: 'change', label: 'Change returned', format: 'money', width: 'w-36' },
+        { key: 'amount', label: 'Net received', format: 'money', width: 'w-36' },
+      ],
+      rows,
+      totals: {
+        account: 'Total',
+        count: String(receipts.length),
+        tendered: money(tendered),
+        change: money(change),
+        amount: money(tendered.minus(change)),
+      },
+      empty: 'No cash sales were deposited in this period.',
+      note: 'Net received is the tender minus change handed back from that account. Click an account to see the lines posted to it.',
+    }
+  },
+}
+
+/* --- Favourites that were still missing ---------------------------------- */
+
+const salesByCustomerDetail: TableReport = {
+  key: 'sales-by-customer-detail',
+  title: 'Sales by Customer Detail',
+  description: 'Each invoice, sales receipt, and credit memo in the period, net of tax.',
+  group: 'Sales and customers',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const documents = await books(input).salesDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: { in: ['INVOICE', 'SALES_RECEIPT', 'CREDIT_MEMO', 'REFUND_RECEIPT'] },
+        status: { notIn: ['DRAFT', 'VOID'] },
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: {
+        id: true,
+        type: true,
+        number: true,
+        date: true,
+        createdAt: true,
+        subtotal: true,
+        customer: { select: { displayName: true } },
+      },
+      orderBy: [{ customer: { displayName: 'asc' } }, { date: 'asc' }, { number: 'asc' }],
+    })
+
+    let total = ZERO
+    const rows = documents.map((document) => {
+      const credit = document.type === 'CREDIT_MEMO' || document.type === 'REFUND_RECEIPT'
+      const amount = new Decimal(document.subtotal.toString())
+      const signed = credit ? amount.negated() : amount
+      total = total.plus(signed)
+      return {
+        href: `/sales/${SALES_SLUG[document.type] ?? 'invoices'}/${document.id}`,
+        cells: {
+          customer: document.customer.displayName,
+          date: recorded(document.createdAt),
+          type: document.type === 'SALES_RECEIPT' ? 'Sales receipt' : document.type === 'CREDIT_MEMO' ? 'Credit memo' : document.type === 'REFUND_RECEIPT' ? 'Refund' : 'Invoice',
+          number: document.number,
+          amount: money(signed),
+        },
+      }
+    })
+
+    return {
+      columns: [
+        { key: 'customer', label: 'Customer' },
+        { key: 'date', label: 'Date', format: 'datetime', width: 'w-44' },
+        { key: 'type', label: 'Type', width: 'w-36' },
+        { key: 'number', label: 'No.', width: 'w-28' },
+        { key: 'amount', label: 'Amount', format: 'money', width: 'w-32' },
+      ],
+      rows,
+      totals: { customer: 'Total', amount: money(total) },
+      empty: 'No sales in this period.',
+    }
+  },
+}
+
+const billsAndPayments: TableReport = {
+  key: 'bills-and-payments',
+  title: 'Bills and Applied Payments',
+  description: 'Bills in the period and the payments or credits applied to them.',
+  group: 'What you owe',
+  mode: 'range',
+  async build(input) {
+    const { ctx, range } = input
+    const bills = await books(input).purchaseDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        type: 'BILL',
+        status: { notIn: ['DRAFT', 'VOID'] },
+        date: { gte: toDate(range.from), lte: toDate(range.to) },
+      },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        total: true,
+        vendor: { select: { displayName: true } },
+        applications: {
+          select: {
+            amount: true,
+            payment: { select: { number: true } },
+            creditDocument: { select: { number: true } },
+          },
+        },
+      },
+      orderBy: [{ date: 'asc' }, { number: 'asc' }],
+    })
+
+    let appliedTotal = ZERO
+    const rows = bills.map((bill) => {
+      const applied = bill.applications.reduce((sum, row) => sum.plus(row.amount.toString()), ZERO)
+      appliedTotal = appliedTotal.plus(applied)
+      const sources = bill.applications
+        .map((row) => row.payment?.number ?? row.creditDocument?.number)
+        .filter((value): value is string => Boolean(value))
+      return {
+        href: `/purchases/bills/${bill.id}`,
+        cells: {
+          date: date(bill.date),
+          number: bill.number,
+          vendor: bill.vendor?.displayName ?? '—',
+          total: money(bill.total.toString()),
+          applied: money(applied),
+          sources: sources.length ? sources.join(', ') : null,
+        },
+      }
+    })
+
+    return {
+      columns: [
+        { key: 'date', label: 'Date', format: 'date', width: 'w-28' },
+        { key: 'number', label: 'Bill', width: 'w-28' },
+        { key: 'vendor', label: 'Vendor' },
+        { key: 'total', label: 'Bill total', format: 'money', width: 'w-32' },
+        { key: 'applied', label: 'Applied', format: 'money', width: 'w-32' },
+        { key: 'sources', label: 'Payment / credit' },
+      ],
+      rows,
+      totals: { date: 'Total', applied: money(appliedTotal) },
+      empty: 'No bills in this period.',
+    }
+  },
+}
+
+const ITEM_KIND: Record<string, string> = {
+  SERVICE: 'Service',
+  NON_INVENTORY: 'Non-inventory',
+  INVENTORY: 'Inventory',
+}
+
+const productServiceList: TableReport = {
+  key: 'product-service-list',
+  title: 'Product/Service List',
+  description: 'Active products and services, with the price and cost on the item.',
+  group: 'Sales and customers',
+  mode: 'asOf',
+  async build(input) {
+    const items = await books(input).item.findMany({
+      where: { orgId: input.ctx.orgId, isActive: true },
+      select: { id: true, name: true, sku: true, type: true, salesPrice: true, purchaseCost: true },
+      orderBy: { name: 'asc' },
+    })
+
+    return {
+      columns: [
+        { key: 'name', label: 'Name' },
+        { key: 'sku', label: 'SKU', width: 'w-32' },
+        { key: 'type', label: 'Type', width: 'w-36' },
+        { key: 'price', label: 'Sales price', format: 'money', width: 'w-32' },
+        { key: 'cost', label: 'Purchase cost', format: 'money', width: 'w-32' },
+      ],
+      rows: items.map((item) => ({
+        href: `/items/${item.id}/report`,
+        cells: {
+          name: item.name,
+          sku: item.sku,
+          type: ITEM_KIND[item.type] ?? item.type,
+          price: item.salesPrice ? money(item.salesPrice.toString()) : null,
+          cost: item.purchaseCost ? money(item.purchaseCost.toString()) : null,
+        },
+      })),
+      empty: 'No active products or services.',
+    }
+  },
+}
+
 /* --- The catalogue -------------------------------------------------------- */
 
 export const TABLE_REPORTS: TableReport[] = [
   customerBalances,
   openInvoices,
+  arAgingDetail,
+  invoiceList,
+  collectionsReport,
   paymentsReceived,
   vendorBalances,
   unpaidBills,
+  apAgingDetail,
+  billList,
   paymentsMade,
   expensesByVendor,
   purchasesByItem,
   productProfitability,
   stockValuation,
+  stockCostChange,
   stockMovements,
   reorder,
   generalLedgerReport,
   journalReport,
   accountBalances,
+  userActivity,
+  activityByUser,
+  salesByDeposit,
+  salesByCustomerDetail,
+  billsAndPayments,
+  productServiceList,
+  ...MODULE_LIST_REPORTS,
 ]
 
 export const tableReport = (key: string): TableReport | undefined =>

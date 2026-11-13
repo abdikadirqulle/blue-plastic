@@ -2,28 +2,60 @@ import 'server-only'
 import type { Prisma, Role } from '@prisma/client'
 
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
-import type { InviteUserInput } from '@/lib/validation/user'
+import type {
+  InviteUserInput,
+  ResetMemberPasswordInput,
+  UpdateMemberRoleInput,
+} from '@/lib/validation/user'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
 import { hashPassword } from '@/server/auth/password'
+import { sanitizePermissions } from '@/server/auth/permissions'
 import { db } from '@/server/db'
-import { conflict, forbidden, notFound, precondition } from '@/server/errors'
+import { conflict, forbidden, notFound, precondition, validation } from '@/server/errors'
 
 const MEMBER_SELECT = {
   id: true,
   role: true,
   status: true,
   version: true,
+  permissionsOverride: true,
+  canConnect: true,
   createdAt: true,
   acceptedAt: true,
-  user: { select: { id: true, name: true, email: true, image: true, lastLoginAt: true } },
+  user: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      image: true,
+      lastLoginAt: true,
+      isSystemOwner: true,
+    },
+  },
 } satisfies Prisma.MembershipSelect
 
 export type MemberRow = Prisma.MembershipGetPayload<{ select: typeof MEMBER_SELECT }>
 
+function resolveAccess(role: string, permissionsOverride: readonly string[] | undefined) {
+  if (role === 'CUSTOMER') {
+    throw forbidden('Customer portal logins are invited from the customer record, not from Users.')
+  }
+  const cleaned = sanitizePermissions(permissionsOverride)
+  if (role === 'CUSTOM') {
+    if (cleaned.length === 0) {
+      throw validation('Choose at least one permission for custom access.')
+    }
+    return { role: 'CUSTOM' as Role, permissionsOverride: cleaned }
+  }
+  return { role: role as Role, permissionsOverride: [] as string[] }
+}
+
 export async function list(ctx: OrgContext, query: ListQuery) {
   const where: Prisma.MembershipWhereInput = {
     orgId: ctx.orgId,
+    // Portal logins are managed under Customers → Portal users, not Settings → Users.
+    role: { not: 'CUSTOMER' },
     ...(query.q
       ? {
           user: {
@@ -52,11 +84,27 @@ export async function list(ctx: OrgContext, query: ListQuery) {
 export async function invite(ctx: OrgContext, input: InviteUserInput) {
   const meta = await requestMeta()
   const passwordHash = await hashPassword(input.temporaryPassword)
+  const access = resolveAccess(input.role, input.permissionsOverride)
 
   return db.$transaction(async (tx) => {
+    const orgLimits = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { maxUsers: true },
+    })
+    if (orgLimits?.maxUsers != null && orgLimits.maxUsers > 0) {
+      const activeUsers = await tx.membership.count({
+        where: { orgId: ctx.orgId, status: 'ACTIVE' },
+      })
+      if (activeUsers >= orgLimits.maxUsers) {
+        throw precondition(
+          `This company is limited to ${orgLimits.maxUsers} users. Remove someone or ask the system owner to raise the limit.`,
+        )
+      }
+    }
+
     const existingUser = await tx.user.findUnique({
       where: { email: input.email },
-      select: { id: true, passwordHash: true },
+      select: { id: true, passwordHash: true, homeOrgId: true },
     })
 
     if (existingUser) {
@@ -72,15 +120,28 @@ export async function invite(ctx: OrgContext, input: InviteUserInput) {
     const user =
       existingUser ??
       (await tx.user.create({
-        data: { email: input.email, name: input.name, passwordHash },
-        select: { id: true, passwordHash: true },
+        data: {
+          email: input.email,
+          name: input.name,
+          passwordHash,
+          homeOrgId: ctx.orgId,
+        },
+        select: { id: true, passwordHash: true, homeOrgId: true },
       }))
+
+    if (existingUser && !existingUser.homeOrgId) {
+      await tx.user.update({
+        where: { id: existingUser.id },
+        data: { homeOrgId: ctx.orgId },
+      })
+    }
 
     const membership = await tx.membership.create({
       data: {
         orgId: ctx.orgId,
         userId: user.id,
-        role: input.role as Role,
+        role: access.role,
+        permissionsOverride: access.permissionsOverride,
         // No email delivery yet, so the invitee can sign in immediately with the
         // password the inviter set. See the note on `inviteUserSchema`.
         status: 'ACTIVE',
@@ -98,32 +159,69 @@ export async function invite(ctx: OrgContext, input: InviteUserInput) {
         entity: 'Membership',
         entityId: membership.id,
         action: 'CREATE',
-        after: { email: input.email, role: input.role },
+        after: {
+          email: input.email,
+          role: access.role,
+          permissionsOverride: access.permissionsOverride,
+        },
       },
       meta,
     )
 
-    return membership
+    return {
+      membership,
+      inviteEmail: input.email,
+      inviteName: input.name,
+      temporaryPassword: input.temporaryPassword,
+    }
+  }).then(async (result) => {
+    // Best-effort invite email when SMTP is configured — invite still succeeds if send fails.
+    try {
+      const { sendOrgMail, getOutboundSettings } = await import('@/server/services/mail.service')
+      const smtp = await getOutboundSettings(ctx)
+      if (smtp.configured) {
+        await sendOrgMail(ctx, {
+          to: result.inviteEmail,
+          subject: `You are invited to ${ctx.organization.name}`,
+          text:
+            `Hello ${result.inviteName},\n\n` +
+            `You have been invited to ${ctx.organization.name} on SOM ERP.\n` +
+            `Sign in with this email and temporary password:\n\n` +
+            `${result.temporaryPassword}\n\n` +
+            `Change the password after you sign in.\n`,
+          fromName: ctx.organization.name,
+        })
+      }
+    } catch {
+      // Invitee can still use the password shown to the inviter.
+    }
+    return result.membership
   })
 }
 
-export async function updateRole(ctx: OrgContext, membershipId: string, role: Role) {
+export async function updateAccess(ctx: OrgContext, input: UpdateMemberRoleInput) {
   const meta = await requestMeta()
+  const access = resolveAccess(input.role, input.permissionsOverride)
 
   return db.$transaction(async (tx) => {
     const before = await tx.membership.findFirst({
-      where: { id: membershipId, orgId: ctx.orgId },
+      where: { id: input.membershipId, orgId: ctx.orgId },
       select: MEMBER_SELECT,
     })
     if (!before) throw notFound('Member')
 
-    assertNotLastOwnerChange(ctx, before, role)
+    assertNotLastOwnerChange(ctx, before, access.role)
 
     const after = await tx.membership.update({
-      where: { id: membershipId },
+      where: { id: input.membershipId },
       // Bumping `version` invalidates any JWT already issued to this user, so a
       // demotion takes effect on their next request rather than at token expiry.
-      data: { role, version: { increment: 1 } },
+      data: {
+        role: access.role,
+        permissionsOverride: access.permissionsOverride,
+        version: { increment: 1 },
+        ...(access.role === 'ADMIN' ? {} : { canConnect: false }),
+      },
       select: MEMBER_SELECT,
     })
 
@@ -132,10 +230,16 @@ export async function updateRole(ctx: OrgContext, membershipId: string, role: Ro
       ctx,
       {
         entity: 'Membership',
-        entityId: membershipId,
+        entityId: input.membershipId,
         action: 'UPDATE',
-        before: { role: before.role },
-        after: { role: after.role },
+        before: {
+          role: before.role,
+          permissionsOverride: before.permissionsOverride,
+        },
+        after: {
+          role: after.role,
+          permissionsOverride: after.permissionsOverride,
+        },
       },
       meta,
     )
@@ -144,10 +248,25 @@ export async function updateRole(ctx: OrgContext, membershipId: string, role: Ro
   })
 }
 
+/** @deprecated Prefer updateAccess — kept for role-only callers. */
+export async function updateRole(ctx: OrgContext, membershipId: string, role: Role) {
+  if (role === 'OWNER') {
+    throw forbidden('The owner role cannot be assigned here. Transfer ownership instead.')
+  }
+  if (role === 'CUSTOMER') {
+    throw forbidden('Customer portal logins are invited from the customer record, not from Users.')
+  }
+  return updateAccess(ctx, {
+    membershipId,
+    role: role as Exclude<Role, 'OWNER' | 'CUSTOMER'>,
+    permissionsOverride: [],
+  })
+}
+
 export async function setStatus(
   ctx: OrgContext,
   membershipId: string,
-  status: 'ACTIVE' | 'SUSPENDED',
+  status: 'ACTIVE' | 'INVITED' | 'SUSPENDED',
 ) {
   const meta = await requestMeta()
 
@@ -159,10 +278,10 @@ export async function setStatus(
     if (!before) throw notFound('Member')
 
     if (before.user.id === ctx.userId) {
-      throw precondition('You cannot suspend your own access.')
+      throw precondition('You cannot change your own access.')
     }
     if (before.role === 'OWNER') {
-      throw forbidden('The owner cannot be suspended. Transfer ownership first.')
+      throw forbidden('The owner cannot be set pending or suspended. Transfer ownership first.')
     }
 
     const after = await tx.membership.update({
@@ -201,8 +320,23 @@ export async function remove(ctx: OrgContext, membershipId: string) {
     if (membership.user.id === ctx.userId) {
       throw precondition('You cannot remove yourself from the organisation.')
     }
-    if (membership.role === 'OWNER') {
+    if (membership.role === 'OWNER' && !ctx.isSystemOwner) {
       throw forbidden('The owner cannot be removed. Transfer ownership first.')
+    }
+    if (membership.role === 'OWNER' && ctx.isSystemOwner) {
+      const remaining = await tx.membership.count({
+        where: {
+          orgId: ctx.orgId,
+          id: { not: membershipId },
+          status: { in: ['ACTIVE', 'INVITED'] },
+          role: { not: 'CUSTOMER' },
+        },
+      })
+      if (remaining === 0) {
+        throw precondition(
+          'Cannot remove the last user on this company. Delete the company database instead, or invite someone first.',
+        )
+      }
     }
 
     await tx.membership.delete({ where: { id: membershipId } })
@@ -222,6 +356,105 @@ export async function remove(ctx: OrgContext, membershipId: string) {
     // The user row itself is kept: audit rows reference it, and an accounting
     // system must be able to say who entered a transaction years later.
     return { id: membershipId }
+  })
+}
+
+/**
+ * Connect is the switch between company databases. It can be given only to an
+ * admin, and only by the system owner. Other people stay in their own company.
+ */
+export async function setCanConnect(ctx: OrgContext, membershipId: string, canConnect: boolean) {
+  if (!ctx.isSystemOwner) {
+    throw forbidden('Only the system owner can allow Connect.')
+  }
+
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const before = await tx.membership.findFirst({
+      where: { id: membershipId, orgId: ctx.orgId },
+      select: MEMBER_SELECT,
+    })
+    if (!before) throw notFound('Member')
+    if (before.user.id === ctx.userId) {
+      throw precondition('You already open every company.')
+    }
+    if (before.role !== 'ADMIN') {
+      throw validation('Connect can only be given to an admin.')
+    }
+
+    const after = await tx.membership.update({
+      where: { id: membershipId },
+      data: { canConnect },
+      select: MEMBER_SELECT,
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Membership',
+        entityId: membershipId,
+        action: 'UPDATE',
+        before: { canConnect: before.canConnect },
+        after: { canConnect: after.canConnect, email: after.user.email },
+      },
+      meta,
+    )
+
+    return after
+  })
+}
+
+/**
+ * Company admin sets a new temporary password for a member of this company.
+ * The old password is never read or returned — only the new one is shown once.
+ */
+export async function resetMemberPassword(ctx: OrgContext, input: ResetMemberPasswordInput) {
+  const meta = await requestMeta()
+  const passwordHash = await hashPassword(input.temporaryPassword)
+
+  return db.$transaction(async (tx) => {
+    const membership = await tx.membership.findFirst({
+      where: { id: input.membershipId, orgId: ctx.orgId, role: { not: 'CUSTOMER' } },
+      select: MEMBER_SELECT,
+    })
+    if (!membership) throw notFound('Member')
+
+    if (membership.user.id === ctx.userId) {
+      throw precondition('Change your own password under Settings → Your profile.')
+    }
+    if (membership.user.isSystemOwner && !ctx.isSystemOwner) {
+      throw forbidden('Only the system owner can reset that password.')
+    }
+
+    await tx.user.update({
+      where: { id: membership.user.id },
+      data: { passwordHash },
+    })
+    await tx.membership.update({
+      where: { id: membership.id },
+      data: { version: { increment: 1 } },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Membership',
+        entityId: membership.id,
+        action: 'UPDATE',
+        after: { passwordReset: true, email: membership.user.email },
+      },
+      meta,
+    )
+
+    return {
+      id: membership.id,
+      temporaryPassword: input.temporaryPassword,
+      email: membership.user.email,
+      name: membership.user.name,
+    }
   })
 }
 

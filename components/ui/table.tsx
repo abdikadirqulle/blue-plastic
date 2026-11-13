@@ -1,24 +1,57 @@
 import * as React from 'react'
 
+import { TableScrollPort } from '@/components/ui/table-scroll-port'
 import { cn } from '@/lib/utils'
 
-function Table({ className, ...props }: React.ComponentProps<'table'>) {
-  return (
-    <div data-slot="table-container" className="relative w-full overflow-x-auto">
-      <table data-slot="table" className={cn('w-full caption-bottom text-sm', className)} {...props} />
-    </div>
+/**
+ * Data table. By default the sheet is its own scroll pane: column names stick
+ * to the top while you scroll the rows (registers, sales lists, reports).
+ * Pass `embed` for a compact table inside a form or dialog that should not
+ * claim the viewport.
+ */
+function Table({
+  className,
+  containerClassName,
+  embed = false,
+  ...props
+}: React.ComponentProps<'table'> & {
+  containerClassName?: string
+  /** Skip the sticky scroll pane — use inside forms, dialogs, and nested sheets. */
+  embed?: boolean
+}) {
+  const sheet = (
+    <table
+      data-slot="table"
+      className={cn('w-full max-w-full caption-bottom text-[0.8125rem]', className)}
+      {...props}
+    />
   )
+
+  if (embed) {
+    return (
+      <div data-slot="table-container" className={cn('relative w-full max-w-full overflow-x-auto', containerClassName)}>
+        {sheet}
+      </div>
+    )
+  }
+
+  return <TableScrollPort className={containerClassName}>{sheet}</TableScrollPort>
 }
 
 /**
- * The header is a tinted strip with small grey capitals, which is how a dense
- * table tells you where it starts without a heavy rule doing it.
+ * Column labels. Stickiness lives on each `th` — Chrome ignores `position: sticky`
+ * on `thead` / `tr`, so the names would scroll away even with it set here.
  */
 function TableHeader({ className, ...props }: React.ComponentProps<'thead'>) {
   return (
     <thead
       data-slot="table-header"
-      className={cn('bg-muted/50 [&_tr]:border-b', className)}
+      className={cn(
+        /* --report-head-* when inside a report; otherwise the theme band. */
+        'bg-[var(--report-head-bg,var(--band))] text-[var(--report-head-fg,var(--foreground))] shadow-[inset_0_-1px_0_0_var(--border)]',
+        '[&_tr]:border-b [&_th]:bg-[var(--report-head-bg,var(--band))] [&_th]:text-[var(--report-head-fg,var(--foreground))]',
+        className,
+      )}
       {...props}
     />
   )
@@ -43,7 +76,7 @@ function TableRow({ className, ...props }: React.ComponentProps<'tr'>) {
     <tr
       data-slot="table-row"
       className={cn(
-        'border-b transition-colors hover:bg-accent/40 data-[state=selected]:bg-accent/60',
+        'border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted/70',
         className,
       )}
       {...props}
@@ -56,7 +89,9 @@ function TableHead({ className, ...props }: React.ComponentProps<'th'>) {
     <th
       data-slot="table-head"
       className={cn(
-        'h-8 px-3 text-left align-middle text-[0.6875rem] font-semibold uppercase tracking-wider text-muted-foreground whitespace-nowrap',
+        /* text-inherit: follow thead / --report-head-fg, never fight a dark bar. */
+        /* sticky on the cell, not thead: that is what actually pins the name while scrolling. */
+        'sticky top-0 z-30 h-auto min-h-8 bg-[var(--report-head-bg,var(--band))] px-2 py-1.5 text-left align-middle text-[0.6875rem] font-semibold uppercase tracking-wide text-inherit whitespace-nowrap shadow-[0_1px_0_var(--border)]',
         '[&:has([role=checkbox])]:pr-0 [&.numeric]:text-right',
         className,
       )}
@@ -69,7 +104,10 @@ function TableCell({ className, ...props }: React.ComponentProps<'td'>) {
   return (
     <td
       data-slot="table-cell"
-      className={cn('px-3 py-1.5 align-middle [&:has([role=checkbox])]:pr-0 [&.numeric]:text-right', className)}
+      className={cn(
+        'px-2 py-1.5 align-middle whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0 [&.numeric]:text-right',
+        className,
+      )}
       {...props}
     />
   )

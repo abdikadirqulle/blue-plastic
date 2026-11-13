@@ -1,17 +1,18 @@
 import type { Metadata } from 'next'
-import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
 
+import { ApprovalTrailPanel } from '@/app/(app)/approvals/approval-trail-panel'
 import { PageHeader } from '@/components/data/page-header'
 import { BillForm } from '@/components/purchases/bill-form'
-import { buttonVariants } from '@/components/ui/button'
+import { SalesPaperFrame } from '@/components/sales/paper-width'
 import { toCalendarDate, today } from '@/lib/date'
-import { describeTerm } from '@/lib/payment-terms'
 import { purchaseBySlug } from '@/lib/purchase-types'
 import { requireOrgContext } from '@/server/auth/context'
+import { loadFormCustomization } from '@/server/services/form-customization'
 import { loadPurchaseOptions } from '@/server/services/purchase-options'
 import * as purchaseService from '@/server/services/purchase.service'
+import * as storeService from '@/server/services/store.service'
+import * as trackingCategories from '@/server/services/tracking-category.service'
 
 export const metadata: Metadata = { title: 'Edit document' }
 
@@ -29,45 +30,53 @@ export default async function EditPurchasePage({
   if (!config) notFound()
 
   const ctx = await requireOrgContext('bill:update')
-  const [document, options] = await Promise.all([
+  const [document, options, neighbors, shelf, formCustomization, classes] = await Promise.all([
     purchaseService.get(ctx, id),
     loadPurchaseOptions(ctx),
+    purchaseService.neighbors(ctx, config.type, id),
+    storeService.quantities(ctx),
+    loadFormCustomization(ctx, 'purchase', config.type),
+    trackingCategories.list(ctx),
   ])
 
   if (document.type !== config.type) notFound()
 
   return (
-    <>
-      <Link
-        href={`/purchases/${config.slug}/${id}`}
-        className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}
-      >
-        <ArrowLeftIcon /> {config.singular} {document.number}
-      </Link>
-
+    <SalesPaperFrame>
       <PageHeader
         title={`Edit ${config.singular.toLowerCase()} ${document.number}`}
-        description="Saving reverses the original entry and posts a replacement. Both stay in the ledger."
+        className="mb-2 pb-2"
       />
 
       <BillForm
         config={config}
         vendors={options.vendors}
+        customers={options.customers}
         items={options.items}
         taxCodes={options.taxCodes}
         paymentAccounts={options.paymentAccounts}
         expenseAccounts={options.expenseAccounts}
-        terms={options.terms.map((term) => ({ id: term.id, label: `${term.name} — ${describeTerm(term)}` }))}
+        terms={options.terms.map((term) => ({
+          id: term.id,
+          label: term.name,
+          type: term.type,
+          dueDays: term.dueDays,
+        }))}
         today={today(ctx.organization.timeZone)}
         currency={ctx.organization.baseCurrency}
+        documentNumber={document.number}
         document={{
           id: document.id,
-          vendorId: document.vendor.id,
+          vendorId: document.vendor?.id ?? '',
           date: toCalendarDate(document.date),
           reference: document.reference,
+          inRef: document.inRef,
           memo: document.memo,
           paymentTermId: document.paymentTerm?.id ?? null,
           paymentAccountId: document.paymentAccount?.id ?? null,
+          offsetCustomerId: document.offsetCustomer?.id ?? null,
+          projectId: document.projectId ?? null,
+          trackingCategoryId: document.trackingCategoryId ?? null,
           lines: document.lines.map((line) => ({
             itemId: line.item?.id ?? null,
             expenseAccountId: line.expenseAccount?.id ?? null,
@@ -75,9 +84,19 @@ export default async function EditPurchasePage({
             quantity: line.quantity.toString(),
             unitPrice: line.unitPrice.toString(),
             taxCodeId: line.taxCode?.id ?? null,
+            storeId: line.storeId,
+            billableCustomerId: line.billableCustomerId,
+            billableUnitPrice: line.billableUnitPrice,
           })),
         }}
+        projects={options.projects}
+        classes={classes.map((row) => ({ id: row.id, label: row.name }))}
+        neighbors={neighbors}
+        stores={shelf.stores}
+        stock={shelf.byItem}
+        formCustomization={formCustomization}
       />
-    </>
+      <ApprovalTrailPanel entityType="PURCHASE_DOCUMENT" entityId={document.id} />
+    </SalesPaperFrame>
   )
 }

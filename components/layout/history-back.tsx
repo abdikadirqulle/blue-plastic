@@ -1,0 +1,76 @@
+'use client'
+
+import { Suspense } from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { ArrowLeftIcon } from 'lucide-react'
+
+import { closeTopDialog } from '@/lib/dialog-stack'
+import { normalizeHref, parentOf, popScreen, readTrail, writeTrail } from '@/lib/nav-trail'
+import { startNavigationProgress } from './navigation-progress'
+
+/**
+ * One Back for the whole system. Returns to the screen that was open before
+ * this one (session trail), including query string — not a fixed parent or
+ * the dashboard.
+ *
+ * POS hub pages (Orders, Sessions, …) stay inside Point of Sale: if the trail
+ * would jump out to Apps overview, land on the POS dashboard instead.
+ */
+export function HistoryBack() {
+  return (
+    <Suspense fallback={null}>
+      <HistoryBackInner />
+    </Suspense>
+  )
+}
+
+const POS_HUB =
+  /^\/pos(\/(orders|sessions|quotations|settings)(\/|$|\?)|$)/
+
+function stayInPosHub(pathname: string, target: string): string {
+  if (!POS_HUB.test(pathname)) return target
+  const path = target.split('?')[0] ?? target
+  if (path === '/pos' || path.startsWith('/pos/')) return target
+  return '/pos'
+}
+
+function HistoryBackInner() {
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const router = useRouter()
+  const search = searchParams.toString()
+  const href = normalizeHref(search ? `${pathname}?${search}` : pathname)
+
+  if (pathname === '/dashboard') return null
+
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        // Nested form (customer / item / …) on top of another form: close it
+        // first and stay on the screen underneath. Stale closers are ignored
+        // inside closeTopDialog so a stuck stack cannot trap Back on the page.
+        if (closeTopDialog()) return
+
+        const { target, trail } = popScreen(readTrail(), href)
+        const next = stayInPosHub(pathname, target ?? parentOf(pathname))
+        if (normalizeHref(next) === href) {
+          // Nowhere else to go on the trail — climb to the list parent.
+          const fallback = stayInPosHub(pathname, parentOf(pathname))
+          if (normalizeHref(fallback) === href) return
+          writeTrail([normalizeHref(fallback)])
+          startNavigationProgress()
+          router.push(fallback)
+          return
+        }
+        writeTrail(trail.length > 0 ? trail : [normalizeHref(next)])
+        startNavigationProgress()
+        router.push(next)
+      }}
+      className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground"
+    >
+      <ArrowLeftIcon className="size-3.5" aria-hidden />
+      Back
+    </button>
+  )
+}

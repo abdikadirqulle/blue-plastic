@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation'
 import { PlusIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { AccountTypeIcon } from '@/components/accounts/account-type-icon'
 import { idleState } from '@/components/forms/action-state'
+import { MergeIntoDialog } from '@/components/master-data/merge-into-dialog'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -28,6 +30,7 @@ export type AccountFormValues = {
   code: string
   name: string
   description: string | null
+  detailType: string | null
   type: AccountType
   parentId: string | null
   isSystem: boolean
@@ -98,6 +101,7 @@ function AccountDialog({
   )
   const [openingBalanceDate, setOpeningBalanceDate] = useState(today ?? '')
   const [type, setType] = useState<AccountType>(account?.type ?? 'EXPENSE')
+  const [mergeOpen, setMergeOpen] = useState(false)
   const handled = useRef(false)
 
   useEffect(() => {
@@ -118,6 +122,7 @@ function AccountDialog({
   const e = state.fieldErrors
 
   return (
+    <>
     <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
       <DialogContent size="md">
         <DialogHeader>
@@ -133,6 +138,16 @@ function AccountDialog({
 
         <form action={formAction} className="space-y-4">
           <FormStatus state={state} />
+          {mode === 'edit' && account?.id && state.mergeClash ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
+              <span className="text-muted-foreground">
+                Merge this account into “{state.mergeClash.name}”?
+              </span>
+              <Button type="button" size="sm" onClick={() => setMergeOpen(true)}>
+                Merge…
+              </Button>
+            </div>
+          ) : null}
           {account ? <input type="hidden" name="id" value={account.id} /> : null}
 
           <div className="grid gap-4 sm:grid-cols-[9rem_1fr]">
@@ -141,6 +156,7 @@ function AccountDialog({
                 {...fieldProps('code', e?.code)}
                 defaultValue={account?.code}
                 inputMode="numeric"
+                inputKind="account-code"
                 placeholder="6100"
                 required
               />
@@ -154,17 +170,21 @@ function AccountDialog({
           {mode === 'create' ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <Field name="type" label="Type" required error={e?.type}>
-                <NativeSelect
-                  {...fieldProps('type', e?.type)}
-                  value={type}
-                  onChange={(event) => setType(event.target.value as AccountType)}
-                >
-                  {ACCOUNT_TYPE_ORDER.map((value) => (
-                    <option key={value} value={value}>
-                      {ACCOUNT_TYPE_LABELS[value]}
-                    </option>
-                  ))}
-                </NativeSelect>
+                <div className="flex items-center gap-2">
+                  <AccountTypeIcon type={type} size="sm" />
+                  <NativeSelect
+                    {...fieldProps('type', e?.type)}
+                    value={type}
+                    onChange={(event) => setType(event.target.value as AccountType)}
+                    className="flex-1"
+                  >
+                    {ACCOUNT_TYPE_ORDER.map((value) => (
+                      <option key={value} value={value}>
+                        {ACCOUNT_TYPE_LABELS[value]}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                </div>
               </Field>
 
               <Field name="subtype" label="Detail type" required error={e?.subtype}>
@@ -181,8 +201,8 @@ function AccountDialog({
 
           <Field
             name="parentId"
-            label="Sub-account of"
-            hint="Optional. A parent becomes a grouping heading and stops accepting postings of its own."
+            label="Sub-account of (main account)"
+            hint="Optional. Choose a Main account to nest this one under it — like QuickBooks. The Main account becomes a heading (balance = sum of its Subs) and no longer accepts postings."
             error={e?.parentId}
           >
             <NativeSelect
@@ -196,6 +216,15 @@ function AccountDialog({
                 </option>
               ))}
             </NativeSelect>
+          </Field>
+
+          <Field
+            name="detailType"
+            label="Further detail"
+            hint="A finer name under the detail type, such as Sales of product income. Reports fold accounts that share it."
+            error={e?.detailType}
+          >
+            <Input {...fieldProps('detailType', e?.detailType)} defaultValue={account?.detailType ?? ''} />
           </Field>
 
           <Field name="description" label="Description" error={e?.description}>
@@ -241,5 +270,17 @@ function AccountDialog({
         </form>
       </DialogContent>
     </Dialog>
+    {mergeOpen && mode === 'edit' && account?.id && state.mergeClash ? (
+      <MergeIntoDialog
+        open
+        onClose={() => setMergeOpen(false)}
+        onMerged={onClose}
+        kind="account"
+        absorbId={account.id}
+        absorbLabel={`${account.code} ${account.name}`}
+        preferredKeepId={state.mergeClash.id}
+      />
+    ) : null}
+    </>
   )
 }

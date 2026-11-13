@@ -1,15 +1,24 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
 
+import { MetricCard } from '@/components/data/metric-card'
 import { PageHeader } from '@/components/data/page-header'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, toCalendarDate } from '@/lib/date'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { formatTransactionDate, toCalendarDate } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
+import { formatQty, resolveUnit } from '@/lib/quantity'
 import { requireOrgContext } from '@/server/auth/context'
 import { db } from '@/server/db'
 import * as inventoryService from '@/server/services/inventory.service'
@@ -23,6 +32,7 @@ const TYPE_LABELS: Record<string, string> = {
   PURCHASE_RETURN: 'Returned to vendor',
   ADJUSTMENT: 'Adjustment',
   OPENING: 'Opening stock',
+  TRANSFER: 'Store transfer',
 }
 
 /**
@@ -40,49 +50,64 @@ export default async function ItemMovementsPage({
 
   const item = await db.item.findFirst({
     where: { id: itemId, orgId: ctx.orgId, type: 'INVENTORY' },
-    select: { id: true, name: true, sku: true, reorderPoint: true },
+    select: { id: true, name: true, sku: true, reorderPoint: true, unitOfMeasure: true },
   })
   if (!item) notFound()
 
+  const canEdit = ctx.permissions.has('item:update')
+  const canAdjust = ctx.permissions.has('inventory:adjust')
   const movements = await inventoryService.movementsFor(ctx, itemId)
   const currency = ctx.organization.baseCurrency
   const latest = movements.at(-1)
 
   return (
     <>
-      <Link href="/inventory" className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}>
-        <ArrowLeftIcon /> Inventory
-      </Link>
 
       <PageHeader title={item.name} description={item.sku ?? undefined} />
 
+      <div className="mb-4 flex flex-wrap gap-2">
+        {canEdit ? (
+          <Link href={`/items?edit=${item.id}`} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            Edit
+          </Link>
+        ) : null}
+        <Link href={`/items/${item.id}/report`} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+          Quick report
+        </Link>
+        {canAdjust ? (
+          <Link
+            href={`/inventory/adjustments/new?item=${item.id}`}
+            className={buttonVariants({ size: 'sm' })}
+          >
+            Adjustment
+          </Link>
+        ) : null}
+      </div>
+
       <div className="mb-4 grid gap-4 sm:grid-cols-3">
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">On hand</p>
-            <p className="tabular mt-0.5 text-lg font-semibold">
-              {latest ? latest.runningQuantity.toFixed(2) : '0.00'}
-            </p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Average cost</p>
-            <p className="tabular mt-0.5 text-lg font-semibold">
-              {latest && !latest.runningQuantity.isZero()
-                ? formatMoney(latest.runningValue.dividedBy(latest.runningQuantity), currency)
-                : '—'}
-            </p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4">
-            <p className="text-xs text-muted-foreground">Value</p>
-            <p className="tabular mt-0.5 text-lg font-semibold">
-              {formatMoney(latest?.runningValue ?? 0, currency)}
-            </p>
-          </CardContent>
-        </Card>
+        <MetricCard
+          label={`On hand (${resolveUnit(item.unitOfMeasure)})`}
+          tone="stock"
+          value={
+            latest
+              ? formatQty(latest.runningQuantity.toFixed(2), item.unitOfMeasure)
+              : formatQty('0.00', item.unitOfMeasure)
+          }
+        />
+        <MetricCard
+          label="Average cost"
+          tone="info"
+          value={
+            latest && !latest.runningQuantity.isZero()
+              ? formatMoney(latest.runningValue.dividedBy(latest.runningQuantity), currency)
+              : '—'
+          }
+        />
+        <MetricCard
+          label="Total cost"
+          tone="money"
+          value={formatMoney(latest?.runningValue ?? 0, currency)}
+        />
       </div>
 
       {movements.length === 0 ? (
@@ -111,7 +136,7 @@ export default async function ItemMovementsPage({
                 <TableRow key={movement.id}>
                   <TableCell className="tabular text-muted-foreground">{movement.sequence}</TableCell>
                   <TableCell className="tabular whitespace-nowrap text-muted-foreground">
-                    {formatDate(toCalendarDate(movement.date))}
+                    {formatTransactionDate(toCalendarDate(movement.date), movement.createdAt, ctx.organization.timeZone)}
                   </TableCell>
                   <TableCell>
                     <span className="block">{TYPE_LABELS[movement.type] ?? movement.type}</span>
@@ -130,7 +155,7 @@ export default async function ItemMovementsPage({
                   </TableCell>
                   <TableCell className="numeric tabular">
                     {movement.quantity.isPositive() ? '+' : ''}
-                    {movement.quantity.toFixed(2)}
+                    {formatQty(movement.quantity.toFixed(2), item.unitOfMeasure)}
                   </TableCell>
                   <TableCell className="numeric tabular text-muted-foreground">
                     {formatMoney(movement.unitCost, currency)}
@@ -139,7 +164,7 @@ export default async function ItemMovementsPage({
                     {formatMoney(movement.value, currency)}
                   </TableCell>
                   <TableCell className="numeric tabular font-medium">
-                    {movement.runningQuantity.toFixed(2)}
+                    {formatQty(movement.runningQuantity.toFixed(2), item.unitOfMeasure)}
                   </TableCell>
                   <TableCell className="numeric tabular font-medium">
                     {formatMoney(movement.runningValue, currency)}
@@ -147,6 +172,30 @@ export default async function ItemMovementsPage({
                 </TableRow>
               ))}
             </TableBody>
+            {latest ? (
+              <TableFooter>
+                <TableRow>
+                  <TableCell colSpan={6} className="font-semibold">
+                    On hand · average cost · total cost
+                  </TableCell>
+                  <TableCell className="numeric tabular font-semibold">
+                    {formatQty(latest.runningQuantity.toFixed(2), item.unitOfMeasure)}
+                  </TableCell>
+                  <TableCell className="numeric tabular font-semibold">
+                    {formatMoney(latest.runningValue, currency)}
+                    {!latest.runningQuantity.isZero() ? (
+                      <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
+                        avg{' '}
+                        {formatMoney(
+                          latest.runningValue.dividedBy(latest.runningQuantity),
+                          currency,
+                        )}
+                      </span>
+                    ) : null}
+                  </TableCell>
+                </TableRow>
+              </TableFooter>
+            ) : null}
           </Table>
         </Card>
       )}

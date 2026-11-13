@@ -64,7 +64,7 @@ BEGIN
 
   RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_deposit_total ON deposits;
 CREATE CONSTRAINT TRIGGER trg_deposit_total
@@ -96,7 +96,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_reconciliation_immutable ON bank_reconciliations;
 CREATE TRIGGER trg_reconciliation_immutable
@@ -109,6 +109,10 @@ CREATE OR REPLACE FUNCTION forbid_completed_entry_change() RETURNS trigger AS $$
 DECLARE
   v_status text;
 BEGIN
+  IF TG_OP = 'DELETE' AND current_setting('app.allow_company_wipe', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
+
   SELECT status::text INTO v_status
     FROM bank_reconciliations
    WHERE id = COALESCE(NEW."reconciliationId", OLD."reconciliationId");
@@ -126,7 +130,7 @@ BEGIN
 
   RETURN COALESCE(NEW, OLD);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_reconciliation_entry_locked ON reconciliation_entries;
 CREATE TRIGGER trg_reconciliation_entry_locked
@@ -156,7 +160,7 @@ BEGIN
 
   RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path TO public;
 
 DROP TRIGGER IF EXISTS trg_entry_account_matches ON reconciliation_entries;
 CREATE TRIGGER trg_entry_account_matches

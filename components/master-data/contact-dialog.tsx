@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { AccountPicker } from '@/components/forms/account-picker'
+import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
@@ -23,6 +24,8 @@ import {
   updateCustomerForm,
   updateVendorForm,
 } from '@/app/(app)/customers/actions'
+import { linkPartyOptions } from '@/app/(app)/quick-create/actions'
+import { MergeIntoDialog } from '@/components/master-data/merge-into-dialog'
 
 export type ContactSide = 'customer' | 'vendor'
 
@@ -47,8 +50,20 @@ export type ContactValues = {
   shippingPostalCode?: string | null
   paymentTermId?: string | null
   creditLimit?: string | null
+  currencyCode?: string | null
+  priceLevel?: 'RETAIL' | 'WHOLESALE' | null
   defaultExpenseAccountId?: string | null
   notes?: string | null
+  salesPerson?: string | null
+  agreementDate?: string | null
+  balanceDate?: string | null
+  balanceTime?: string | null
+  reminderDays?: number | null
+  /** Supplier that is the same party (customer form). */
+  linkedVendorId?: string | null
+  /** Customer that is the same party (vendor form). */
+  linkedCustomerId?: string | null
+  files?: { id: string; kind: 'PHOTO' | 'AGREEMENT'; originalName: string }[]
 }
 
 export type Option = { id: string; label: string }
@@ -59,13 +74,16 @@ export function NewContactButton(props: {
   expenseAccounts?: AccountPickerOption[]
   today: string
   currency: string
+  className?: string
+  /** Show “Invite to portal” on the customer form. */
+  portalInvite?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const label = props.side === 'customer' ? 'New customer' : 'New vendor'
 
   return (
     <>
-      <Button size="sm" onClick={() => setOpen(true)}>
+      <Button size="sm" className={props.className} onClick={() => setOpen(true)}>
         <PlusIcon /> {label}
       </Button>
       {open ? <ContactDialog {...props} mode="create" onClose={() => setOpen(false)} /> : null}
@@ -84,6 +102,7 @@ export function ContactDialog({
   onClose,
   defaultName,
   onCreated,
+  portalInvite = false,
 }: {
   side: ContactSide
   mode: 'create' | 'edit'
@@ -97,6 +116,8 @@ export function ContactDialog({
   defaultName?: string
   /** Hands the new record back to whatever opened this. */
   onCreated?: (record: { id: string; label: string }) => void
+  /** Show “Invite to portal” when the company portal is on and the user may manage it. */
+  portalInvite?: boolean
 }) {
   const router = useRouter()
   const formAction =
@@ -109,16 +130,53 @@ export function ContactDialog({
         : updateVendorForm
 
   const [state, submit] = useActionState(formAction, idleState)
-  const [openingBalanceDate, setOpeningBalanceDate] = useState(today)
+  const [openingBalanceDate, setOpeningBalanceDate] = useState(contact?.balanceDate ?? (mode === 'create' ? today : ''))
+  const [agreementDate, setAgreementDate] = useState(contact?.agreementDate ?? '')
   const [defaultExpenseAccountId, setDefaultExpenseAccountId] = useState(
     contact?.defaultExpenseAccountId ?? '',
   )
+  const [linkedPartyId, setLinkedPartyId] = useState(
+    side === 'customer' ? (contact?.linkedVendorId ?? '') : (contact?.linkedCustomerId ?? ''),
+  )
+  const [linkOptions, setLinkOptions] = useState<Option[]>([])
   const handled = useRef(false)
+  const [mergeOpen, setMergeOpen] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void linkPartyOptions({ side }).then((result) => {
+      if (cancelled || !result.ok) return
+      setLinkOptions(result.data.options)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [side])
 
   useEffect(() => {
     if (state.status === 'success' && !handled.current) {
       handled.current = true
-      toast.success(state.message ?? 'Saved.')
+      if (state.portalLoginUrl && state.temporaryPassword) {
+        const summary = [
+          state.portalEmail ? `Email: ${state.portalEmail}` : null,
+          `Password: ${state.temporaryPassword}`,
+          `Login: ${state.portalLoginUrl}`,
+        ]
+          .filter(Boolean)
+          .join('\n')
+        void navigator.clipboard.writeText(summary).then(
+          () =>
+            toast.success('Saved. Portal email, password, and login link copied — send them to the customer.'),
+          () => toast.success(state.message ?? 'Saved.'),
+        )
+      } else if (state.inviteUrl) {
+        void navigator.clipboard.writeText(state.inviteUrl).then(
+          () => toast.success('Saved. Portal login link copied — send it to the customer.'),
+          () => toast.success(state.message ?? 'Saved.'),
+        )
+      } else {
+        toast.success(state.message ?? 'Saved.')
+      }
       if (state.created) onCreated?.({ id: state.created.id, label: state.created.label ?? '' })
       router.refresh()
       onClose()
@@ -130,6 +188,7 @@ export function ContactDialog({
   const noun = side === 'customer' ? 'customer' : 'vendor'
 
   return (
+    <>
     <Dialog open onOpenChange={(next) => { if (!next) onClose() }}>
       <DialogContent size="lg">
         <DialogHeader>
@@ -138,6 +197,16 @@ export function ContactDialog({
 
         <form action={submit} className="mt-4 space-y-5">
           <FormStatus state={state} />
+          {mode === 'edit' && contact?.id && state.mergeClash ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
+              <span className="text-muted-foreground">
+                Merge this {noun} into “{state.mergeClash.name}”?
+              </span>
+              <Button type="button" size="sm" onClick={() => setMergeOpen(true)}>
+                Merge…
+              </Button>
+            </div>
+          ) : null}
           {contact?.id ? <input type="hidden" name="id" value={contact.id} /> : null}
 
           <div className="grid gap-4 sm:grid-cols-2">
@@ -174,12 +243,35 @@ export function ContactDialog({
               <Input {...fieldProps('email', e?.email)} type="email" defaultValue={contact?.email ?? ''} />
             </Field>
             <Field name="phone" label="Phone" error={e?.phone}>
-              <Input {...fieldProps('phone', e?.phone)} defaultValue={contact?.phone ?? ''} />
+              <Input
+                {...fieldProps('phone', e?.phone)}
+                type="tel"
+                inputMode="tel"
+                defaultValue={contact?.phone ?? ''}
+              />
             </Field>
             <Field name="mobile" label="Mobile" error={e?.mobile}>
-              <Input {...fieldProps('mobile', e?.mobile)} defaultValue={contact?.mobile ?? ''} />
+              <Input
+                {...fieldProps('mobile', e?.mobile)}
+                type="tel"
+                inputMode="tel"
+                defaultValue={contact?.mobile ?? ''}
+              />
             </Field>
           </div>
+
+          {side === 'customer' && portalInvite ? (
+            <label className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+              <input type="checkbox" name="inviteToPortal" value="true" className="mt-0.5 size-4" />
+              <span>
+                <span className="font-medium">Invite to customer portal</span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Creates email, temporary password, and a branded login link so they can view only
+                  their invoices and balance. Requires an email address.
+                </span>
+              </span>
+            </label>
+          ) : null}
 
           <Separator />
 
@@ -262,6 +354,32 @@ export function ContactDialog({
               </NativeSelect>
             </Field>
 
+            {side === 'customer' ? (
+              <Field
+                name="priceLevel"
+                label="Price level"
+                hint="Wholesale uses the item wholesale price when one is set. Otherwise the sales price."
+                error={e?.priceLevel}
+              >
+                <NativeSelect
+                  {...fieldProps('priceLevel', e?.priceLevel)}
+                  defaultValue={contact?.priceLevel ?? 'RETAIL'}
+                >
+                  <option value="RETAIL">Retail</option>
+                  <option value="WHOLESALE">Wholesale</option>
+                </NativeSelect>
+              </Field>
+            ) : null}
+            {side === 'customer' ? (
+              <Field
+                name="salesPerson"
+                label="Sales person"
+                hint="Printed on the invoice next to Sales person."
+                error={e?.salesPerson}
+              >
+                <Input {...fieldProps('salesPerson', e?.salesPerson)} defaultValue={contact?.salesPerson ?? ''} />
+              </Field>
+            ) : null}
             <Field name="taxRegistrationNumber" label="Tax registration number" error={e?.taxRegistrationNumber}>
               <Input
                 {...fieldProps('taxRegistrationNumber', e?.taxRegistrationNumber)}
@@ -270,11 +388,26 @@ export function ContactDialog({
             </Field>
           </div>
 
+          <Field
+            name="currencyCode"
+            label="Currency"
+            hint={`Blank uses the company base (${currency}). Used as the default on new ${side === 'customer' ? 'sales' : 'bills'}.`}
+            error={e?.currencyCode}
+          >
+            <Input
+              {...fieldProps('currencyCode', e?.currencyCode)}
+              maxLength={3}
+              placeholder={currency}
+              defaultValue={contact?.currencyCode ?? ''}
+              className="uppercase"
+            />
+          </Field>
+
           {side === 'customer' ? (
             <Field
               name="creditLimit"
               label={`Credit limit (${currency})`}
-              hint="Recorded now; invoicing warns against it in a later phase."
+              hint="Posting an invoice past this limit is refused, or warned when Settings → credit limit warn is on."
               error={e?.creditLimit}
             >
               <Input
@@ -304,38 +437,47 @@ export function ContactDialog({
             </Field>
           )}
 
+          <Separator />
+
+          <Field
+            name={side === 'customer' ? 'linkedVendorId' : 'linkedCustomerId'}
+            label={side === 'customer' ? 'Linked supplier' : 'Linked customer'}
+            hint={
+              side === 'customer'
+                ? 'Same trading party on the purchase side (e.g. Mall Group as a supplier). Statements and reports can jump between both books.'
+                : 'Same trading party on the sales side. Their customer statement stays one click away.'
+            }
+            error={side === 'customer' ? e?.linkedVendorId : e?.linkedCustomerId}
+          >
+            <EntityPicker
+              id={side === 'customer' ? 'linkedVendorId' : 'linkedCustomerId'}
+              name={side === 'customer' ? 'linkedVendorId' : 'linkedCustomerId'}
+              options={linkOptions}
+              value={linkedPartyId || null}
+              onChange={(next) => setLinkedPartyId(next ?? '')}
+              kind={side === 'customer' ? 'vendor' : 'customer'}
+              placeholder={side === 'customer' ? '— no supplier link —' : '— no customer link —'}
+              clearable
+              error={side === 'customer' ? e?.linkedVendorId : e?.linkedCustomerId}
+            />
+          </Field>
+
           <Field name="notes" label="Notes" error={e?.notes}>
             <Input {...fieldProps('notes', e?.notes)} defaultValue={contact?.notes ?? ''} />
           </Field>
 
-          {mode === 'create' ? (
-            <div className="rounded-md border bg-muted/40 p-3">
-              <p className="mb-3 text-xs text-muted-foreground">
-                {side === 'customer'
-                  ? 'What this customer already owed when the books started. It posts to Accounts Receivable against Opening Balance Equity, so it appears on the aging report and in the control account — never as a number written onto the customer.'
-                  : 'What was already owed to this vendor when the books started. It posts to Accounts Payable against Opening Balance Equity.'}
-              </p>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Field name="openingBalance" label={`Opening balance (${currency})`} error={e?.openingBalance}>
-                  <Input
-                    {...fieldProps('openingBalance', e?.openingBalance)}
-                    inputMode="decimal"
-                    placeholder="0.00"
-                    className="tabular"
-                  />
-                </Field>
-                <Field name="openingBalanceDate" label="As at" error={e?.openingBalanceDate}>
-                  <DateField
-                    id="openingBalanceDate"
-                    name="openingBalanceDate"
-                    value={openingBalanceDate}
-                    onChange={setOpeningBalanceDate}
-                    today={today}
-                  />
-                </Field>
-              </div>
-            </div>
-          ) : null}
+          <PartyRegistration
+            side={side}
+            mode={mode}
+            currency={currency}
+            today={today}
+            contact={contact}
+            openingBalanceDate={openingBalanceDate}
+            onOpeningBalanceDate={setOpeningBalanceDate}
+            agreementDate={agreementDate}
+            onAgreementDate={setAgreementDate}
+            errors={e}
+          />
 
           <div className="flex justify-end gap-2 pt-1">
             <Button type="button" variant="outline" onClick={onClose}>
@@ -348,5 +490,175 @@ export function ContactDialog({
         </form>
       </DialogContent>
     </Dialog>
+    {mergeOpen && mode === 'edit' && contact?.id && state.mergeClash ? (
+      <MergeIntoDialog
+        open
+        onClose={() => setMergeOpen(false)}
+        onMerged={onClose}
+        kind={side}
+        absorbId={contact.id}
+        absorbLabel={contact.displayName ?? ''}
+        preferredKeepId={state.mergeClash.id}
+      />
+    ) : null}
+    </>
+  )
+}
+
+function PartyRegistration({
+  side,
+  mode,
+  currency,
+  today,
+  contact,
+  openingBalanceDate,
+  onOpeningBalanceDate,
+  agreementDate,
+  onAgreementDate,
+  errors,
+}: {
+  side: ContactSide
+  mode: 'create' | 'edit'
+  currency: string
+  today: string
+  contact?: ContactValues
+  openingBalanceDate: string
+  onOpeningBalanceDate: (value: string) => void
+  agreementDate: string
+  onAgreementDate: (value: string) => void
+  errors?: Record<string, string[]>
+}) {
+  const photo = contact?.files?.find((file) => file.kind === 'PHOTO')
+  const papers = contact?.files?.filter((file) => file.kind === 'AGREEMENT') ?? []
+  const photoSrc = side === 'customer' && contact?.id && photo ? `/api/customers/${contact.id}/files/${photo.id}` : null
+
+  return (
+    <div className="space-y-4 rounded-md border bg-muted/40 p-3">
+      <div>
+        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Balance and agreement</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {side === 'customer'
+            ? 'Payment terms are chosen above. Record the balance (positive if they owe you, negative if they hold a credit), the day and time the balance falls due, and the date of the debt agreement. Overdue uses that promise. The amount posts to Accounts Receivable.'
+            : 'Payment terms are chosen above. Record what was already owed to this vendor (positive), or a credit you already hold (negative), the day and time that balance falls due, and the agreement date. Overdue uses that promise. The amount posts to Accounts Payable.'}
+        </p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        {mode === 'create' ? (
+          <Field name="openingBalance" label={`Opening balance (${currency})`} error={errors?.openingBalance}>
+            <Input
+              {...fieldProps('openingBalance', errors?.openingBalance)}
+              inputMode="decimal"
+              placeholder="0.00"
+              className="tabular"
+            />
+          </Field>
+        ) : null}
+        <Field name="openingBalanceDate" label="Balance date" error={errors?.openingBalanceDate}>
+          <DateField
+            id="openingBalanceDate"
+            name="openingBalanceDate"
+            value={openingBalanceDate}
+            onChange={onOpeningBalanceDate}
+            today={today}
+          />
+        </Field>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field name="balanceTime" label="Balance time" hint="The clock time the promised balance falls due." error={errors?.balanceTime}>
+          <Input {...fieldProps('balanceTime', errors?.balanceTime, true)} type="time" defaultValue={contact?.balanceTime ?? ''} />
+        </Field>
+        <Field
+          name="agreementDate"
+          label="Agreement date"
+          hint={side === 'customer' ? 'The day the debt agreement was signed.' : 'The day the payable agreement was signed.'}
+          error={errors?.agreementDate}
+        >
+          <DateField
+            id="agreementDate"
+            name="agreementDate"
+            value={agreementDate}
+            onChange={onAgreementDate}
+            today={today}
+          />
+        </Field>
+      </div>
+
+      <Field
+        name="reminderDays"
+        label="Balance reminder"
+        hint="The warning drops down at the top this many days before the balance time."
+        error={errors?.reminderDays}
+      >
+        <NativeSelect
+          {...fieldProps('reminderDays', errors?.reminderDays, true)}
+          defaultValue={contact?.reminderDays ? String(contact.reminderDays) : ''}
+        >
+          <option value="">— none —</option>
+          <option value="3">3 days before</option>
+          <option value="5">5 days before</option>
+          <option value="7">7 days before</option>
+        </NativeSelect>
+      </Field>
+
+      {side === 'customer' ? (
+        <>
+          <Field name="photo" label="Customer photo" hint="JPEG, PNG, or WebP, up to 3 MB." error={errors?.photo}>
+            <PhotoField existingSrc={photoSrc} />
+          </Field>
+
+          <Field
+            name="agreements"
+            label="Agreement papers"
+            hint="The debt agreement. PDF or a picture, up to 4 files, 4 MB each."
+            error={errors?.agreements}
+          >
+            {papers.length > 0 ? (
+              <ul className="mb-2 space-y-1 text-sm">
+                {papers.map((paper) => (
+                  <li key={paper.id}>
+                    <a
+                      href={contact?.id ? `/api/customers/${contact.id}/files/${paper.id}` : undefined}
+                      className="text-primary underline-offset-4 hover:underline"
+                    >
+                      {paper.originalName}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <Input
+              {...fieldProps('agreements', errors?.agreements, true)}
+              type="file"
+              accept="application/pdf,image/jpeg,image/png,image/webp"
+              multiple
+            />
+          </Field>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+function PhotoField({ existingSrc }: { existingSrc: string | null }) {
+  const [preview, setPreview] = useState<string | null>(null)
+
+  return (
+    <div className="space-y-2">
+      {preview || existingSrc ? (
+        <img src={preview ?? existingSrc ?? ''} alt="" className="size-20 rounded-md object-cover" />
+      ) : null}
+      <Input
+        id="photo"
+        name="photo"
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          setPreview(file ? URL.createObjectURL(file) : null)
+        }}
+      />
+    </div>
   )
 }

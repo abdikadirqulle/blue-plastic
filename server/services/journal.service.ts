@@ -1,20 +1,29 @@
 import 'server-only'
 import type { JournalSourceType, Prisma } from '@prisma/client'
 
-import { Decimal, toMoneyString } from '@/lib/money'
+import { isCalendarDate, toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
+import { Decimal, parseMoneyInput, toMoneyString, ZERO } from '@/lib/money'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { ManualJournalInput } from '@/lib/validation/accounting'
 import { partyRequiredBy } from '@/lib/account-options'
-import { deleteJournals } from '@/server/accounting/deletion'
-import { postJournal, reverseJournal } from '@/server/accounting/posting'
+import { deleteJournals, restoreJournals } from '@/server/accounting/deletion'
+import {
+  autoReversePostedJournal,
+  postJournal,
+  promoteDraftJournal,
+  reverseJournal,
+} from '@/server/accounting/posting'
 import type { OrgContext } from '@/server/auth/context'
-import { db } from '@/server/db'
+import { db, type Tx } from '@/server/db'
 import { notFound, validation } from '@/server/errors'
+import * as approvalService from '@/server/services/approval.service'
+import * as assemblyBuildService from '@/server/services/assembly-build.service'
 import * as bankingService from '@/server/services/banking.service'
 import * as billPaymentService from '@/server/services/bill-payment.service'
 import * as inventoryService from '@/server/services/inventory.service'
 import { resolveSources, sourceFor, type JournalSource } from '@/server/services/journal-sources'
 import * as paymentService from '@/server/services/payment.service'
+import * as payrollService from '@/server/services/payroll.service'
 import * as purchaseService from '@/server/services/purchase.service'
 import * as salesService from '@/server/services/sales.service'
 
@@ -22,6 +31,7 @@ export type JournalRow = {
   id: string
   journalNumber: string
   date: Date
+  postedAt: Date
   memo: string | null
   sourceType: string
   status: string
@@ -30,6 +40,8 @@ export type JournalRow = {
   lineCount: number
   /** The document that produced it, and who it was with. */
   source: JournalSource
+  /** Present on the full month list, so a row can open its lines on hover. */
+  lines?: { account: string; description: string | null; debit: string; credit: string }[]
 }
 
 /** Orderings the list screen offers. Sorting happens here, over every row. */
@@ -44,7 +56,15 @@ const JOURNAL_ORDER: Record<string, (dir: 'asc' | 'desc') => Prisma.JournalOrder
 export async function list(
   ctx: OrgContext,
   query: ListQuery,
-  options: { sort?: string; dir?: 'asc' | 'desc' } = {},
+  options: {
+    sort?: string
+    dir?: 'asc' | 'desc'
+    sourceType?: JournalSourceType
+    from?: CalendarDate
+    to?: CalendarDate
+    /** Every row in the range, so a month can be scrolled from A to Z. */
+    unpaged?: boolean
+  } = {},
 ) {
   const where: Prisma.JournalWhereInput = {
     orgId: ctx.orgId,
@@ -52,6 +72,15 @@ export async function list(
     // every balance. The row survives and its own page still reads, so a link in
     // an audit record still resolves.
     status: { not: 'DELETED' },
+    ...(options.sourceType ? { sourceType: options.sourceType } : {}),
+    ...(options.from || options.to
+      ? {
+          date: {
+            ...(options.from ? { gte: toDate(options.from) } : {}),
+            ...(options.to ? { lte: toDate(options.to) } : {}),
+          },
+        }
+      : {}),
     ...(query.q
       ? {
           OR: [
@@ -81,17 +110,29 @@ export async function list(
         id: true,
         journalNumber: true,
         date: true,
+        postedAt: true,
         memo: true,
         sourceType: true,
         sourceId: true,
         status: true,
         isAdjusting: true,
-        lines: { select: { debit: true } },
+        lines: {
+          select: {
+            lineNumber: true,
+            debit: true,
+            credit: true,
+            description: true,
+            account: { select: { code: true, name: true } },
+            customer: { select: { id: true, displayName: true } },
+            vendor: { select: { id: true, displayName: true } },
+          },
+          orderBy: { lineNumber: 'asc' },
+        },
       },
       orderBy:
         (options.sort ? JOURNAL_ORDER[options.sort]?.(options.dir ?? 'asc') : undefined) ??
         [{ date: 'desc' }, { journalNumber: 'desc' }],
-      ...paginate(query),
+      ...(options.unpaged ? {} : paginate(query)),
     }),
     db.journal.count({ where }),
   ])
@@ -103,25 +144,251 @@ export async function list(
     journals.map((journal) => ({ sourceType: journal.sourceType, sourceId: journal.sourceId })),
   )
 
-  const rows: JournalRow[] = journals.map((journal) => ({
-    id: journal.id,
-    journalNumber: journal.journalNumber,
-    date: journal.date,
-    memo: journal.memo,
-    sourceType: journal.sourceType,
-    status: journal.status,
-    isAdjusting: journal.isAdjusting,
-    // A journal's "amount" is one side of it — debits and credits are equal by
-    // construction, so summing both would double it.
-    total: toMoneyString(
-      journal.lines.reduce((sum, line) => sum.plus(new Decimal(line.debit.toString())), new Decimal(0)),
-      2,
-    ),
-    lineCount: journal.lines.length,
-    source: sourceFor(sources, { sourceType: journal.sourceType, sourceId: journal.sourceId }),
-  }))
+  const rows: JournalRow[] = journals.map((journal) => {
+    const source = sourceFor(sources, { sourceType: journal.sourceType, sourceId: journal.sourceId })
+    // A manual entry has no document, so the name is the one written on its lines.
+    const named = journal.lines.find((line) => line.customer || line.vendor)
+    const party = named?.customer
+      ? { partyName: named.customer.displayName, partyHref: `/customers?id=${named.customer.id}` }
+      : named?.vendor
+        ? { partyName: named.vendor.displayName, partyHref: `/vendors/${named.vendor.id}` }
+        : null
 
+    return {
+      id: journal.id,
+      journalNumber: journal.journalNumber,
+      date: journal.date,
+      postedAt: journal.postedAt,
+      memo: journal.memo,
+      sourceType: journal.sourceType,
+      status: journal.status,
+      isAdjusting: journal.isAdjusting,
+      // A journal's "amount" is one side of it — debits and credits are equal by
+      // construction, so summing both would double it.
+      total: toMoneyString(
+        journal.lines.reduce((sum, line) => sum.plus(new Decimal(line.debit.toString())), new Decimal(0)),
+        2,
+      ),
+      lineCount: journal.lines.length,
+      source: source.partyName || !party ? source : { ...source, ...party },
+      ...(options.unpaged
+        ? {
+            lines: journal.lines.map((line) => ({
+              account: `${line.account.code} ${line.account.name}`,
+              description: line.description,
+              debit: toMoneyString(line.debit.toString(), 2),
+              credit: toMoneyString(line.credit.toString(), 2),
+            })),
+          }
+        : {}),
+    }
+  })
+
+  if (options.unpaged) {
+    return { rows, total, page: 1, pageSize: Math.max(total, 1), pageCount: 1 }
+  }
   return paged(rows, total, query)
+}
+
+/** Recent lines for the journal form's lower list. One row is one posted line. */
+export async function registerLines(ctx: OrgContext) {
+  const lines = await db.journalLine.findMany({
+    where: { orgId: ctx.orgId, journal: { status: { not: 'DELETED' } } },
+    select: {
+      id: true,
+      debit: true,
+      credit: true,
+      description: true,
+      journalDate: true,
+      account: { select: { code: true, name: true } },
+      journal: {
+        select: {
+          id: true,
+          journalNumber: true,
+          memo: true,
+          isAdjusting: true,
+          sourceType: true,
+        },
+      },
+    },
+    orderBy: [{ journalDate: 'desc' }, { lineNumber: 'asc' }],
+    take: 40,
+  })
+
+  return lines.map((line) => {
+    const debit = new Decimal(line.debit.toString())
+    const credit = new Decimal(line.credit.toString())
+    return {
+      lineId: line.id,
+      journalId: line.journal.id,
+      date: toCalendarDate(line.journalDate),
+      number: line.journal.journalNumber,
+      adjusting: line.journal.isAdjusting,
+      manual: line.journal.sourceType === 'MANUAL',
+      account: `${line.account.code} — ${line.account.name}`,
+      memo: line.description ?? line.journal.memo,
+      amount: toMoneyString(debit.isZero() ? credit : debit, 2),
+    }
+  })
+}
+
+/**
+ * The manual journal before and after this one, in date then number order.
+ * A blank new form sits after the last manual entry.
+ *
+ * Two keyed lookups — never the whole manual register. Large QB migrations
+ * otherwise time out the detail page while building Back / Forward.
+ */
+export async function neighbors(ctx: OrgContext, currentId: string | null) {
+  const base = {
+    orgId: ctx.orgId,
+    sourceType: 'MANUAL' as const,
+    status: { not: 'DELETED' as const },
+  }
+  const pick = { id: true, journalNumber: true } as const
+
+  const asNeighbor = (row: { id: string; journalNumber: string } | null) =>
+    row ? { id: row.id, number: row.journalNumber } : null
+
+  if (currentId == null) {
+    const previous = await db.journal.findFirst({
+      where: base,
+      select: pick,
+      orderBy: [{ date: 'desc' }, { journalNumber: 'desc' }],
+    })
+    return { previous: asNeighbor(previous), next: null }
+  }
+
+  const current = await db.journal.findFirst({
+    where: { ...base, id: currentId },
+    select: { id: true, journalNumber: true, date: true },
+  })
+  if (!current) {
+    const previous = await db.journal.findFirst({
+      where: base,
+      select: pick,
+      orderBy: [{ date: 'desc' }, { journalNumber: 'desc' }],
+    })
+    return { previous: asNeighbor(previous), next: null }
+  }
+
+  const before = {
+    OR: [
+      { date: { lt: current.date } },
+      { date: current.date, journalNumber: { lt: current.journalNumber } },
+    ],
+  }
+  const after = {
+    OR: [
+      { date: { gt: current.date } },
+      { date: current.date, journalNumber: { gt: current.journalNumber } },
+    ],
+  }
+
+  const [previous, next] = await Promise.all([
+    db.journal.findFirst({
+      where: { ...base, ...before },
+      select: pick,
+      orderBy: [{ date: 'desc' }, { journalNumber: 'desc' }],
+    }),
+    db.journal.findFirst({
+      where: { ...base, ...after },
+      select: pick,
+      orderBy: [{ date: 'asc' }, { journalNumber: 'asc' }],
+    }),
+  ])
+
+  return { previous: asNeighbor(previous), next: asNeighbor(next) }
+}
+
+/**
+ * Find a posted journal by its number, its date, or an amount.
+ *
+ * An empty search returns the latest entries, so opening Find shows what is
+ * already in the books. An amount matches either the entry's debit total or
+ * any one line.
+ */
+export async function find(
+  ctx: OrgContext,
+  input: { number?: string; date?: string; amount?: string },
+) {
+  const number = input.number?.trim()
+  const date = input.date?.trim()
+  const amount = input.amount?.trim()
+  const money = amount ? parseMoneyInput(amount) : null
+  const rounded = money?.toDecimalPlaces(2, Decimal.ROUND_HALF_UP) ?? null
+
+  // The amount is the entry's debit total, or any one line. The total is a sum,
+  // so it cannot be a column filter — an opening balance of 10,200 is found
+  // here even when no single line is exactly that figure.
+  let amountIds: string[] | undefined
+  if (rounded) {
+    const low = rounded.toFixed(2)
+    const high = rounded.plus('0.005').toFixed(4)
+    const hits = await db.$queryRaw<{ id: string }[]>`
+      SELECT j.id
+      FROM journals j
+      JOIN journal_lines l ON l."journalId" = j.id
+      WHERE j."orgId" = ${ctx.orgId}
+        AND j.status::text <> 'DELETED'
+      GROUP BY j.id
+      HAVING
+        (SUM(l.debit) >= ${low}::numeric AND SUM(l.debit) < ${high}::numeric)
+        OR BOOL_OR(l.debit >= ${low}::numeric AND l.debit < ${high}::numeric)
+        OR BOOL_OR(l.credit >= ${low}::numeric AND l.credit < ${high}::numeric)
+      ORDER BY MAX(j.date) DESC, MAX(j."journalNumber") DESC
+      LIMIT 20
+    `
+    amountIds = hits.map((hit) => hit.id)
+    if (amountIds.length === 0) return []
+  }
+
+  const journals = await db.journal.findMany({
+    where: {
+      orgId: ctx.orgId,
+      status: { not: 'DELETED' },
+      ...(amountIds ? { id: { in: amountIds } } : {}),
+      ...(number ? { journalNumber: { contains: number, mode: 'insensitive' } } : {}),
+      ...(date && isCalendarDate(date) ? { date: toDate(date) } : {}),
+    },
+    select: {
+      id: true,
+      journalNumber: true,
+      date: true,
+      memo: true,
+      isAdjusting: true,
+      lines: {
+        select: {
+          debit: true,
+          credit: true,
+          customer: { select: { displayName: true } },
+          vendor: { select: { displayName: true } },
+        },
+      },
+    },
+    orderBy: [{ date: 'desc' }, { journalNumber: 'desc' }],
+    take: 20,
+  })
+
+  return journals.map((journal) => {
+    const total = journal.lines.reduce(
+      (sum, line) => sum.plus(new Decimal(line.debit.toString())),
+      new Decimal(0),
+    )
+    const party =
+      journal.lines.find((line) => line.customer)?.customer?.displayName ??
+      journal.lines.find((line) => line.vendor)?.vendor?.displayName ??
+      null
+    return {
+      id: journal.id,
+      number: journal.journalNumber,
+      date: toCalendarDate(journal.date),
+      memo: journal.memo,
+      adjusting: journal.isAdjusting,
+      party,
+      total: toMoneyString(total, 2),
+    }
+  })
 }
 
 export async function get(ctx: OrgContext, id: string) {
@@ -137,6 +404,7 @@ export async function get(ctx: OrgContext, id: string) {
       status: true,
       isAdjusting: true,
       isClosingEntry: true,
+      autoReverse: true,
       currencyCode: true,
       postedAt: true,
       deletedAt: true,
@@ -166,7 +434,7 @@ export async function get(ctx: OrgContext, id: string) {
     },
   })
 
-  if (!journal) throw notFound('Journal')
+  if (!journal || journal.status === 'DELETED') throw notFound('Journal')
 
   const sources = await resolveSources(ctx.orgId, [
     { sourceType: journal.sourceType, sourceId: journal.sourceId },
@@ -225,6 +493,7 @@ export async function createManual(ctx: OrgContext, input: ManualJournalInput) {
       description: line.description.trim() || null,
       customerId: line.customerId ?? null,
       vendorId: line.vendorId ?? null,
+      trackingCategoryId: line.trackingCategoryId ?? null,
     }))
     .filter((line) => line.accountId && (line.debit !== '' || line.credit !== ''))
 
@@ -291,23 +560,58 @@ export async function createManual(ctx: OrgContext, input: ManualJournalInput) {
   }
 
   await assertPartiesExist(ctx, lines)
+  await assertClassesExist(ctx, lines)
 
-  return db.$transaction((tx) =>
-    postJournal(tx, ctx, {
+  const draftLines = lines.map((line) => ({
+    accountId: line.accountId,
+    debit: line.debit === '' ? 0 : line.debit,
+    credit: line.credit === '' ? 0 : line.credit,
+    description: line.description,
+    customerId: line.customerId,
+    vendorId: line.vendorId,
+    trackingCategoryId: line.trackingCategoryId,
+  }))
+  const total = draftLines.reduce((sum, line) => {
+    const debit = line.debit === '' || line.debit === 0 ? ZERO : new Decimal(line.debit)
+    return sum.plus(debit)
+  }, ZERO)
+
+  return db.$transaction(async (tx) => {
+    const gate = await approvalService.needsApproval(ctx, 'JOURNAL', total, tx)
+    const holdForApproval = gate.required
+
+    const journal = await postJournal(tx, ctx, {
       date: input.date,
       memo: input.memo,
+      journalNumber: input.number,
       sourceType: 'MANUAL',
       isAdjusting: input.isAdjusting,
-      lines: lines.map((line) => ({
-        accountId: line.accountId,
-        debit: line.debit === '' ? 0 : line.debit,
-        credit: line.credit === '' ? 0 : line.credit,
-        description: line.description,
-        customerId: line.customerId,
-        vendorId: line.vendorId,
-      })),
-    }),
-  )
+      autoReverse: input.autoReverse,
+      asDraft: holdForApproval,
+      lines: draftLines,
+    })
+
+    if (holdForApproval) {
+      await approvalService.submitRequest(tx, ctx, {
+        entityType: 'JOURNAL',
+        entityId: journal.id,
+        title: `Journal ${journal.journalNumber}`,
+        href: `/journals/${journal.id}`,
+        amount: total,
+        currencyCode: ctx.organization.baseCurrency,
+        levels: gate.levels,
+      })
+    } else if (input.autoReverse) {
+      await autoReversePostedJournal(tx, ctx, journal.id, journal.date)
+    }
+
+    return journal
+  })
+}
+
+/** Promote a draft manual journal onto the ledger after approval. */
+export async function promoteApprovedManual(tx: Tx, ctx: OrgContext, id: string) {
+  return promoteDraftJournal(tx, ctx, id)
 }
 
 /** A named party has to be one of this organisation's, not merely a valid id. */
@@ -327,6 +631,16 @@ async function assertPartiesExist(
 
   if (customers !== customerIds.length) throw notFound('Customer')
   if (vendors !== vendorIds.length) throw notFound('Vendor')
+}
+
+async function assertClassesExist(
+  ctx: OrgContext,
+  lines: { trackingCategoryId: string | null }[],
+) {
+  const ids = [...new Set(lines.map((line) => line.trackingCategoryId).filter(Boolean) as string[])]
+  if (ids.length === 0) return
+  const found = await db.trackingCategory.count({ where: { orgId: ctx.orgId, id: { in: ids } } })
+  if (found !== ids.length) throw notFound('Class')
 }
 
 /**
@@ -361,6 +675,31 @@ export async function remove(ctx: OrgContext, id: string, reason?: string | null
 }
 
 /**
+ * Put a deleted journal back. Document-owned entries restore through the
+ * document service so stock and related rows come back with the ledger.
+ */
+export async function restore(ctx: OrgContext, id: string) {
+  const journal = await db.journal.findFirst({
+    where: { id, orgId: ctx.orgId },
+    select: { id: true, journalNumber: true, sourceType: true, sourceId: true, status: true },
+  })
+  if (!journal) throw notFound('Journal')
+  if (journal.status !== 'DELETED') {
+    return { id, number: journal.journalNumber, href: `/journals/${id}` }
+  }
+
+  if (journal.sourceId) {
+    const owner = RESTORED_BY[journal.sourceType]
+    if (owner) return owner(ctx, journal.sourceId)
+  }
+
+  return db.$transaction(async (tx) => {
+    await restoreJournals(tx, ctx, [id])
+    return { id, number: journal.journalNumber, href: `/journals/${id}` }
+  })
+}
+
+/**
  * Which service owns the transaction behind a journal.
  *
  * A closing entry and a reversal are deliberately absent: the first is undone by
@@ -384,6 +723,32 @@ const OWNED_BY: Partial<
   TRANSFER: (ctx, id, reason) => bankingService.removeTransfer(ctx, id, reason),
   DEPOSIT: (ctx, id, reason) => bankingService.removeDeposit(ctx, id, reason),
   INVENTORY_ADJUSTMENT: (ctx, id, reason) => inventoryService.removeAdjustment(ctx, id, reason),
+  ASSEMBLY_BUILD: (ctx, id, reason) => assemblyBuildService.remove(ctx, id, reason),
+  PAYROLL: (ctx, id, reason) => payrollService.remove(ctx, id, reason),
+  PAYROLL_SETTLEMENT: (ctx, id, reason) => payrollService.unsettle(ctx, id, reason),
+}
+
+const RESTORED_BY: Partial<
+  Record<
+    JournalSourceType,
+    (ctx: OrgContext, id: string) => Promise<{ id: string; number: string; href: string }>
+  >
+> = {
+  INVOICE: (ctx, id) => salesService.restore(ctx, id),
+  SALES_RECEIPT: (ctx, id) => salesService.restore(ctx, id),
+  CREDIT_MEMO: (ctx, id) => salesService.restore(ctx, id),
+  REFUND_RECEIPT: (ctx, id) => salesService.restore(ctx, id),
+  CUSTOMER_PAYMENT: (ctx, id) => paymentService.restore(ctx, id),
+  BILL: (ctx, id) => purchaseService.restore(ctx, id),
+  EXPENSE: (ctx, id) => purchaseService.restore(ctx, id),
+  VENDOR_CREDIT: (ctx, id) => purchaseService.restore(ctx, id),
+  BILL_PAYMENT: (ctx, id) => billPaymentService.restore(ctx, id),
+  TRANSFER: (ctx, id) => bankingService.restoreTransfer(ctx, id),
+  DEPOSIT: (ctx, id) => bankingService.restoreDeposit(ctx, id),
+  INVENTORY_ADJUSTMENT: (ctx, id) => inventoryService.restoreAdjustment(ctx, id),
+  ASSEMBLY_BUILD: (ctx, id) => assemblyBuildService.restore(ctx, id),
+  PAYROLL: (ctx, id) => payrollService.restore(ctx, id),
+  PAYROLL_SETTLEMENT: (ctx, id) => payrollService.restoreSettlement(ctx, id),
 }
 
 export async function reverse(

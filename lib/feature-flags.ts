@@ -1,0 +1,1057 @@
+/**
+ * Organisation feature switches — Odoo-style Configuration toggles.
+ * Stored as JSON on `Organization.featureFlags`; missing keys fall back to defaults.
+ *
+ * Each launcher app (except Settings / Help / Dashboard) has its own on/off switch
+ * so a company can open or close apps one by one.
+ */
+
+/** Every company app that can be turned on or off. */
+export type ModuleFlag =
+  | 'pos'
+  | 'sales'
+  | 'projects'
+  | 'customers'
+  | 'purchases'
+  | 'vendors'
+  | 'banking'
+  | 'payments'
+  | 'inventory'
+  | 'barcodes'
+  | 'stores'
+  | 'approvals'
+  | 'accounting'
+  | 'journals'
+  | 'reports'
+  | 'bill-payments'
+  | 'periods'
+  | 'calendar'
+  | 'todos'
+  | 'documents'
+  | 'knowledge'
+  | 'employees'
+  | 'sign'
+  | 'appointments'
+  | 'discuss'
+  | 'planning'
+  | 'surveys'
+  | 'databases'
+
+/** Ordered list for Apps & features and Databases → Limits. */
+export const MODULE_FLAGS: readonly ModuleFlag[] = [
+  'pos',
+  'sales',
+  'projects',
+  'customers',
+  'purchases',
+  'vendors',
+  'banking',
+  'payments',
+  'bill-payments',
+  'inventory',
+  'barcodes',
+  'stores',
+  'approvals',
+  'accounting',
+  'journals',
+  'periods',
+  'reports',
+  'calendar',
+  'todos',
+  'documents',
+  'knowledge',
+  'employees',
+  'sign',
+  'appointments',
+  'discuss',
+  'planning',
+  'surveys',
+  'databases',
+] as const
+
+/**
+ * New apps that stay off until the company turns them on in Apps & features.
+ * Missing keys in saved JSON must not inherit allModules(true).
+ */
+export const OPT_IN_MODULE_FLAGS: readonly ModuleFlag[] = [
+  'todos',
+  'documents',
+  'knowledge',
+  'employees',
+  'sign',
+  'appointments',
+  'discuss',
+  'planning',
+  'surveys',
+] as const
+
+export const MODULE_FLAG_LABELS: Record<ModuleFlag, { label: string; hint: string }> = {
+  pos: { label: 'Point of Sale', hint: 'Registers and till' },
+  sales: { label: 'Sales', hint: 'Estimates, orders, invoices, receipts' },
+  projects: { label: 'Projects', hint: 'Jobs, tasks, and linked sales' },
+  customers: { label: 'Customers', hint: 'Who you sell to' },
+  purchases: { label: 'Purchases', hint: 'Bills, expenses, purchase orders' },
+  vendors: { label: 'Vendors', hint: 'Who you buy from' },
+  banking: { label: 'Banking', hint: 'Accounts, transfers, deposits' },
+  payments: { label: 'Payments', hint: 'Money received from customers' },
+  'bill-payments': { label: 'Bill payments', hint: 'Money paid to vendors' },
+  inventory: { label: 'Inventory', hint: 'Products and stock' },
+  barcodes: { label: 'Barcodes', hint: 'Labels and printing' },
+  stores: { label: 'Store', hint: 'Quantity by warehouse' },
+  approvals: { label: 'Approvals', hint: 'Pending inbox, workflows, and posting' },
+  accounting: { label: 'Accounting', hint: 'Chart of accounts hub' },
+  journals: { label: 'Journals', hint: 'Manual ledger entries' },
+  periods: { label: 'Periods', hint: 'Close the books' },
+  reports: { label: 'Reports', hint: 'Financial and operations reports' },
+  calendar: { label: 'Calendar', hint: 'Meetings and reminders' },
+  todos: { label: 'To-do', hint: 'Personal and team checklists' },
+  documents: { label: 'Documents', hint: 'Company file library' },
+  knowledge: { label: 'Knowledge', hint: 'Internal wiki and how-tos' },
+  employees: { label: 'Employees', hint: 'People, leave, attendance, and payroll' },
+  sign: { label: 'Sign', hint: 'Request signatures on documents' },
+  appointments: { label: 'Appointments', hint: 'Bookable slots and calendar events' },
+  discuss: { label: 'Discuss', hint: 'Team channels and messages' },
+  planning: { label: 'Planning', hint: 'Week grid from tasks and people' },
+  surveys: { label: 'Surveys', hint: 'Simple forms and responses' },
+  databases: { label: 'Databases', hint: 'Companies and backups' },
+}
+
+/**
+ * Older saves only had the seven “family” apps. New apps inherit that parent
+ * until the company saves Apps & features again with an explicit value.
+ */
+const LEGACY_PARENT: Partial<Record<ModuleFlag, ModuleFlag>> = {
+  projects: 'sales',
+  customers: 'sales',
+  payments: 'sales',
+  vendors: 'purchases',
+  'bill-payments': 'purchases',
+  barcodes: 'inventory',
+  stores: 'inventory',
+  journals: 'accounting',
+  periods: 'accounting',
+}
+
+/** Creator credit shown on shell and sign-in when enabled. */
+export const CREATOR_BRAND_NAME = 'Abdisalam Abdullahi Mohamed'
+
+export type OrgFeatureFlags = {
+  /** Show Delete on journals (list + detail) and allow journal:reverse delete path. */
+  allowJournalDelete: boolean
+  /** Show Delete / Merge on customers (also needs customer:delete on the user). */
+  allowCustomerDelete: boolean
+  /** Show Delete / Merge on vendors (also needs vendor:delete on the user). */
+  allowVendorDelete: boolean
+  /** Show Delete / Merge on items (also needs item:delete on the user). */
+  allowItemDelete: boolean
+  /** Show Delete / Merge on chart accounts (also needs account:delete on the user). */
+  allowAccountDelete: boolean
+  /** Show Delete on sales/purchase documents, payments, banking, inventory adjustments. */
+  allowDocumentDelete: boolean
+  /** Show the creator credit on the shell footer and sign-in. */
+  showCreatorBrand: boolean
+  /**
+   * Sales/purchase tax for this company. When off, tax settings, codes, line
+   * tax, and tax reports stay hidden and the server will not apply tax.
+   */
+  enableTax: boolean
+  /**
+   * Customer self-service portal. When off, portal invites and /portal are
+   * refused; staff UI for portal users stays hidden.
+   */
+  enableCustomerPortal: boolean
+  /**
+   * Maker-checker approvals (SOX / COSO). When on, posting sales/purchases
+   * (and other gated transactions) wait in Approvals until an authorised
+   * checker posts them. POS till sales still post immediately.
+   */
+  enableDocumentApprovals: boolean
+  /**
+   * When on, posting an invoice past the customer credit limit asks for
+   * confirmation instead of hard-blocking. Off (default) keeps the hard refuse.
+   */
+  creditLimitWarn: boolean
+  /**
+   * Standard payroll (QuickBooks / Odoo style). When on, a run posts gross
+   * wages and deduction liabilities, prorates joiners, and opens structures,
+   * payslip PDF, loans, and end of service. When off, payroll stays the
+   * simple net-to-bank journal.
+   */
+  payrollStandard: boolean
+  /**
+   * Phase 33: elevate selected close checklist warnings (bank recon, MATCH_HOLD,
+   * open pick waves) to blocked so month close refuses until fixed.
+   */
+  closeHardGates: boolean
+  /**
+   * Apps the ERP system owner granted this company (create / Limits / approve).
+   * The company may turn granted apps off for its own screens, but cannot turn
+   * on an app that was never granted — that needs a request the owner accepts.
+   */
+  grantedModules: Record<ModuleFlag, boolean>
+  /** Apps visible in the launcher / header when enabled (subset of grants). */
+  modules: Record<ModuleFlag, boolean>
+  /**
+   * Lowest layer under Sales / Purchases / Inventory — turn individual document
+   * kinds on or off without disabling the whole app. Missing keys mean on.
+   */
+  documentKinds: DocumentKindsFlags
+}
+
+/** Sales document kinds a company can hide under Apps & features. */
+export const SALES_DOCUMENT_KINDS = [
+  'INVOICE',
+  'ESTIMATE',
+  'QUOTATION',
+  'SALES_ORDER',
+  'SALES_RECEIPT',
+  'CREDIT_MEMO',
+  'REFUND_RECEIPT',
+  'DELIVERY',
+] as const
+export type SalesDocumentKind = (typeof SALES_DOCUMENT_KINDS)[number]
+
+/** Purchase document kinds a company can hide under Apps & features. */
+export const PURCHASE_DOCUMENT_KINDS = [
+  'BILL',
+  'EXPENSE',
+  'VENDOR_CREDIT',
+  'PURCHASE_ORDER',
+  'PURCHASE_REQUEST',
+  'RFQ',
+  'DELIVERY',
+] as const
+export type PurchaseDocumentKind = (typeof PURCHASE_DOCUMENT_KINDS)[number]
+
+/** Inventory work areas a company can hide under Apps & features. */
+export const INVENTORY_DOCUMENT_KINDS = [
+  'products',
+  'stock',
+  'lots',
+  'expiry',
+  'routing',
+  'asn',
+  'adjustments',
+  'builds',
+  'work-orders',
+  'mrp',
+  'bins',
+  'transfers',
+] as const
+export type InventoryDocumentKind = (typeof INVENTORY_DOCUMENT_KINDS)[number]
+
+/** Accounting hub work areas. */
+export const ACCOUNTING_DOCUMENT_KINDS = [
+  'budgets',
+  'fixed-assets',
+  'equity',
+  'fx-hedges',
+  'fx-revaluation',
+] as const
+export type AccountingDocumentKind = (typeof ACCOUNTING_DOCUMENT_KINDS)[number]
+
+/** Employees / HR work areas. */
+export const EMPLOYEES_DOCUMENT_KINDS = [
+  'directory',
+  'leave',
+  'attendance',
+  'recruitment',
+  'training',
+  'contracts',
+  'payroll',
+  'policies',
+] as const
+export type EmployeesDocumentKind = (typeof EMPLOYEES_DOCUMENT_KINDS)[number]
+
+/** Customers CRM extras. */
+export const CUSTOMERS_DOCUMENT_KINDS = ['pipeline', 'tickets'] as const
+export type CustomersDocumentKind = (typeof CUSTOMERS_DOCUMENT_KINDS)[number]
+
+/** Store-specific work areas. */
+export const STORES_DOCUMENT_KINDS = ['tickets'] as const
+export type StoresDocumentKind = (typeof STORES_DOCUMENT_KINDS)[number]
+
+export type DocumentKindFamily =
+  | 'sales'
+  | 'purchases'
+  | 'inventory'
+  | 'accounting'
+  | 'employees'
+  | 'customers'
+  | 'stores'
+
+export type DocumentKindsFlags = {
+  sales: Record<SalesDocumentKind, boolean>
+  purchases: Record<PurchaseDocumentKind, boolean>
+  inventory: Record<InventoryDocumentKind, boolean>
+  accounting: Record<AccountingDocumentKind, boolean>
+  employees: Record<EmployeesDocumentKind, boolean>
+  customers: Record<CustomersDocumentKind, boolean>
+  stores: Record<StoresDocumentKind, boolean>
+}
+
+export const DOCUMENT_KIND_LABELS: {
+  sales: Record<SalesDocumentKind, string>
+  purchases: Record<PurchaseDocumentKind, string>
+  inventory: Record<InventoryDocumentKind, string>
+  accounting: Record<AccountingDocumentKind, string>
+  employees: Record<EmployeesDocumentKind, string>
+  customers: Record<CustomersDocumentKind, string>
+  stores: Record<StoresDocumentKind, string>
+} = {
+  sales: {
+    INVOICE: 'Invoices',
+    ESTIMATE: 'Estimates',
+    QUOTATION: 'Quotations',
+    SALES_ORDER: 'Sales orders',
+    SALES_RECEIPT: 'Sales receipts',
+    CREDIT_MEMO: 'Credit memos',
+    REFUND_RECEIPT: 'Refunds',
+    DELIVERY: 'Delivery',
+  },
+  purchases: {
+    BILL: 'Bills',
+    EXPENSE: 'Expenses',
+    VENDOR_CREDIT: 'Vendor credits',
+    PURCHASE_ORDER: 'Purchase orders',
+    PURCHASE_REQUEST: 'Purchase requests',
+    RFQ: 'RFQs',
+    DELIVERY: 'Delivery',
+  },
+  inventory: {
+    products: 'Products & categories',
+    stock: 'Stock on hand',
+    lots: 'Stock by lot / serial',
+    expiry: 'Lot expiry',
+    routing: 'Routings',
+    asn: 'ASN (expected inbound)',
+    adjustments: 'Stock adjustments',
+    builds: 'Build assemblies',
+    'work-orders': 'Work orders',
+    mrp: 'Materials plan (MRP)',
+    bins: 'Bins & picks',
+    transfers: 'Store transfers',
+  },
+  accounting: {
+    budgets: 'Budgets',
+    'fixed-assets': 'Fixed assets',
+    equity: 'Equity',
+    'fx-hedges': 'FX hedges',
+    'fx-revaluation': 'FX revaluation',
+  },
+  employees: {
+    directory: 'People directory',
+    leave: 'Leave',
+    attendance: 'Attendance',
+    recruitment: 'Recruitment',
+    training: 'Training',
+    contracts: 'Contracts',
+    payroll: 'Payroll',
+    policies: 'Policies',
+  },
+  customers: {
+    pipeline: 'CRM pipeline',
+    tickets: 'Support tickets',
+  },
+  stores: {
+    tickets: 'Store pick tickets',
+  },
+}
+
+function allSalesKinds(on: boolean): Record<SalesDocumentKind, boolean> {
+  return Object.fromEntries(SALES_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    SalesDocumentKind,
+    boolean
+  >
+}
+
+function allPurchaseKinds(on: boolean): Record<PurchaseDocumentKind, boolean> {
+  return Object.fromEntries(PURCHASE_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    PurchaseDocumentKind,
+    boolean
+  >
+}
+
+function allInventoryKinds(on: boolean): Record<InventoryDocumentKind, boolean> {
+  return Object.fromEntries(INVENTORY_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    InventoryDocumentKind,
+    boolean
+  >
+}
+
+function allAccountingKinds(on: boolean): Record<AccountingDocumentKind, boolean> {
+  return Object.fromEntries(ACCOUNTING_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    AccountingDocumentKind,
+    boolean
+  >
+}
+
+function allEmployeesKinds(on: boolean): Record<EmployeesDocumentKind, boolean> {
+  return Object.fromEntries(EMPLOYEES_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    EmployeesDocumentKind,
+    boolean
+  >
+}
+
+function allCustomersKinds(on: boolean): Record<CustomersDocumentKind, boolean> {
+  return Object.fromEntries(CUSTOMERS_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    CustomersDocumentKind,
+    boolean
+  >
+}
+
+function allStoresKinds(on: boolean): Record<StoresDocumentKind, boolean> {
+  return Object.fromEntries(STORES_DOCUMENT_KINDS.map((key) => [key, on])) as Record<
+    StoresDocumentKind,
+    boolean
+  >
+}
+
+export function defaultDocumentKinds(): DocumentKindsFlags {
+  return {
+    sales: allSalesKinds(true),
+    purchases: allPurchaseKinds(true),
+    inventory: allInventoryKinds(true),
+    accounting: allAccountingKinds(true),
+    employees: allEmployeesKinds(true),
+    customers: allCustomersKinds(true),
+    stores: allStoresKinds(true),
+  }
+}
+
+/** Hub / menu tile key → sales document kind (tiles without a kind always show). */
+export const SALES_HUB_KIND: Partial<Record<string, SalesDocumentKind>> = {
+  estimates: 'ESTIMATE',
+  quotations: 'QUOTATION',
+  'sales-orders': 'SALES_ORDER',
+  invoices: 'INVOICE',
+  'sales-receipts': 'SALES_RECEIPT',
+  delivery: 'DELIVERY',
+  'credit-memos': 'CREDIT_MEMO',
+  refunds: 'REFUND_RECEIPT',
+}
+
+/** Hub / menu tile key → purchase document kind. */
+export const PURCHASE_HUB_KIND: Partial<Record<string, PurchaseDocumentKind>> = {
+  bills: 'BILL',
+  expenses: 'EXPENSE',
+  'vendor-credits': 'VENDOR_CREDIT',
+  'purchase-orders': 'PURCHASE_ORDER',
+  'purchase-requests': 'PURCHASE_REQUEST',
+  rfqs: 'RFQ',
+  delivery: 'DELIVERY',
+}
+
+/** Hub / menu tile key → inventory document kind. */
+export const INVENTORY_HUB_KIND: Partial<Record<string, InventoryDocumentKind>> = {
+  items: 'products',
+  categories: 'products',
+  stock: 'stock',
+  lots: 'lots',
+  expiry: 'expiry',
+  routing: 'routing',
+  asn: 'asn',
+  adjust: 'adjustments',
+  builds: 'builds',
+  'work-orders': 'work-orders',
+  mrp: 'mrp',
+  bins: 'bins',
+  stores: 'transfers',
+}
+
+/** Inventory hub tiles that open a sibling app — hide when that module is off. */
+export const INVENTORY_HUB_MODULE: Partial<Record<string, ModuleFlag>> = {
+  barcodes: 'barcodes',
+  stores: 'stores',
+  reports: 'reports',
+}
+
+/** Accounting hub tile → accounting kind. */
+export const ACCOUNTING_HUB_KIND: Partial<Record<string, AccountingDocumentKind>> = {
+  budgets: 'budgets',
+  'fixed-assets': 'fixed-assets',
+  equity: 'equity',
+  'fx-hedges': 'fx-hedges',
+  'fx-revaluation': 'fx-revaluation',
+}
+
+/** Employees menu / hub key → employees kind. */
+export const EMPLOYEES_HUB_KIND: Partial<Record<string, EmployeesDocumentKind>> = {
+  directory: 'directory',
+  leave: 'leave',
+  attendance: 'attendance',
+  recruitment: 'recruitment',
+  training: 'training',
+  contracts: 'contracts',
+  payroll: 'payroll',
+  policies: 'policies',
+}
+
+/** Customers menu key → customers kind. */
+export const CUSTOMERS_HUB_KIND: Partial<Record<string, CustomersDocumentKind>> = {
+  pipeline: 'pipeline',
+  tickets: 'tickets',
+}
+
+/** Stores menu key → stores kind. */
+export const STORES_HUB_KIND: Partial<Record<string, StoresDocumentKind>> = {
+  tickets: 'tickets',
+}
+
+function allModules(on: boolean): Record<ModuleFlag, boolean> {
+  return Object.fromEntries(MODULE_FLAGS.map((key) => [key, on])) as Record<ModuleFlag, boolean>
+}
+
+function defaultModules(): Record<ModuleFlag, boolean> {
+  const modules = allModules(true)
+  for (const key of OPT_IN_MODULE_FLAGS) modules[key] = false
+  return modules
+}
+
+export const DEFAULT_FEATURE_FLAGS: OrgFeatureFlags = {
+  allowJournalDelete: true,
+  allowCustomerDelete: true,
+  allowVendorDelete: true,
+  allowItemDelete: true,
+  allowAccountDelete: true,
+  allowDocumentDelete: true,
+  showCreatorBrand: true,
+  enableTax: true,
+  enableCustomerPortal: false,
+  enableDocumentApprovals: false,
+  creditLimitWarn: false,
+  payrollStandard: true,
+  closeHardGates: false,
+  /** Opt-in apps are granted so Apps & features can turn them on. */
+  grantedModules: allModules(true),
+  modules: defaultModules(),
+  documentKinds: defaultDocumentKinds(),
+}
+
+/** Form field for a document kind: sales + INVOICE → kindSales_INVOICE. */
+export function documentKindFormKey(family: DocumentKindFamily, kind: string): string {
+  const camel = family.charAt(0).toUpperCase() + family.slice(1)
+  return `kind${camel}_${kind}`
+}
+
+export const DOCUMENT_KIND_FORM_KEY_LIST: readonly string[] = [
+  ...SALES_DOCUMENT_KINDS.map((kind) => documentKindFormKey('sales', kind)),
+  ...PURCHASE_DOCUMENT_KINDS.map((kind) => documentKindFormKey('purchases', kind)),
+  ...INVENTORY_DOCUMENT_KINDS.map((kind) => documentKindFormKey('inventory', kind)),
+  ...ACCOUNTING_DOCUMENT_KINDS.map((kind) => documentKindFormKey('accounting', kind)),
+  ...EMPLOYEES_DOCUMENT_KINDS.map((kind) => documentKindFormKey('employees', kind)),
+  ...CUSTOMERS_DOCUMENT_KINDS.map((kind) => documentKindFormKey('customers', kind)),
+  ...STORES_DOCUMENT_KINDS.map((kind) => documentKindFormKey('stores', kind)),
+]
+
+/**
+ * Path prefixes → app flag. Used to refuse URLs for apps this company may not use.
+ * Longer prefixes win when several match.
+ */
+export const MODULE_PATH_PREFIXES: readonly { prefix: string; module: ModuleFlag }[] = [
+  { prefix: '/pos', module: 'pos' },
+  { prefix: '/hospitality', module: 'sales' },
+  { prefix: '/education', module: 'sales' },
+  { prefix: '/hospital', module: 'sales' },
+  { prefix: '/ngo', module: 'customers' },
+  { prefix: '/sales', module: 'sales' },
+  { prefix: '/projects', module: 'projects' },
+  { prefix: '/customers', module: 'customers' },
+  { prefix: '/purchases', module: 'purchases' },
+  { prefix: '/vendors', module: 'vendors' },
+  { prefix: '/banking', module: 'banking' },
+  { prefix: '/payments', module: 'payments' },
+  { prefix: '/bill-payments', module: 'bill-payments' },
+  { prefix: '/inventory', module: 'inventory' },
+  { prefix: '/items', module: 'inventory' },
+  { prefix: '/barcodes', module: 'barcodes' },
+  { prefix: '/stores', module: 'stores' },
+  { prefix: '/store', module: 'stores' },
+  { prefix: '/approvals', module: 'approvals' },
+  { prefix: '/accounting', module: 'accounting' },
+  { prefix: '/accounts', module: 'accounting' },
+  { prefix: '/journals', module: 'journals' },
+  { prefix: '/periods', module: 'periods' },
+  { prefix: '/reports', module: 'reports' },
+  { prefix: '/analytics', module: 'reports' },
+  { prefix: '/calendar', module: 'calendar' },
+  { prefix: '/todos', module: 'todos' },
+  { prefix: '/documents', module: 'documents' },
+  { prefix: '/knowledge', module: 'knowledge' },
+  { prefix: '/employees', module: 'employees' },
+  { prefix: '/sign', module: 'sign' },
+  { prefix: '/appointments', module: 'appointments' },
+  { prefix: '/discuss', module: 'discuss' },
+  { prefix: '/planning', module: 'planning' },
+  { prefix: '/surveys', module: 'surveys' },
+  { prefix: '/databases', module: 'databases' },
+] as const
+
+/** Which app owns this pathname, if any (Settings / Help / Home are unowned). */
+export function moduleForPath(pathname: string): ModuleFlag | null {
+  const path = pathname.split(/[?#]/)[0] || '/'
+  let best: { module: ModuleFlag; length: number } | null = null
+  for (const entry of MODULE_PATH_PREFIXES) {
+    if (path === entry.prefix || path.startsWith(`${entry.prefix}/`)) {
+      if (!best || entry.prefix.length > best.length) {
+        best = { module: entry.module, length: entry.prefix.length }
+      }
+    }
+  }
+  return best?.module ?? null
+}
+
+/** Form field for a module flag: sales → moduleSales, bill-payments → moduleBillPayments. */
+export function moduleFormKey(flag: ModuleFlag): string {
+  const camel = flag.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase())
+  return `module${camel.charAt(0).toUpperCase()}${camel.slice(1)}`
+}
+
+export const MODULE_FORM_KEYS: Record<ModuleFlag, string> = Object.fromEntries(
+  MODULE_FLAGS.map((key) => [key, moduleFormKey(key)]),
+) as Record<ModuleFlag, string>
+
+/** Every module form field name (for unchecked → false on save). */
+export const MODULE_FORM_KEY_LIST: readonly string[] = MODULE_FLAGS.map((key) => MODULE_FORM_KEYS[key])
+
+/**
+ * Map app chrome / launcher keys → feature flag.
+ * Settings, Help, and Dashboard stay always available (null).
+ */
+export const MODULE_KEY_TO_FLAG: Record<string, ModuleFlag | null> = {
+  dashboard: null,
+  settings: null,
+  help: null,
+  pos: 'pos',
+  sales: 'sales',
+  projects: 'projects',
+  customers: 'customers',
+  purchases: 'purchases',
+  vendors: 'vendors',
+  banking: 'banking',
+  payments: 'payments',
+  inventory: 'inventory',
+  barcodes: 'barcodes',
+  stores: 'stores',
+  approvals: 'approvals',
+  accounting: 'accounting',
+  journals: 'journals',
+  reports: 'reports',
+  analytics: 'reports',
+  'bill-payments': 'bill-payments',
+  periods: 'periods',
+  calendar: 'calendar',
+  todos: 'todos',
+  documents: 'documents',
+  knowledge: 'knowledge',
+  employees: 'employees',
+  sign: 'sign',
+  appointments: 'appointments',
+  discuss: 'discuss',
+  planning: 'planning',
+  surveys: 'surveys',
+  databases: 'databases',
+}
+
+export function parseFeatureFlags(raw: unknown): OrgFeatureFlags {
+  const base = structuredClone(DEFAULT_FEATURE_FLAGS)
+  if (!raw || typeof raw !== 'object') return base
+  const data = raw as Record<string, unknown>
+
+  if (typeof data.allowJournalDelete === 'boolean') base.allowJournalDelete = data.allowJournalDelete
+  if (typeof data.allowDocumentDelete === 'boolean') base.allowDocumentDelete = data.allowDocumentDelete
+  if (typeof data.showCreatorBrand === 'boolean') base.showCreatorBrand = data.showCreatorBrand
+  if (typeof data.enableTax === 'boolean') base.enableTax = data.enableTax
+  if (typeof data.enableCustomerPortal === 'boolean') {
+    base.enableCustomerPortal = data.enableCustomerPortal
+  }
+  if (typeof data.enableDocumentApprovals === 'boolean') {
+    base.enableDocumentApprovals = data.enableDocumentApprovals
+  }
+  if (typeof data.creditLimitWarn === 'boolean') base.creditLimitWarn = data.creditLimitWarn
+  if (typeof data.payrollStandard === 'boolean') base.payrollStandard = data.payrollStandard
+  if (typeof data.closeHardGates === 'boolean') base.closeHardGates = data.closeHardGates
+
+  // Legacy single switch → both contact sides until the new keys are saved.
+  if (typeof data.allowContactDelete === 'boolean') {
+    base.allowCustomerDelete = data.allowContactDelete
+    base.allowVendorDelete = data.allowContactDelete
+  }
+  if (typeof data.allowCustomerDelete === 'boolean') base.allowCustomerDelete = data.allowCustomerDelete
+  if (typeof data.allowVendorDelete === 'boolean') base.allowVendorDelete = data.allowVendorDelete
+  if (typeof data.allowItemDelete === 'boolean') base.allowItemDelete = data.allowItemDelete
+  if (typeof data.allowAccountDelete === 'boolean') base.allowAccountDelete = data.allowAccountDelete
+
+  if (data.modules && typeof data.modules === 'object') {
+    const modules = data.modules as Record<string, unknown>
+    for (const key of MODULE_FLAGS) {
+      if (typeof modules[key] === 'boolean') base.modules[key] = modules[key]
+    }
+    // Fill apps that were never saved from their old parent family flag.
+    for (const key of MODULE_FLAGS) {
+      if (typeof modules[key] === 'boolean') continue
+      if ((OPT_IN_MODULE_FLAGS as readonly string[]).includes(key)) {
+        base.modules[key] = false
+        continue
+      }
+      const parent = LEGACY_PARENT[key]
+      if (parent && typeof modules[parent] === 'boolean') {
+        base.modules[key] = modules[parent]
+      }
+    }
+  }
+
+  // Grants: explicit map, or copy of modules for older companies (whatever was
+  // on when they last saved is treated as what the owner allowed).
+  if (data.grantedModules && typeof data.grantedModules === 'object') {
+    const granted = data.grantedModules as Record<string, unknown>
+    for (const key of MODULE_FLAGS) {
+      if (typeof granted[key] === 'boolean') base.grantedModules[key] = granted[key]
+    }
+    for (const key of OPT_IN_MODULE_FLAGS) {
+      if (typeof granted[key] !== 'boolean') base.grantedModules[key] = true
+    }
+  } else {
+    base.grantedModules = { ...base.modules }
+    for (const key of OPT_IN_MODULE_FLAGS) {
+      base.grantedModules[key] = true
+    }
+  }
+
+  // A module that was never granted cannot stay "on".
+  for (const key of MODULE_FLAGS) {
+    if (!base.grantedModules[key]) base.modules[key] = false
+  }
+
+  if (data.documentKinds && typeof data.documentKinds === 'object') {
+    const kinds = data.documentKinds as Record<string, unknown>
+    base.documentKinds = parseDocumentKinds(kinds)
+  }
+
+  return base
+}
+
+function parseKindMap<T extends string>(
+  raw: unknown,
+  keys: readonly T[],
+  fallback: Record<T, boolean>,
+): Record<T, boolean> {
+  const next = { ...fallback }
+  if (!raw || typeof raw !== 'object') return next
+  const data = raw as Record<string, unknown>
+  for (const key of keys) {
+    if (typeof data[key] === 'boolean') next[key] = data[key]
+  }
+  return next
+}
+
+/** Merge a partial documentKinds blob; missing families/keys stay on. */
+export function parseDocumentKinds(raw: unknown): DocumentKindsFlags {
+  const base = defaultDocumentKinds()
+  if (!raw || typeof raw !== 'object') return base
+  const data = raw as Record<string, unknown>
+  const inventory = parseKindMap(data.inventory, INVENTORY_DOCUMENT_KINDS, base.inventory)
+  // Older saves only had products/adjustments/transfers — inherit OFF onto split kinds.
+  if (data.inventory && typeof data.inventory === 'object') {
+    const inv = data.inventory as Record<string, unknown>
+    if (inv.products === false) {
+      if (typeof inv.stock !== 'boolean') inventory.stock = false
+      if (typeof inv.lots !== 'boolean') inventory.lots = false
+      if (typeof inv.expiry !== 'boolean') inventory.expiry = false
+    }
+    if (inv.adjustments === false) {
+      if (typeof inv.builds !== 'boolean') inventory.builds = false
+      if (typeof inv['work-orders'] !== 'boolean') inventory['work-orders'] = false
+      if (typeof inv.mrp !== 'boolean') inventory.mrp = false
+      if (typeof inv.routing !== 'boolean') inventory.routing = false
+    }
+  }
+  return {
+    sales: parseKindMap(data.sales, SALES_DOCUMENT_KINDS, base.sales),
+    purchases: parseKindMap(data.purchases, PURCHASE_DOCUMENT_KINDS, base.purchases),
+    inventory,
+    accounting: parseKindMap(data.accounting, ACCOUNTING_DOCUMENT_KINDS, base.accounting),
+    employees: parseKindMap(data.employees, EMPLOYEES_DOCUMENT_KINDS, base.employees),
+    customers: parseKindMap(data.customers, CUSTOMERS_DOCUMENT_KINDS, base.customers),
+    stores: parseKindMap(data.stores, STORES_DOCUMENT_KINDS, base.stores),
+  }
+}
+
+/** True when this document kind is on (default true when unset). */
+export function isDocumentKindEnabled(
+  flags: OrgFeatureFlags,
+  family: DocumentKindFamily,
+  kind: string,
+): boolean {
+  const map = flags.documentKinds?.[family] as Record<string, boolean> | undefined
+  if (!map || !(kind in map)) return true
+  return map[kind] !== false
+}
+
+function kindOnFromForm(values: Record<string, unknown>, family: DocumentKindFamily, kind: string) {
+  const raw = values[documentKindFormKey(family, kind)]
+  return raw === true || raw === 'true' || raw === 'on'
+}
+
+/** Read document kinds from features form checkboxes. */
+export function documentKindsFromFormValues(
+  values: Record<string, unknown>,
+): DocumentKindsFlags {
+  const kinds = defaultDocumentKinds()
+  for (const kind of SALES_DOCUMENT_KINDS) {
+    kinds.sales[kind] = kindOnFromForm(values, 'sales', kind)
+  }
+  for (const kind of PURCHASE_DOCUMENT_KINDS) {
+    kinds.purchases[kind] = kindOnFromForm(values, 'purchases', kind)
+  }
+  for (const kind of INVENTORY_DOCUMENT_KINDS) {
+    kinds.inventory[kind] = kindOnFromForm(values, 'inventory', kind)
+  }
+  for (const kind of ACCOUNTING_DOCUMENT_KINDS) {
+    kinds.accounting[kind] = kindOnFromForm(values, 'accounting', kind)
+  }
+  for (const kind of EMPLOYEES_DOCUMENT_KINDS) {
+    kinds.employees[kind] = kindOnFromForm(values, 'employees', kind)
+  }
+  for (const kind of CUSTOMERS_DOCUMENT_KINDS) {
+    kinds.customers[kind] = kindOnFromForm(values, 'customers', kind)
+  }
+  for (const kind of STORES_DOCUMENT_KINDS) {
+    kinds.stores[kind] = kindOnFromForm(values, 'stores', kind)
+  }
+  return kinds
+}
+
+/** Path → document kind for route guards (null = no kind gate). */
+export function documentKindForPath(
+  pathname: string,
+): { family: DocumentKindFamily; kind: string } | null {
+  const path = pathname.split(/[?#]/)[0] || '/'
+  const sales = path.match(
+    /^\/sales\/(invoices|estimates|quotations|sales-orders|sales-receipts|credit-memos|refunds|delivery)(?:\/|$)/,
+  )
+  if (sales) {
+    const slug = sales[1]!
+    const kind =
+      slug === 'invoices'
+        ? 'INVOICE'
+        : slug === 'estimates'
+          ? 'ESTIMATE'
+          : slug === 'quotations'
+            ? 'QUOTATION'
+            : slug === 'sales-orders'
+              ? 'SALES_ORDER'
+              : slug === 'sales-receipts'
+                ? 'SALES_RECEIPT'
+                : slug === 'credit-memos'
+                  ? 'CREDIT_MEMO'
+                  : slug === 'refunds'
+                    ? 'REFUND_RECEIPT'
+                    : 'DELIVERY'
+    return { family: 'sales', kind }
+  }
+  const purchases = path.match(
+    /^\/purchases\/(bills|expenses|vendor-credits|purchase-orders|purchase-requests|rfqs|delivery|purchase-receipts)(?:\/|$)/,
+  )
+  if (purchases) {
+    const slug = purchases[1]!
+    const kind =
+      slug === 'bills'
+        ? 'BILL'
+        : slug === 'expenses' || slug === 'purchase-receipts'
+          ? 'EXPENSE'
+          : slug === 'vendor-credits'
+            ? 'VENDOR_CREDIT'
+            : slug === 'purchase-orders'
+              ? 'PURCHASE_ORDER'
+              : slug === 'purchase-requests'
+                ? 'PURCHASE_REQUEST'
+                : slug === 'rfqs'
+                  ? 'RFQ'
+                  : 'DELIVERY'
+    return { family: 'purchases', kind }
+  }
+  if (path === '/items' || path.startsWith('/items/')) {
+    return { family: 'inventory', kind: 'products' }
+  }
+  if (path.startsWith('/inventory/stock')) {
+    return { family: 'inventory', kind: 'stock' }
+  }
+  if (path.startsWith('/inventory/lots')) {
+    return { family: 'inventory', kind: 'lots' }
+  }
+  if (path.startsWith('/inventory/expiry')) {
+    return { family: 'inventory', kind: 'expiry' }
+  }
+  if (path.startsWith('/inventory/routing')) {
+    return { family: 'inventory', kind: 'routing' }
+  }
+  if (path.startsWith('/inventory/asn')) {
+    return { family: 'inventory', kind: 'asn' }
+  }
+  if (path.startsWith('/inventory/adjustments')) {
+    return { family: 'inventory', kind: 'adjustments' }
+  }
+  if (path.startsWith('/inventory/builds')) {
+    return { family: 'inventory', kind: 'builds' }
+  }
+  if (path.startsWith('/inventory/work-orders')) {
+    return { family: 'inventory', kind: 'work-orders' }
+  }
+  if (path.startsWith('/inventory/mrp')) {
+    return { family: 'inventory', kind: 'mrp' }
+  }
+  if (path.startsWith('/inventory/bins')) {
+    return { family: 'inventory', kind: 'bins' }
+  }
+  if (path.startsWith('/stores/transfer') || path === '/stores/transfer') {
+    return { family: 'inventory', kind: 'transfers' }
+  }
+  if (path.startsWith('/stores/tickets')) {
+    return { family: 'stores', kind: 'tickets' }
+  }
+  if (path.startsWith('/accounting/budgets')) {
+    return { family: 'accounting', kind: 'budgets' }
+  }
+  if (path.startsWith('/accounting/fixed-assets')) {
+    return { family: 'accounting', kind: 'fixed-assets' }
+  }
+  if (path.startsWith('/accounting/equity') || path.startsWith('/accounting/equity-contribution')) {
+    return { family: 'accounting', kind: 'equity' }
+  }
+  if (path.startsWith('/accounting/hedges')) {
+    return { family: 'accounting', kind: 'fx-hedges' }
+  }
+  if (path.startsWith('/accounting/fx-revaluation')) {
+    return { family: 'accounting', kind: 'fx-revaluation' }
+  }
+  if (path.startsWith('/customers/pipeline')) {
+    return { family: 'customers', kind: 'pipeline' }
+  }
+  if (path.startsWith('/customers/tickets')) {
+    return { family: 'customers', kind: 'tickets' }
+  }
+  if (path === '/employees' || path.startsWith('/employees/directory')) {
+    return { family: 'employees', kind: 'directory' }
+  }
+  if (path.startsWith('/employees/leave')) {
+    return { family: 'employees', kind: 'leave' }
+  }
+  if (path.startsWith('/employees/attendance')) {
+    return { family: 'employees', kind: 'attendance' }
+  }
+  if (path.startsWith('/employees/recruitment')) {
+    return { family: 'employees', kind: 'recruitment' }
+  }
+  if (path.startsWith('/employees/training')) {
+    return { family: 'employees', kind: 'training' }
+  }
+  if (path.startsWith('/employees/contracts')) {
+    return { family: 'employees', kind: 'contracts' }
+  }
+  if (path.startsWith('/employees/payroll') || path.startsWith('/employees/payslips')) {
+    return { family: 'employees', kind: 'payroll' }
+  }
+  if (path.startsWith('/employees/policies') || path.startsWith('/employees/guide')) {
+    return { family: 'employees', kind: 'policies' }
+  }
+  return null
+}
+
+export function isModuleEnabled(flags: OrgFeatureFlags, moduleKey: string): boolean {
+  const flag = MODULE_KEY_TO_FLAG[moduleKey]
+  if (!flag) return true
+  return flags.grantedModules[flag] !== false && flags.modules[flag] !== false
+}
+
+/** True when the system owner has granted this app (whether or not the company left it on). */
+export function isModuleGranted(flags: OrgFeatureFlags, moduleKey: string): boolean {
+  const flag = MODULE_KEY_TO_FLAG[moduleKey]
+  if (!flag) return true
+  return flags.grantedModules[flag] !== false
+}
+
+/** Build a full modules map from checkboxes / JSON; missing keys stay on by default. */
+export function parseModulesSelection(raw: unknown): Record<ModuleFlag, boolean> {
+  const modules = { ...DEFAULT_FEATURE_FLAGS.modules }
+  if (!raw || typeof raw !== 'object') return modules
+  const data = raw as Record<string, unknown>
+  for (const key of MODULE_FLAGS) {
+    if (typeof data[key] === 'boolean') modules[key] = data[key]
+  }
+  return modules
+}
+
+/** At least one app must stay on — empty selection is not useful. */
+export function hasAnyModuleEnabled(modules: Record<ModuleFlag, boolean>): boolean {
+  return MODULE_FLAGS.some((key) => modules[key])
+}
+
+/** Merge module map into default feature flags (for signup approve / DB grants). */
+export function featureFlagsWithModules(
+  modules: Record<ModuleFlag, boolean>,
+): OrgFeatureFlags {
+  const next = { ...DEFAULT_FEATURE_FLAGS.modules, ...modules }
+  return {
+    ...structuredClone(DEFAULT_FEATURE_FLAGS),
+    grantedModules: { ...next },
+    modules: { ...next },
+  }
+}
+
+/**
+ * Grant one app on a company: both `grantedModules` and `modules` turn on.
+ * Idempotent when already granted and enabled.
+ */
+export function grantModuleOnFlags(
+  flags: OrgFeatureFlags,
+  module: ModuleFlag,
+): { flags: OrgFeatureFlags; changed: boolean } {
+  if (flags.grantedModules[module] && flags.modules[module]) {
+    return { flags, changed: false }
+  }
+  return {
+    changed: true,
+    flags: {
+      ...flags,
+      grantedModules: { ...flags.grantedModules, [module]: true },
+      modules: { ...flags.modules, [module]: true },
+    },
+  }
+}
+
+/**
+ * Company Apps & features save: only granted apps may be turned on; ungranted
+ * stay off. Grants themselves are never changed here.
+ */
+export function modulesClampedToGrants(
+  requested: Record<ModuleFlag, boolean>,
+  granted: Record<ModuleFlag, boolean>,
+): Record<ModuleFlag, boolean> {
+  const modules = { ...requested }
+  for (const key of MODULE_FLAGS) {
+    if (!granted[key]) modules[key] = false
+  }
+  return modules
+}
+
+export function modulesFromFormValues(
+  values: Record<string, unknown>,
+): Record<ModuleFlag, boolean> {
+  const modules = { ...DEFAULT_FEATURE_FLAGS.modules }
+  for (const key of MODULE_FLAGS) {
+    const formKey = MODULE_FORM_KEYS[key]
+    const raw = values[formKey]
+    modules[key] = raw === true || raw === 'true' || raw === 'on'
+  }
+  return modules
+}
+
+/** Payload keys Databases actions expect for company apps. */
+export function moduleActionFields(modules: Record<ModuleFlag, boolean>): Record<string, boolean> {
+  const fields: Record<string, boolean> = {}
+  for (const key of MODULE_FLAGS) {
+    fields[MODULE_FORM_KEYS[key]] = modules[key]
+  }
+  return fields
+}

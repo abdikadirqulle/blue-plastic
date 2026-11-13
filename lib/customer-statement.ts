@@ -1,0 +1,294 @@
+import { toCalendarDate, type CalendarDate } from '@/lib/date'
+import { Decimal, ZERO } from '@/lib/money'
+
+export type StatementKind =
+  | 'INVOICE'
+  | 'CREDIT_MEMO'
+  | 'PAYMENT'
+  | 'SALES_RECEIPT'
+  | 'REFUND_RECEIPT'
+  | 'EXPENSE'
+  | 'JOURNAL'
+  | 'ESTIMATE'
+  | 'QUOTATION'
+
+export type FilterableEntry = {
+  kind: StatementKind
+  openAmount: Decimal
+  dueDate: Date | null
+}
+
+/**
+ * How a customer statement is asked for.
+ *
+ * The first three papers are the same ones a vendor statement offers, and they
+ * lead the menu: the statement with every line, one row per document, and open
+ * one by one. Invoice by invoice, the invoice summary, and classic paper stay
+ * after those, and only on a customer statement. The type and the status narrow
+ * which rows are on that paper. The amount due stays the full balance either way.
+ */
+export const STATEMENT_VIEWS = ['detail', 'regular', 'arrow', 'invoices', 'summary', 'classic'] as const
+export const STATEMENT_TOTALS = ['line', 'cards', 'band', 'stack'] as const
+export const STATEMENT_TYPES = [
+  'all',
+  'invoice',
+  'payment',
+  'credit',
+  'receipt',
+  'refund',
+  'expense',
+  'journal',
+  'estimate',
+  'quotation',
+] as const
+export const STATEMENT_STATUSES = ['all', 'open', 'overdue', 'paid'] as const
+
+export type StatementView = (typeof STATEMENT_VIEWS)[number]
+export type StatementType = (typeof STATEMENT_TYPES)[number]
+export type StatementStatus = (typeof STATEMENT_STATUSES)[number]
+export type StatementTotals = (typeof STATEMENT_TOTALS)[number]
+
+export type StatementFilter = {
+  view: StatementView
+  type: StatementType
+  status: StatementStatus
+  totals: StatementTotals
+}
+
+export const STATEMENT_VIEW_LABELS: Record<StatementView, string> = {
+  invoices: 'Invoice by invoice',
+  summary: 'Invoice summary',
+  classic: 'Classic paper',
+  detail: 'Statement',
+  regular: 'Grouped — one row',
+  arrow: 'Open one by one',
+}
+
+export const STATEMENT_TOTALS_LABELS: Record<StatementTotals, string> = {
+  line: 'Last row',
+  cards: 'Four cards',
+  band: 'Total band',
+  stack: 'Stacked',
+}
+
+export const STATEMENT_TYPE_LABELS: Record<StatementType, string> = {
+  all: 'All types',
+  invoice: 'Invoice',
+  payment: 'Payment',
+  credit: 'Credit memo',
+  receipt: 'Sales receipt',
+  refund: 'Refund',
+  expense: 'Expense',
+  journal: 'Journal',
+  estimate: 'Estimate',
+  quotation: 'Quotation',
+}
+
+export const STATEMENT_STATUS_LABELS: Record<StatementStatus, string> = {
+  all: 'All',
+  open: 'Open',
+  overdue: 'Overdue',
+  paid: 'Paid',
+}
+
+const TYPE_KIND: Record<Exclude<StatementType, 'all'>, StatementKind> = {
+  invoice: 'INVOICE',
+  payment: 'PAYMENT',
+  credit: 'CREDIT_MEMO',
+  receipt: 'SALES_RECEIPT',
+  refund: 'REFUND_RECEIPT',
+  expense: 'EXPENSE',
+  journal: 'JOURNAL',
+  estimate: 'ESTIMATE',
+  quotation: 'QUOTATION',
+}
+
+const one = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value)
+
+export function readStatementFilter(
+  query: Record<string, string | string[] | undefined>,
+): StatementFilter {
+  const view = one(query.view)
+  const type = one(query.type)
+  const status = one(query.status)
+  const totals = one(query.totals)
+  return {
+    // Itemised "Statement" is the default so expenses, bills and invoices show
+    // qty / price / amount lines and open the document — not a bare journal row.
+    view: (STATEMENT_VIEWS as readonly string[]).includes(view ?? '') ? (view as StatementView) : 'detail',
+    type: (STATEMENT_TYPES as readonly string[]).includes(type ?? '')
+      ? (type as StatementType)
+      : 'all',
+    status: (STATEMENT_STATUSES as readonly string[]).includes(status ?? '')
+      ? (status as StatementStatus)
+      : 'all',
+    totals: (STATEMENT_TOTALS as readonly string[]).includes(totals ?? '')
+      ? (totals as StatementTotals)
+      : 'line',
+  }
+}
+
+export function statementIsFiltered(filter: StatementFilter): boolean {
+  return filter.type !== 'all' || filter.status !== 'all'
+}
+
+const TYPE_PLURAL: Record<Exclude<StatementType, 'all'>, string> = {
+  invoice: 'invoices',
+  payment: 'payments',
+  credit: 'credit memos',
+  receipt: 'sales receipts',
+  refund: 'refunds',
+  expense: 'expenses',
+  journal: 'journals',
+  estimate: 'estimates',
+  quotation: 'quotations',
+}
+
+/** A sentence for the paper, empty when every row is shown. */
+export function statementFilterCaption(filter: StatementFilter): string {
+  if (!statementIsFiltered(filter)) return ''
+  const type = filter.type === 'all' ? 'transactions' : TYPE_PLURAL[filter.type]
+  const lead = filter.status === 'all' ? type : `${STATEMENT_STATUS_LABELS[filter.status].toLowerCase()} ${type}`
+  return `Showing ${lead}. Amount due is still the full balance for these dates.`
+}
+
+const OPEN = '0.005'
+
+function isOpen(amount: Decimal): boolean {
+  return amount.greaterThan(OPEN)
+}
+
+/**
+ * Whether this row belongs on the statement the user asked for.
+ *
+ * "All types" is the statement of what they owe, so estimates stay off it
+ * until somebody asks for estimates. A type and a status both have to match.
+ */
+export function entryVisible(entry: FilterableEntry, filter: StatementFilter, asOf: CalendarDate): boolean {
+  if (
+    filter.type === 'all'
+      ? entry.kind === 'ESTIMATE' || entry.kind === 'QUOTATION'
+      : entry.kind !== TYPE_KIND[filter.type]
+  ) {
+    return false
+  }
+
+  if (filter.status === 'all') return true
+
+  if (filter.status === 'overdue') {
+    return (
+      entry.kind === 'INVOICE' &&
+      isOpen(entry.openAmount) &&
+      entry.dueDate !== null &&
+      toCalendarDate(entry.dueDate) < asOf
+    )
+  }
+
+  if (filter.status === 'open') {
+    if (entry.kind === 'JOURNAL') return true
+    if (entry.kind === 'INVOICE' || entry.kind === 'CREDIT_MEMO' || entry.kind === 'PAYMENT') {
+      return isOpen(entry.openAmount)
+    }
+    return false
+  }
+
+  // Paid: settled documents, every receipt of money, and customer-offset expenses.
+  if (entry.kind === 'JOURNAL' || entry.kind === 'ESTIMATE' || entry.kind === 'QUOTATION') return false
+  if (
+    entry.kind === 'PAYMENT' ||
+    entry.kind === 'SALES_RECEIPT' ||
+    entry.kind === 'REFUND_RECEIPT' ||
+    entry.kind === 'EXPENSE'
+  ) {
+    return true
+  }
+  return !isOpen(entry.openAmount)
+}
+
+export function visibleEntries<T extends FilterableEntry>(
+  entries: T[],
+  filter: StatementFilter,
+  asOf: CalendarDate,
+): T[] {
+  return entries.filter((entry) => entryVisible(entry, filter, asOf))
+}
+
+/**
+ * The invoices an "invoice by invoice" statement prints: every invoice in the
+ * period, in statement (date) order, still narrowed by the balance filter so
+ * "open" or "overdue" prints only what is owed. The type menu does not apply —
+ * the paper is invoices by definition.
+ */
+export function statementInvoices<T extends FilterableEntry>(
+  entries: T[],
+  filter: StatementFilter,
+  asOf: CalendarDate,
+): T[] {
+  return visibleEntries(entries, { ...filter, type: 'invoice' }, asOf)
+}
+
+export type StatementCarryEntry = {
+  id: string
+  kind?: string
+  charge: Decimal
+  credit: Decimal
+  openAmount: Decimal
+}
+
+/**
+ * Running balance on statement paper — same rule as the ledger service:
+ * charges raise what is owed; credits (payments, credit memos) lower it.
+ * Unapplied payments must move the column; they already credit AR in the books.
+ */
+export function forwardBalances(entries: StatementCarryEntry[], opening: Decimal) {
+  let running = new Decimal(opening)
+  const byId = new Map<string, Decimal>()
+  const accountAt: Record<string, { previous: string; current: string }> = {}
+  for (const entry of entries) {
+    const previous = running
+    const charge = new Decimal(entry.charge)
+    const credit = new Decimal(entry.credit)
+    if (!charge.isZero() || !credit.isZero()) {
+      running = running.plus(charge).minus(credit)
+    }
+    if (entry.kind === 'INVOICE' || entry.kind === 'BILL') {
+      accountAt[entry.id] = { previous: previous.toString(), current: running.toString() }
+    }
+    byId.set(entry.id, running)
+  }
+  return { byId, closing: running, accountAt }
+}
+
+/**
+ * Invoice-by-invoice paper: the Balance printed at the bottom of one invoice
+ * becomes Previous balance on the next. On each paper:
+ * Balance = Previous + Debit − Credit (payment / credit applied to that invoice).
+ */
+export function invoiceChainBalances(
+  documents: { id: string; total: string | number | Decimal; amountApplied?: string | number | Decimal }[],
+  opening: Decimal.Value = ZERO,
+) {
+  let running = new Decimal(opening)
+  const accountAt: Record<string, { previous: string; current: string }> = {}
+  for (const document of documents) {
+    const previous = running.toString()
+    const debit = new Decimal(document.total)
+    const credit = new Decimal(document.amountApplied ?? 0)
+    running = running.plus(debit).minus(credit)
+    accountAt[document.id] = { previous, current: running.toString() }
+  }
+  return { accountAt, closing: running }
+}
+
+/** Open invoice/bill amounts add; unapplied payment/credit remainders subtract. */
+export function signedOpen(entry: Pick<StatementCarryEntry, 'kind' | 'openAmount'>): Decimal {
+  const open = new Decimal(entry.openAmount ?? ZERO)
+  if (
+    entry.kind === 'PAYMENT' ||
+    entry.kind === 'CREDIT_MEMO' ||
+    entry.kind === 'VENDOR_CREDIT'
+  ) {
+    return open.negated()
+  }
+  return open
+}

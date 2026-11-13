@@ -1,10 +1,10 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
 
 import { PageHeader } from '@/components/data/page-header'
 import { ReceiveForm } from '@/components/purchases/receive-form'
+import { SalesPaperFrame } from '@/components/sales/paper-width'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -12,6 +12,7 @@ import { formatDate, toCalendarDate, today } from '@/lib/date'
 import { STATUS_LABELS, STATUS_VARIANTS } from '@/lib/sales-types'
 import { requireOrgContext } from '@/server/auth/context'
 import * as purchaseService from '@/server/services/purchase.service'
+import * as storeService from '@/server/services/store.service'
 
 export const metadata: Metadata = { title: 'Receive items' }
 
@@ -23,28 +24,41 @@ export const metadata: Metadata = { title: 'Receive items' }
  * turned up, checked line by line against what was ordered. The order screen is
  * for reading the order.
  */
-export default async function ReceiveOrderPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function ReceiveOrderPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>
+  searchParams: Promise<Record<string, string | string[] | undefined>>
+}) {
   const ctx = await requireOrgContext('bill:create')
   const { id } = await params
+  const query = await searchParams
+  const returnTo = typeof query.return === 'string' && query.return.startsWith('/') ? query.return : null
+  const preferredStoreId = typeof query.store === 'string' ? query.store : null
 
-  const order = await purchaseService.receivableOrder(ctx, id).catch(() => null)
+  const [order, stores] = await Promise.all([
+    purchaseService.receivableOrder(ctx, id).catch(() => null),
+    storeService.columns(ctx),
+  ])
   if (!order) notFound()
 
-  const backHref = `/purchases/purchase-orders/${order.id}`
-
   return (
-    <>
-      <Link href={backHref} className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}>
-        <ArrowLeftIcon /> {order.number}
-      </Link>
-
+    <SalesPaperFrame>
       <PageHeader
         title={`Receive items · ${order.number}`}
-        description={`Ordered from ${order.vendor.displayName} on ${formatDate(toCalendarDate(order.date))}. Enter what arrived; a bill is raised for exactly that, and the order keeps count of the rest.`}
+        className="mb-2 pb-2"
         actions={
-          <Badge variant={STATUS_VARIANTS[order.status] ?? 'secondary'}>
-            {STATUS_LABELS[order.status] ?? order.status}
-          </Badge>
+          <>
+            {returnTo ? (
+              <Link href={returnTo} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                Back
+              </Link>
+            ) : null}
+            <Badge variant={STATUS_VARIANTS[order.status] ?? 'secondary'}>
+              {STATUS_LABELS[order.status] ?? order.status}
+            </Badge>
+          </>
         }
       />
 
@@ -80,13 +94,15 @@ export default async function ReceiveOrderPage({ params }: { params: Promise<{ i
           <ReceiveForm
             orderId={order.id}
             orderNumber={order.number}
-            vendorName={order.vendor.displayName}
+            vendorName={order.vendor?.displayName ?? '—'}
             lines={order.lines}
             today={today(ctx.organization.timeZone)}
             currency={ctx.organization.baseCurrency}
+            stores={stores}
+            preferredStoreId={preferredStoreId}
           />
         </>
       )}
-    </>
+    </SalesPaperFrame>
   )
 }

@@ -1,6 +1,7 @@
 'use client'
 
 import * as React from 'react'
+import type { AccountType } from '@prisma/client'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
@@ -19,7 +20,14 @@ const ItemDialog = React.lazy(() =>
   import('@/components/master-data/item-dialog').then((m) => ({ default: m.ItemDialog })),
 )
 
-export type PickerOption = { id: string; label: string; hint?: string; group?: string }
+export type PickerOption = {
+  id: string
+  label: string
+  hint?: string
+  group?: string
+  /** When the option is a ledger account, show its statement-type mark. */
+  accountType?: AccountType
+}
 
 export type CreatableKind = 'customer' | 'vendor' | 'item'
 
@@ -95,19 +103,31 @@ export function EntityPicker({
   const [pendingName, setPendingName] = React.useState<string | null>(null)
   const [dialog, setDialog] = React.useState<DialogData | null>(null)
 
+  const alphabetical =
+    kind === 'item' ||
+    options.some((option) => option.group != null && option.accountType == null)
+
   const merged: ComboboxOption[] = React.useMemo(
-    () =>
-      [...extra, ...options]
+    () => {
+      const unique = [...extra, ...options]
         // A newly created record appears here at once; after the refresh the
         // server list carries it too, and the duplicate has to go.
         .filter((option, index, all) => all.findIndex((other) => other.id === option.id) === index)
-        .map((option) => ({
-          value: option.id,
-          label: option.label,
-          hint: option.hint,
-          group: option.group,
-        })),
-    [options, extra],
+      const ordered = alphabetical
+        ? [...unique].sort((a, b) =>
+            a.label.localeCompare(b.label, undefined, { sensitivity: 'base', numeric: true }),
+          )
+        : unique
+      return ordered.map((option) => ({
+        value: option.id,
+        label: option.label,
+        hint: option.hint,
+        // One A–Z list. Keeping type headings would split names that sort together.
+        group: alphabetical ? undefined : option.group,
+        accountType: option.accountType,
+      }))
+    },
+    [options, extra, alphabetical],
   )
 
   async function openCreate(label: string) {

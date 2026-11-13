@@ -10,6 +10,8 @@ import {
   applyVendorCreditSchema,
   billPaymentSchema,
   convertOrderSchema,
+  convertPurchaseDocumentSchema,
+  markBillableSchema,
   purchaseDocumentSchema,
   receiveOrderSchema,
 } from '@/lib/validation/purchases'
@@ -17,19 +19,54 @@ import { requireOrgContext } from '@/server/auth/context'
 import { action } from '@/server/action'
 import * as billPaymentService from '@/server/services/bill-payment.service'
 import * as purchaseService from '@/server/services/purchase.service'
+import { assertDocumentDeleteAllowed } from '@/server/feature-guards'
 
 function revalidatePurchases() {
-  for (const slug of ['bills', 'expenses', 'vendor-credits', 'purchase-orders']) {
+  for (const slug of [
+    'bills',
+    'expenses',
+    'vendor-credits',
+    'purchase-orders',
+    'purchase-requests',
+    'rfqs',
+  ]) {
     revalidatePath(`/purchases/${slug}`)
   }
   revalidatePath('/bill-payments')
   revalidatePath('/vendors')
+  revalidatePath('/customers')
   revalidatePath('/reports/ap-aging')
+  revalidatePath('/reports/ar-aging')
   revalidatePath('/reports/trial-balance')
   revalidatePath('/accounts')
 }
 
-const documentType = z.enum(['BILL', 'EXPENSE', 'VENDOR_CREDIT', 'PURCHASE_ORDER'])
+const documentType = z.enum([
+  'BILL',
+  'EXPENSE',
+  'VENDOR_CREDIT',
+  'PURCHASE_ORDER',
+  'PURCHASE_REQUEST',
+  'RFQ',
+])
+
+const documentSearch = z.object({
+  type: documentType,
+  number: z.string().trim().max(40).optional(),
+  date: z.string().trim().max(10).optional(),
+  amount: z.string().trim().max(24).optional(),
+  amountOp: z.enum(['eq', 'gt', 'lt', 'gte', 'lte']).optional(),
+})
+
+export const findPurchaseDocuments = action
+  .requires('bill:read')
+  .input(documentSearch)
+  .handler((ctx, input) =>
+    purchaseService.findDocuments(ctx, {
+      ...input,
+      type: input.type as PurchaseDocumentType,
+    }),
+  )
 
 export const createPurchase = action
   .requires('bill:create')
@@ -56,9 +93,10 @@ export const deletePurchase = action
   .requires('bill:void')
   .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
+    assertDocumentDeleteAllowed(ctx)
     const document = await purchaseService.remove(ctx, input.id, input.reason)
     revalidatePurchases()
-    revalidatePath('/inventory')
+    revalidatePath('/inventory/stock')
     revalidatePath('/reports')
     return document
   })
@@ -72,19 +110,67 @@ export const convertOrder = action
     return bill
   })
 
+/** Phase 23: post a bill that was held for PO/receive variance. */
+export const approveMatchVariance = action
+  .requires('bill:approve')
+  .input(z.object({ id: cuid }))
+  .handler(async (ctx, input) => {
+    const journal = await purchaseService.approveMatchVariance(ctx, input.id)
+    revalidatePurchases()
+    revalidatePath('/reports')
+    revalidatePath('/inventory/stock')
+    return journal
+  })
+
+/** Write supplier rates from the RFQ Excel back onto the document. */
+export const importRfqPrices = action
+  .requires('bill:update')
+  .input(z.object({ id: cuid, workbook: z.string().min(16) }))
+  .handler(async (ctx, input) => {
+    const result = await purchaseService.applyRfqQuotedPrices(ctx, input.id, input.workbook)
+    revalidatePurchases()
+    revalidatePath(`/purchases/rfqs/${input.id}`)
+    return result
+  })
+
+/** PR → RFQ or RFQ → purchase order. */
+export const convertPurchaseDocument = action
+  .requires('bill:create')
+  .input(convertPurchaseDocumentSchema)
+  .handler(async (ctx, input) => {
+    const document = await purchaseService.convertPurchaseDocument(
+      ctx,
+      input.id,
+      input.date,
+      input.target,
+      input.vendorId,
+    )
+    revalidatePurchases()
+    return document
+  })
+
 /**
  * Book a delivery in against a purchase order.
  *
  * Guarded by `bill:create` rather than a receiving permission of its own,
  * because that is precisely what it does: it raises a bill for what arrived.
  */
+export const markBillable = action
+  .requires('bill:update')
+  .input(markBillableSchema)
+  .handler(async (ctx, input) => {
+    const result = await purchaseService.markLinesBillable(ctx, input)
+    revalidatePurchases()
+    return result
+  })
+
 export const receiveOrder = action
   .requires('bill:create')
   .input(receiveOrderSchema)
   .handler(async (ctx, input) => {
     const bill = await purchaseService.receiveOrder(ctx, input)
     revalidatePurchases()
-    revalidatePath('/inventory')
+    revalidatePath('/inventory/stock')
     revalidatePath(`/purchases/purchase-orders/${input.orderId}`)
     return bill
   })
@@ -111,6 +197,7 @@ export const deleteBillPayment = action
   .requires('expense:void')
   .input(deleteRecordSchema)
   .handler(async (ctx, input) => {
+    assertDocumentDeleteAllowed(ctx)
     const payment = await billPaymentService.remove(ctx, input.id, input.reason)
     revalidatePurchases()
     return payment

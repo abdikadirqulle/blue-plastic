@@ -1,41 +1,232 @@
 import 'server-only'
 import type { Prisma } from '@prisma/client'
 
+import { uniqueReasons } from '@/lib/delete-reasons'
+import {
+  isHiddenFromTrash,
+  presentTrashEntry,
+  trashOrigin,
+  trashRestoreCapability,
+} from '@/lib/trash-log'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { OrgContext } from '@/server/auth/context'
 import { db } from '@/server/db'
 
+const TRAIL_ACTIONS = ['CREATE', 'UPDATE', 'POST', 'DELETE', 'ARCHIVE', 'RESTORE', 'REVERSE'] as const
+
+export type TrailEvent = {
+  name: string
+  action: string
+  at: Date
+}
+
+/** Who first recorded a row, and who last changed it when that is a later event. */
+export type Trail = {
+  entered: TrailEvent | null
+  changed: TrailEvent | null
+}
+
+/**
+ * The people behind a set of records, read from the audit log.
+ * First poster + latest change only (two DISTINCT ON queries) — list screens
+ * never need the full history payload.
+ */
+export async function trailsFor(ctx: OrgContext, entityIds: string[]): Promise<Map<string, Trail>> {
+  const ids = [...new Set(entityIds.filter(Boolean))]
+  const map = new Map<string, Trail>()
+  for (const id of ids) map.set(id, { entered: null, changed: null })
+  if (ids.length === 0) return map
+
+  const actions = [...TRAIL_ACTIONS]
+  const [firstRows, lastRows] = await Promise.all([
+    db.$queryRaw<
+      { entityId: string; action: string; at: Date; name: string | null }[]
+    >`
+      SELECT DISTINCT ON (a."entityId")
+             a."entityId" AS "entityId",
+             a.action::text AS action,
+             a.at AS at,
+             u.name AS name
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a."actorId"
+       WHERE a."orgId" = ${ctx.orgId}
+         AND a."entityId" = ANY(${ids})
+         AND a.action::text = ANY(${actions})
+       ORDER BY a."entityId", a.at ASC
+    `,
+    db.$queryRaw<
+      { entityId: string; action: string; at: Date; name: string | null }[]
+    >`
+      SELECT DISTINCT ON (a."entityId")
+             a."entityId" AS "entityId",
+             a.action::text AS action,
+             a.at AS at,
+             u.name AS name
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a."actorId"
+       WHERE a."orgId" = ${ctx.orgId}
+         AND a."entityId" = ANY(${ids})
+         AND a.action::text = ANY(${actions})
+       ORDER BY a."entityId", a.at DESC
+    `,
+  ])
+
+  for (const row of firstRows) {
+    const current = map.get(row.entityId) ?? { entered: null, changed: null }
+    current.entered = {
+      name: row.name ?? 'System',
+      action: row.action,
+      at: row.at,
+    }
+    map.set(row.entityId, current)
+  }
+
+  for (const row of lastRows) {
+    const current = map.get(row.entityId) ?? { entered: null, changed: null }
+    current.changed = {
+      name: row.name ?? 'System',
+      action: row.action,
+      at: row.at,
+    }
+    map.set(row.entityId, current)
+  }
+
+  for (const trail of map.values()) {
+    if (
+      trail.entered &&
+      trail.changed &&
+      trail.entered.at.getTime() === trail.changed.at.getTime() &&
+      trail.entered.action === trail.changed.action
+    ) {
+      trail.changed = null
+    }
+  }
+
+  return map
+}
+
+export async function trailFor(ctx: OrgContext, entityId: string): Promise<Trail> {
+  const map = await trailsFor(ctx, [entityId])
+  return map.get(entityId) ?? { entered: null, changed: null }
+}
+
+/** Every audit event for one record — newest last, for the document history panel. */
+export async function historyFor(ctx: OrgContext, entityId: string): Promise<TrailEvent[]> {
+  if (!entityId) return []
+  const rows = await db.auditLog.findMany({
+    where: {
+      orgId: ctx.orgId,
+      entityId,
+      action: { in: [...TRAIL_ACTIONS] },
+    },
+    select: {
+      action: true,
+      at: true,
+      actor: { select: { name: true } },
+    },
+    orderBy: { at: 'asc' },
+  })
+  return rows.map((row) => ({
+    name: row.actor?.name ?? 'System',
+    action: row.action,
+    at: row.at,
+  }))
+}
+
+/**
+ * Trash: every deletion, and nothing else.
+ *
+ * The working books no longer contain these records. This list is the log of
+ * the fact that they were deleted — who, what, and why — with no id and no
+ * path back to a page that would open them.
+ */
 export async function list(ctx: OrgContext, query: ListQuery) {
+  const q = query.q?.trim()
+  const needle = q ? [q, q.toUpperCase()].filter((value, index, all) => all.indexOf(value) === index) : []
+
   const where: Prisma.AuditLogWhereInput = {
     orgId: ctx.orgId,
-    ...(query.q
+    action: 'DELETE',
+    ...(needle.length
       ? {
-          OR: [
-            { entity: { contains: query.q, mode: 'insensitive' } },
-            { actor: { name: { contains: query.q, mode: 'insensitive' } } },
-            { actor: { email: { contains: query.q, mode: 'insensitive' } } },
-          ],
+          OR: needle.flatMap((value) => [
+            { actor: { name: { contains: value, mode: 'insensitive' as const } } },
+            { actor: { email: { contains: value, mode: 'insensitive' as const } } },
+            { entity: { contains: value, mode: 'insensitive' as const } },
+            { before: { path: ['number'], string_contains: value } },
+            { before: { path: ['displayName'], string_contains: value } },
+            { before: { path: ['name'], string_contains: value } },
+            { before: { path: ['email'], string_contains: value } },
+            { before: { path: ['sku'], string_contains: value } },
+            { before: { path: ['entries'], array_contains: value } },
+            { after: { path: ['reason'], string_contains: value } },
+          ]),
         }
       : {}),
   }
 
-  const [rows, total] = await Promise.all([
-    db.auditLog.findMany({
-      where,
-      select: {
-        id: true,
-        entity: true,
-        entityId: true,
-        action: true,
-        at: true,
-        ipAddress: true,
-        actor: { select: { id: true, name: true, email: true } },
-      },
-      orderBy: { at: 'desc' },
-      ...paginate(query),
-    }),
-    db.auditLog.count({ where }),
-  ])
+  // Load then drop restored/cleared in memory — Prisma JSON NOT-equals excludes
+  // rows whose `after` object simply lacks those keys (SQL NULL).
+  const rows = await db.auditLog.findMany({
+    where,
+    select: {
+      id: true,
+      entity: true,
+      at: true,
+      before: true,
+      after: true,
+      actor: { select: { name: true, email: true } },
+    },
+    orderBy: { at: 'desc' },
+  })
 
-  return paged(rows, total, query)
+  const visible = rows.filter((row) => !isHiddenFromTrash(row.after))
+  const { skip, take } = paginate(query)
+  const page = visible.slice(skip, skip + take)
+
+  return paged(
+    page.map((row) => {
+      const entry = presentTrashEntry(row)
+      const origin = trashOrigin(row.entity, row.before)
+      const restore = trashRestoreCapability(row.entity)
+      return {
+        ...entry,
+        originLabel: origin?.label ?? null,
+        originHref: origin?.href ?? null,
+        canRestore: restore.canRestore,
+        cannotRestoreReason: restore.cannotRestoreReason,
+      }
+    }),
+    visible.length,
+    query,
+  )
+}
+
+/**
+ * Distinct delete reasons recently written in this org, newest first.
+ * Used to suggest prior wording when someone deletes again.
+ */
+export async function listDeleteReasons(ctx: OrgContext, limit = 24): Promise<string[]> {
+  const rows = await db.auditLog.findMany({
+    where: { orgId: ctx.orgId, action: 'DELETE' },
+    select: { after: true, at: true },
+    orderBy: { at: 'desc' },
+    take: 200,
+  })
+
+  const reasons: string[] = []
+  for (const row of rows) {
+    if (isHiddenFromTrash(row.after)) continue
+    const entry = presentTrashEntry({
+      id: 'x',
+      entity: 'Item',
+      at: row.at,
+      before: null,
+      after: row.after,
+      actor: null,
+    })
+    if (entry.reason) reasons.push(entry.reason)
+  }
+
+  return uniqueReasons(reasons).slice(0, limit)
 }

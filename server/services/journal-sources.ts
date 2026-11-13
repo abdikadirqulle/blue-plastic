@@ -34,6 +34,8 @@ const key = (sourceType: string, sourceId: string) => `${sourceType}:${sourceId}
 const SALES_SLUG: Record<string, string> = {
   INVOICE: 'invoices',
   ESTIMATE: 'estimates',
+  QUOTATION: 'quotations',
+  SALES_ORDER: 'sales-orders',
   SALES_RECEIPT: 'sales-receipts',
   CREDIT_MEMO: 'credit-memos',
   REFUND_RECEIPT: 'refunds',
@@ -44,6 +46,8 @@ const PURCHASE_SLUG: Record<string, string> = {
   EXPENSE: 'expenses',
   VENDOR_CREDIT: 'vendor-credits',
   PURCHASE_ORDER: 'purchase-orders',
+  PURCHASE_REQUEST: 'purchase-requests',
+  RFQ: 'rfqs',
 }
 
 const SALES_SOURCES: JournalSourceType[] = [
@@ -75,7 +79,11 @@ export async function resolveSources(
   const transferIds = idsFor(['TRANSFER'])
   const depositIds = idsFor(['DEPOSIT'])
   const adjustmentIds = idsFor(['INVENTORY_ADJUSTMENT'])
+  const buildIds = idsFor(['ASSEMBLY_BUILD'])
   const openingIds = idsFor(['OPENING_BALANCE'])
+  const posCashMoveIds = idsFor(['POS_CASH_MOVE'])
+  const posSessionCloseIds = idsFor(['POS_SESSION_CLOSE'])
+  const posTipIds = idsFor(['POS_TIP'])
 
   const [
     salesDocuments,
@@ -85,8 +93,14 @@ export async function resolveSources(
     transfers,
     deposits,
     adjustments,
+    builds,
     openingAccounts,
     openingItems,
+    openingCustomers,
+    openingVendors,
+    posCashMoves,
+    posSessionCloses,
+    posTips,
   ] = await Promise.all([
     salesIds.length
       ? db.salesDocument.findMany({
@@ -103,6 +117,7 @@ export async function resolveSources(
           select: {
             id: true, type: true, number: true,
             vendor: { select: { id: true, displayName: true } },
+            offsetCustomer: { select: { id: true, displayName: true } },
           },
         })
       : [],
@@ -136,6 +151,12 @@ export async function resolveSources(
           select: { id: true, number: true },
         })
       : [],
+    buildIds.length
+      ? db.assemblyBuild.findMany({
+          where: { orgId, id: { in: buildIds } },
+          select: { id: true, number: true },
+        })
+      : [],
     // An opening balance points at whatever it opened: an account, or an item's
     // opening stock. Both are worth naming.
     openingIds.length
@@ -148,6 +169,46 @@ export async function resolveSources(
       ? db.item.findMany({
           where: { orgId, id: { in: openingIds } },
           select: { id: true, name: true, sku: true },
+        })
+      : [],
+    openingIds.length
+      ? db.customer.findMany({
+          where: { orgId, id: { in: openingIds } },
+          select: { id: true, displayName: true },
+        })
+      : [],
+    openingIds.length
+      ? db.vendor.findMany({
+          where: { orgId, id: { in: openingIds } },
+          select: { id: true, displayName: true },
+        })
+      : [],
+    posCashMoveIds.length
+      ? db.posCashMovement.findMany({
+          where: { orgId, id: { in: posCashMoveIds } },
+          select: {
+            id: true,
+            kind: true,
+            session: { select: { register: { select: { name: true } } } },
+          },
+        })
+      : [],
+    posSessionCloseIds.length
+      ? db.posSession.findMany({
+          where: { orgId, id: { in: posSessionCloseIds } },
+          select: { id: true, register: { select: { name: true } } },
+        })
+      : [],
+    // Tip journals point at the POS order id.
+    posTipIds.length
+      ? db.posOrder.findMany({
+          where: { orgId, id: { in: posTipIds } },
+          select: {
+            id: true,
+            tipAmount: true,
+            register: { select: { name: true } },
+            salesDocument: { select: { id: true, number: true } },
+          },
         })
       : [],
   ])
@@ -164,23 +225,26 @@ export async function resolveSources(
 
   for (const document of purchaseDocuments) {
     const slug = PURCHASE_SLUG[document.type] ?? 'bills'
+    const offset = document.offsetCustomer
     resolved.set(key(document.type, document.id), {
       number: document.number,
       href: `/purchases/${slug}/${document.id}`,
-      partyName: document.vendor.displayName,
-      partyHref: `/vendors/${document.vendor.id}`,
+      // Customer-settled expenses belong on the customer, not the shadow vendor.
+      partyName: offset?.displayName ?? document.vendor?.displayName ?? null,
+      partyHref: offset
+        ? `/customers?id=${offset.id}`
+        : document.vendor
+          ? `/vendors/${document.vendor.id}`
+          : null,
     })
   }
 
   for (const payment of customerPayments) {
     resolved.set(key('CUSTOMER_PAYMENT', payment.id), {
       number: payment.number,
-      // The payments list, filtered to this one. There is no payment page of its
-      // own, and a link to an unfiltered list of two hundred rows is not a
-      // drill-down — it is a place to start looking again.
-      href: `/payments?q=${encodeURIComponent(payment.number)}`,
+      href: `/payments/${payment.id}`,
       partyName: payment.customer.displayName,
-      partyHref: `/customers/${payment.customer.id}`,
+      partyHref: `/customers?id=${payment.customer.id}`,
     })
   }
 
@@ -214,26 +278,84 @@ export async function resolveSources(
   for (const adjustment of adjustments) {
     resolved.set(key('INVENTORY_ADJUSTMENT', adjustment.id), {
       number: adjustment.number,
-      href: '/inventory#adjustments',
+      href: `/inventory/adjustments/${adjustment.id}`,
       partyName: null,
       partyHref: null,
     })
   }
 
-  for (const account of openingAccounts) {
-    resolved.set(key('OPENING_BALANCE', account.id), {
-      number: account.code,
-      href: `/accounts/${account.id}`,
-      partyName: account.name,
+  for (const build of builds) {
+    resolved.set(key('ASSEMBLY_BUILD', build.id), {
+      number: build.number,
+      href: '/inventory/builds/new',
+      partyName: null,
       partyHref: null,
     })
   }
 
+  for (const move of posCashMoves) {
+    resolved.set(key('POS_CASH_MOVE', move.id), {
+      number: move.kind === 'IN' ? 'Cash in' : 'Cash out',
+      href: '/pos/sessions',
+      partyName: move.session.register.name,
+      partyHref: null,
+    })
+  }
+
+  for (const session of posSessionCloses) {
+    resolved.set(key('POS_SESSION_CLOSE', session.id), {
+      number: 'Close',
+      href: '/pos/sessions',
+      partyName: session.register.name,
+      partyHref: null,
+    })
+  }
+
+  for (const tip of posTips) {
+    resolved.set(key('POS_TIP', tip.id), {
+      number: tip.salesDocument.number,
+      href: `/sales/sales-receipts/${tip.salesDocument.id}`,
+      partyName: tip.register.name,
+      partyHref: null,
+    })
+  }
+
+  for (const customer of openingCustomers) {
+    resolved.set(key('OPENING_BALANCE', customer.id), {
+      number: null,
+      href: `/customers?id=${customer.id}`,
+      partyName: customer.displayName,
+      partyHref: `/customers?id=${customer.id}`,
+    })
+  }
+
+  for (const vendor of openingVendors) {
+    resolved.set(key('OPENING_BALANCE', vendor.id), {
+      number: null,
+      href: `/vendors?id=${vendor.id}`,
+      partyName: vendor.displayName,
+      partyHref: `/vendors?id=${vendor.id}`,
+    })
+  }
+
   for (const item of openingItems) {
-    resolved.set(key('OPENING_BALANCE', item.id), {
+    const id = key('OPENING_BALANCE', item.id)
+    if (resolved.has(id)) continue
+    resolved.set(id, {
       number: item.sku,
       href: `/inventory/${item.id}`,
       partyName: item.name,
+      partyHref: `/inventory/${item.id}`,
+    })
+  }
+
+  for (const account of openingAccounts) {
+    const id = key('OPENING_BALANCE', account.id)
+    if (resolved.has(id)) continue
+    resolved.set(id, {
+      number: account.code,
+      href: `/accounts/${account.id}`,
+      partyName: null,
       partyHref: null,
     })
   }

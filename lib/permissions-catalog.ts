@@ -1,0 +1,450 @@
+/**
+ * Permission catalog for the organisation — isomorphic so the invite/edit UI
+ * can show every module, while the server matrix in `server/auth/permissions.ts`
+ * remains the authority for role templates and enforcement.
+ *
+ * Pattern matches international ERP access control: grant by capability
+ * (`invoice:create`), never by screen name.
+ */
+
+export const PERMISSIONS = [
+  // Organisation and people
+  'org:read',
+  'org:update',
+  'user:read',
+  'user:invite',
+  'user:update',
+  'user:remove',
+  'audit:read',
+
+  // Chart of accounts and the ledger
+  'account:read',
+  'account:create',
+  'account:update',
+  'account:archive',
+  'account:delete',
+  'journal:read',
+  'journal:create',
+  'journal:post',
+  'journal:approve',
+  'journal:reverse',
+  'period:read',
+  'period:close',
+  'period:reopen',
+
+  // Master data
+  'customer:read',
+  'customer:create',
+  'customer:update',
+  'customer:archive',
+  'customer:delete',
+  'customer:approve',
+  'vendor:read',
+  'vendor:create',
+  'vendor:update',
+  'vendor:archive',
+  'vendor:delete',
+  'vendor:approve',
+  'item:read',
+  'item:create',
+  'item:update',
+  'item:archive',
+  'item:delete',
+  'tax:read',
+  'tax:manage',
+
+  // Point of sale
+  'pos:read',
+  'pos:sell',
+  'pos:manage',
+
+  // Sales
+  'invoice:read',
+  'invoice:create',
+  'invoice:update',
+  'invoice:void',
+  'invoice:send',
+  'invoice:approve',
+  'payment:read',
+  'payment:create',
+  'payment:update',
+  'payment:void',
+  'payment:approve',
+
+  // Projects (customer job folders)
+  'project:read',
+  'project:create',
+  'project:update',
+
+  // Purchases
+  'bill:read',
+  'bill:create',
+  'bill:update',
+  'bill:void',
+  'bill:approve',
+  'expense:read',
+  'expense:create',
+  'expense:update',
+  'expense:void',
+  'expense:approve',
+
+  // Banking
+  'bank:read',
+  'bank:transact',
+  'bank:reconcile',
+  'bank:import',
+  'bank:approve',
+
+  // Inventory / stores
+  'inventory:read',
+  'inventory:adjust',
+  'inventory:approve',
+
+  // Reporting
+  'report:read',
+  'report:overview',
+  'report:export',
+
+  // Calendar — meetings, appointments, reminders
+  'calendar:read',
+  'calendar:create',
+  'calendar:update',
+  'calendar:delete',
+
+  // To-do — personal / team checklists (not project board tasks)
+  'todo:read',
+  'todo:create',
+  'todo:update',
+  'todo:delete',
+
+  // Documents — company file library (not sales/purchase documents)
+  'docs:read',
+  'docs:create',
+  'docs:update',
+  'docs:delete',
+
+  // Knowledge — internal wiki articles
+  'knowledge:read',
+  'knowledge:create',
+  'knowledge:update',
+  'knowledge:delete',
+
+  // Employees — HR directory (not login/access; that is user:*)
+  'hr:read',
+  'hr:create',
+  'hr:update',
+  'hr:delete',
+  'hr:leave',
+  'hr:attendance',
+  'hr:payroll',
+
+  // Customer portal — portal:read is CUSTOMER-only; portal:manage is staff.
+  'portal:read',
+  'portal:manage',
+] as const
+
+export type Permission = (typeof PERMISSIONS)[number]
+
+/** Staff invite / edit matrix — customers never receive portal:read this way. */
+export const STAFF_PERMISSIONS = PERMISSIONS.filter((p) => p !== 'portal:read') as readonly Permission[]
+
+export function isPermission(value: string): value is Permission {
+  return (PERMISSIONS as readonly string[]).includes(value)
+}
+
+export function isStaffPermission(value: string): value is Permission {
+  return (STAFF_PERMISSIONS as readonly string[]).includes(value)
+}
+
+export type PermissionGroup = {
+  id: string
+  label: string
+  description: string
+  permissions: { key: Permission; label: string; hint?: string }[]
+}
+
+/**
+ * Access matrix grouped like the home Apps launcher — one section per app so
+ * inviting a user maps directly to what they will see on the dashboard.
+ */
+export const PERMISSION_GROUPS: PermissionGroup[] = [
+  {
+    id: 'pos',
+    label: 'Point of Sale',
+    description: 'Sell at the till — registers and checkout.',
+    permissions: [
+      { key: 'pos:read', label: 'Open POS and view registers' },
+      { key: 'pos:sell', label: 'Ring up sales at the till' },
+      { key: 'pos:manage', label: 'Configure payment methods and counters' },
+    ],
+  },
+  {
+    id: 'sales',
+    label: 'Sales',
+    description: 'Invoices, quotations, receipts, and credit memos.',
+    permissions: [
+      { key: 'invoice:read', label: 'View sales documents' },
+      { key: 'invoice:create', label: 'Create sales documents' },
+      { key: 'invoice:update', label: 'Edit sales documents' },
+      { key: 'invoice:void', label: 'Void / delete sales documents' },
+      { key: 'invoice:send', label: 'Email documents (invoices, POs, statements)' },
+      {
+        key: 'invoice:approve',
+        label: 'Approve sales documents',
+        hint: 'Maker-checker: post invoices and receipts waiting in Approvals',
+      },
+    ],
+  },
+  {
+    id: 'projects',
+    label: 'Projects',
+    description: 'Customer job folders — estimates, orders, and invoices for a site.',
+    permissions: [
+      { key: 'project:read', label: 'View projects' },
+      { key: 'project:create', label: 'Create projects' },
+      { key: 'project:update', label: 'Edit projects and status' },
+    ],
+  },
+  {
+    id: 'customers',
+    label: 'Customers',
+    description: 'Who you sell to — customer list and profiles.',
+    permissions: [
+      { key: 'customer:read', label: 'View customers' },
+      { key: 'customer:create', label: 'Create customers' },
+      { key: 'customer:update', label: 'Edit customers' },
+      { key: 'customer:archive', label: 'Archive customers' },
+      {
+        key: 'customer:delete',
+        label: 'Delete / merge customers',
+        hint: 'Only the owner has this by default — grant it here for other users',
+      },
+      { key: 'customer:approve', label: 'Approve new customers' },
+      {
+        key: 'portal:manage',
+        label: 'Manage customer portal',
+        hint: 'Invite customers to the view-only portal (also needs the company portal switch on)',
+      },
+    ],
+  },
+  {
+    id: 'purchases',
+    label: 'Purchases',
+    description: 'Bills, purchase orders, and receiving goods.',
+    permissions: [
+      { key: 'bill:read', label: 'View bills & purchase orders' },
+      { key: 'bill:create', label: 'Create bills & receive goods' },
+      { key: 'bill:update', label: 'Edit bills & purchase orders' },
+      { key: 'bill:void', label: 'Void bills & purchase orders' },
+      { key: 'bill:approve', label: 'Approve bills & purchase documents' },
+      { key: 'expense:approve', label: 'Approve expenses / purchase receipts' },
+    ],
+  },
+  {
+    id: 'vendors',
+    label: 'Vendors',
+    description: 'Who you buy from — vendor list and profiles.',
+    permissions: [
+      { key: 'vendor:read', label: 'View vendors' },
+      { key: 'vendor:create', label: 'Create vendors' },
+      { key: 'vendor:update', label: 'Edit vendors' },
+      { key: 'vendor:archive', label: 'Archive vendors' },
+      {
+        key: 'vendor:delete',
+        label: 'Delete / merge vendors',
+        hint: 'Only the owner has this by default — grant it here for other users',
+      },
+      { key: 'vendor:approve', label: 'Approve new vendors' },
+    ],
+  },
+  {
+    id: 'banking',
+    label: 'Banking',
+    description: 'Bank accounts, transfers, deposits, and reconciliation.',
+    permissions: [
+      { key: 'bank:read', label: 'View bank accounts' },
+      { key: 'bank:transact', label: 'Transfers & deposits' },
+      { key: 'bank:import', label: 'Import bank statements' },
+      { key: 'bank:reconcile', label: 'Reconcile bank accounts' },
+      { key: 'bank:approve', label: 'Approve transfers & deposits' },
+    ],
+  },
+  {
+    id: 'payments',
+    label: 'Payments',
+    description: 'Money received from customers.',
+    permissions: [
+      { key: 'payment:read', label: 'View customer payments' },
+      { key: 'payment:create', label: 'Record customer payments' },
+      { key: 'payment:update', label: 'Edit customer payments' },
+      { key: 'payment:void', label: 'Void customer payments' },
+      { key: 'payment:approve', label: 'Approve customer payments' },
+    ],
+  },
+  {
+    id: 'inventory',
+    label: 'Inventory',
+    description: 'Products, items, and stock on hand.',
+    permissions: [
+      { key: 'item:read', label: 'View items / products' },
+      { key: 'item:create', label: 'Create items' },
+      { key: 'item:update', label: 'Edit items' },
+      { key: 'item:archive', label: 'Archive items' },
+      {
+        key: 'item:delete',
+        label: 'Delete / merge items',
+        hint: 'Only the owner has this by default — grant it here for other users',
+      },
+    ],
+  },
+  {
+    id: 'stores',
+    label: 'Store',
+    description: 'Quantity by warehouse, transfers, and store tickets.',
+    permissions: [
+      { key: 'inventory:read', label: 'View stock & stores' },
+      { key: 'inventory:adjust', label: 'Adjust, transfer & prepare tickets' },
+      { key: 'inventory:approve', label: 'Approve stock adjustments' },
+    ],
+  },
+  {
+    id: 'accounting',
+    label: 'Accounting',
+    description: 'Chart of accounts and the ledger.',
+    permissions: [
+      { key: 'account:read', label: 'View chart of accounts' },
+      { key: 'account:create', label: 'Create accounts' },
+      { key: 'account:update', label: 'Edit accounts' },
+      { key: 'account:archive', label: 'Archive accounts' },
+      {
+        key: 'account:delete',
+        label: 'Delete / merge accounts',
+        hint: 'Only the owner has this by default — grant it here for other users',
+      },
+    ],
+  },
+  {
+    id: 'journals',
+    label: 'Journals',
+    description: 'Manual journal entries.',
+    permissions: [
+      { key: 'journal:read', label: 'View journals' },
+      { key: 'journal:create', label: 'Create journal entries' },
+      { key: 'journal:post', label: 'Post journals' },
+      { key: 'journal:approve', label: 'Approve journal entries' },
+      { key: 'journal:reverse', label: 'Reverse journals' },
+    ],
+  },
+  {
+    id: 'reports',
+    label: 'Reports',
+    description: 'Financial and operational reports.',
+    permissions: [
+      { key: 'report:read', label: 'View reports' },
+      {
+        key: 'report:overview',
+        label: 'View business overview',
+        hint: 'Cash, bank balances, profit, expenses, and invoice totals',
+      },
+      { key: 'report:export', label: 'Export reports' },
+    ],
+  },
+  {
+    id: 'bill-payments',
+    label: 'Bill payments',
+    description: 'Money paid out — expenses and settling vendor bills.',
+    permissions: [
+      { key: 'expense:read', label: 'View expenses & bill payments' },
+      { key: 'expense:create', label: 'Record expenses & bill payments' },
+      { key: 'expense:update', label: 'Edit expenses & bill payments' },
+      { key: 'expense:void', label: 'Void expenses & bill payments' },
+    ],
+  },
+  {
+    id: 'periods',
+    label: 'Periods',
+    description: 'Close and reopen the books.',
+    permissions: [
+      { key: 'period:read', label: 'View periods' },
+      { key: 'period:close', label: 'Close periods' },
+      {
+        key: 'period:reopen',
+        label: 'Reopen / unlock periods (Owner & Admin by default)',
+      },
+    ],
+  },
+  {
+    id: 'calendar',
+    label: 'Calendar',
+    description: 'Meetings, appointments, and reminders.',
+    permissions: [
+      { key: 'calendar:read', label: 'View the calendar' },
+      { key: 'calendar:create', label: 'Schedule meetings and appointments' },
+      { key: 'calendar:update', label: 'Edit calendar events' },
+      { key: 'calendar:delete', label: 'Delete calendar events' },
+    ],
+  },
+  {
+    id: 'todos',
+    label: 'To-do',
+    description: 'Personal and team checklists.',
+    permissions: [
+      { key: 'todo:read', label: 'View to-dos' },
+      { key: 'todo:create', label: 'Add to-dos' },
+      { key: 'todo:update', label: 'Edit and complete to-dos' },
+      { key: 'todo:delete', label: 'Delete to-dos' },
+    ],
+  },
+  {
+    id: 'documents',
+    label: 'Documents',
+    description: 'Company file library — contracts, scans, and papers.',
+    permissions: [
+      { key: 'docs:read', label: 'View documents' },
+      { key: 'docs:create', label: 'Upload documents and create folders' },
+      { key: 'docs:update', label: 'Rename, move, and edit documents' },
+      { key: 'docs:delete', label: 'Delete documents and folders' },
+    ],
+  },
+  {
+    id: 'knowledge',
+    label: 'Knowledge',
+    description: 'Internal how-to pages and company wiki.',
+    permissions: [
+      { key: 'knowledge:read', label: 'View knowledge articles' },
+      { key: 'knowledge:create', label: 'Write knowledge articles' },
+      { key: 'knowledge:update', label: 'Edit knowledge articles' },
+      { key: 'knowledge:delete', label: 'Delete knowledge articles' },
+    ],
+  },
+  {
+    id: 'employees',
+    label: 'Employees',
+    description: 'People directory, leave, attendance, and payroll.',
+    permissions: [
+      { key: 'hr:read', label: 'View employees' },
+      { key: 'hr:create', label: 'Add employees' },
+      { key: 'hr:update', label: 'Edit employees' },
+      { key: 'hr:delete', label: 'Delete employees' },
+      { key: 'hr:leave', label: 'Manage leave' },
+      { key: 'hr:attendance', label: 'Manage attendance' },
+      { key: 'hr:payroll', label: 'Run and post payroll' },
+    ],
+  },
+  {
+    id: 'settings',
+    label: 'Settings',
+    description: 'Organisation, users, tax, and the audit trail.',
+    permissions: [
+      { key: 'org:read', label: 'View organisation' },
+      { key: 'org:update', label: 'Edit organisation settings' },
+      { key: 'user:read', label: 'View users' },
+      { key: 'user:invite', label: 'Invite users' },
+      { key: 'user:update', label: 'Change roles & suspend users' },
+      { key: 'user:remove', label: 'Remove users' },
+      { key: 'tax:read', label: 'View tax codes' },
+      { key: 'tax:manage', label: 'Manage tax codes' },
+      { key: 'audit:read', label: 'View audit log' },
+    ],
+  },
+]

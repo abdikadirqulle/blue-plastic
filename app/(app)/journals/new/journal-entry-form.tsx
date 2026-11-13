@@ -1,26 +1,53 @@
 'use client'
 
-import { useActionState, useEffect, useMemo, useRef, useState } from 'react'
+import { useActionState, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+
+import { usePropState } from '@/lib/use-prop-state'
 import { useRouter } from 'next/navigation'
-import { PlusIcon, Trash2Icon } from 'lucide-react'
+import { PlusIcon, PrinterIcon, SaveIcon, SearchIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { idleState } from '@/components/forms/action-state'
 import { AccountPicker } from '@/components/forms/account-picker'
 import { Field, fieldProps } from '@/components/forms/field'
 import { FormStatus } from '@/components/forms/form-status'
+import { RecordNav } from '@/components/forms/record-nav'
+import { neighborHrefs } from '@/lib/record-nav'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Combobox } from '@/components/ui/combobox'
 import { DateField } from '@/components/ui/date-field'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import type { AccountPickerOption, PartyRequirement } from '@/lib/account-options'
+import { formatDate } from '@/lib/date'
+import { withIntercompanyMemo } from '@/lib/erp/intercompany-memo'
 import { Decimal, formatMoney, parseMoneyInput } from '@/lib/money'
 import { cn } from '@/lib/utils'
-import { postManualJournalForm } from '../actions'
+import { findJournals, postManualJournalForm } from '../actions'
 
-export type PartyOption = { id: string; label: string; hint?: string }
+export type PartyOption = { id: string; label: string; hint?: string; balance?: string | null }
+
+/** One posted line in the list under the form. */
+export type JournalRegisterLine = {
+  lineId: string
+  journalId: string
+  date: string
+  number: string
+  adjusting: boolean
+  manual: boolean
+  account: string
+  memo: string | null
+  amount: string
+}
 
 /**
  * A name on a line is one value, not two fields.
@@ -41,6 +68,36 @@ const parsePartyKey = (key: string | null): PartyValue => {
   return kind === 'customer' || kind === 'vendor' ? { kind, id } : null
 }
 
+/** The one customer or vendor named on the entry, when every named line agrees. */
+function soleParty(lines: Line[], kind: 'customer' | 'vendor'): PartyValue {
+  let found: PartyValue = null
+  for (const line of lines) {
+    if (line.party?.kind !== kind) continue
+    if (found && found.id !== line.party.id) return null
+    found = line.party
+  }
+  return found
+}
+
+/**
+ * The name that will be posted. A receivables line takes the customer already
+ * named anywhere on the entry, and a payables line takes the vendor, so naming
+ * them on the bank line is enough.
+ */
+function partyForLine(line: Line, lines: Line[], requires: PartyRequirement): PartyValue {
+  if (requires === 'customer') {
+    if (line.party?.kind === 'customer') return line.party
+    if (line.party) return line.party
+    return soleParty(lines, 'customer')
+  }
+  if (requires === 'vendor') {
+    if (line.party?.kind === 'vendor') return line.party
+    if (line.party) return line.party
+    return soleParty(lines, 'vendor')
+  }
+  return line.party
+}
+
 type Line = {
   key: number
   accountId: string
@@ -48,7 +105,10 @@ type Line = {
   credit: string
   description: string
   party: PartyValue
+  trackingCategoryId: string
 }
+
+const ROW_COUNT = 10
 
 const EMPTY = (key: number): Line => ({
   key,
@@ -57,20 +117,30 @@ const EMPTY = (key: number): Line => ({
   credit: '',
   description: '',
   party: null,
+  trackingCategoryId: '',
 })
+
+const blankLines = () => Array.from({ length: ROW_COUNT }, (_, index) => EMPTY(index + 1))
+
+const CURRENCY_LABEL: Record<string, string> = {
+  USD: 'US Dollar',
+  SOS: 'Somali Shilling',
+  EUR: 'Euro',
+  GBP: 'British Pound',
+  KES: 'Kenyan Shilling',
+  AED: 'UAE Dirham',
+}
+
+const lineInput =
+  'h-7 rounded-none border-transparent bg-transparent px-1.5 shadow-none focus-visible:border-[#3A7CA8] focus-visible:bg-white focus-visible:ring-0'
 
 /**
  * The one screen where a person chooses both sides of an entry.
  *
- * Three things it has to do that a plain grid does not. It shows the arithmetic
- * as they type, because a journal that does not balance cannot be posted by the
- * engine and cannot be committed by the database — but only this layer can say so
- * before the work is lost. It offers **the whole chart**, receivables and
- * payables included, because most of what a business records by hand is against
- * exactly those. And it carries a **Name** on every line, because who a line was
- * with is worth recording whatever the account — and because on a receivables or
- * payables line the ledger will refuse the line without it (R7), and being
- * refused on submit is not an explanation.
+ * The grid follows the journal people already know: account, debit, credit,
+ * a memo on the line, and a name that is a customer or a vendor. Receivables
+ * still require a customer and payables a vendor — that is what keeps the
+ * aging report and the control account on the same rows.
  */
 export function JournalEntryForm({
   accounts,
@@ -79,6 +149,9 @@ export function JournalEntryForm({
   entryNumber,
   today,
   currency,
+  register,
+  neighbors,
+  classes = [],
 }: {
   accounts: AccountPickerOption[]
   customers: PartyOption[]
@@ -87,25 +160,49 @@ export function JournalEntryForm({
   entryNumber: string
   today: string
   currency: string
+  register: JournalRegisterLine[]
+  /** Manual journals before / after this blank form (new sits after the last). */
+  neighbors?: {
+    previous: { id: string; number: string } | null
+    next: { id: string; number: string } | null
+  }
+  /** Active classes. Hidden when the company has none. */
+  classes?: { id: string; name: string }[]
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(postManualJournalForm, idleState)
-  const [lines, setLines] = useState<Line[]>([EMPTY(1), EMPTY(2)])
+  const [number, setNumber] = usePropState(entryNumber)
+  const [lines, setLines] = useState<Line[]>(blankLines)
   const [date, setDate] = useState(today)
   const [memo, setMemo] = useState('')
+  const [intercompany, setIntercompany] = useState(false)
   const [isAdjusting, setIsAdjusting] = useState(false)
-  const nextKey = useRef(3)
-  const handled = useRef(false)
+  const [autoReverse, setAutoReverse] = useState(false)
+  const [listOpen, setListOpen] = useState(true)
+  const [listFilter, setListFilter] = useState<'all' | 'manual' | 'adjusting'>('all')
+  const nextKey = useRef(ROW_COUNT + 1)
+  const attempt = useRef(0)
+  const handledAttempt = useRef(0)
+  const afterSave = useRef<'close' | 'new'>('close')
 
   useEffect(() => {
-    if (state.status === 'success' && !handled.current) {
-      handled.current = true
+    if (state.status === 'success' && handledAttempt.current !== attempt.current) {
+      handledAttempt.current = attempt.current
       toast.success(state.message ?? 'Journal posted.')
+      if (afterSave.current === 'new') {
+        setMemo('')
+        setIsAdjusting(false)
+        setAutoReverse(false)
+        setDate(today)
+        setLines(blankLines())
+        nextKey.current = ROW_COUNT + 1
+        router.refresh()
+        return
+      }
       router.push('/journals')
       router.refresh()
     }
-    if (state.status !== 'success') handled.current = false
-  }, [state, router])
+  }, [state, router, today])
 
   const accountsById = useMemo(
     () => new Map(accounts.map((account) => [account.id, account])),
@@ -157,14 +254,61 @@ export function JournalEntryForm({
   const wrongParty = filled.find((line) => {
     const requires = requirementOf(accountsById.get(line.accountId))
     if (!requires) return false
-    return line.party?.kind !== requires
+    return partyForLine(line, lines, requires)?.kind !== requires
   })
 
   const balanced = totals.difference.isZero() && !totals.debit.isZero()
-  const canPost = balanced && filled.length >= 2 && memo.trim() !== '' && !wrongParty
+  const canPost = balanced && filled.length >= 2 && !wrongParty
+
+  const listed = register.filter((line) =>
+    listFilter === 'manual' ? line.manual : listFilter === 'adjusting' ? line.adjusting : true,
+  )
 
   const update = (key: number, patch: Partial<Line>) =>
     setLines((current) => current.map((line) => (line.key === key ? { ...line, ...patch } : line)))
+
+  /**
+   * After an amount is left, put the remaining balance on the other side of the
+   * next empty line — so debiting Opening Balance Equity fills the credit on
+   * Share capital without typing the same figure twice.
+   */
+  const balanceAgainst = (editedKey: number) => {
+    setLines((current) => {
+      let debit = new Decimal(0)
+      let credit = new Decimal(0)
+      for (const line of current) {
+        debit = debit.plus(parseMoneyInput(line.debit) ?? 0)
+        credit = credit.plus(parseMoneyInput(line.credit) ?? 0)
+      }
+      const difference = debit.minus(credit)
+      if (difference.isZero()) return current
+
+      const editedIndex = current.findIndex((line) => line.key === editedKey)
+      if (editedIndex < 0) return current
+      const amount = difference.abs().toFixed(2)
+      const fill = (line: Line): Line =>
+        difference.isPositive()
+          ? { ...line, credit: amount, debit: '' }
+          : { ...line, debit: amount, credit: '' }
+
+      const tryIndex = (index: number) => {
+        const line = current[index]
+        if (!line || line.key === editedKey) return null
+        if (line.debit !== '' || line.credit !== '') return null
+        return current.map((row, i) => (i === index ? fill(row) : row))
+      }
+
+      for (let index = editedIndex + 1; index < current.length; index += 1) {
+        const next = tryIndex(index)
+        if (next) return next
+      }
+      for (let index = 0; index < editedIndex; index += 1) {
+        const next = tryIndex(index)
+        if (next) return next
+      }
+      return current
+    })
+  }
 
   /** Changing the account drops a name of the wrong kind for the new account. */
   const chooseAccount = (line: Line, accountId: string | null) => {
@@ -175,41 +319,123 @@ export function JournalEntryForm({
     })
   }
 
+  const focusAmount = (rowIndex: number, side: 'debit' | 'credit') => {
+    const el = document.querySelector<HTMLInputElement>(
+      `[data-journal-amount="${rowIndex}-${side}"]`,
+    )
+    el?.focus()
+    el?.select()
+  }
+
+  const onAmountKeyDown = (
+    event: KeyboardEvent<HTMLInputElement>,
+    rowIndex: number,
+    side: 'debit' | 'credit',
+    lineKey: number,
+  ) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      balanceAgainst(lineKey)
+      const nextRow = event.shiftKey ? rowIndex - 1 : rowIndex + 1
+      if (nextRow >= 0 && nextRow < lines.length) focusAmount(nextRow, side)
+      return
+    }
+    if (event.key === 'ArrowRight' && side === 'debit' && event.currentTarget.selectionStart === event.currentTarget.value.length) {
+      event.preventDefault()
+      focusAmount(rowIndex, 'credit')
+      return
+    }
+    if (event.key === 'ArrowLeft' && side === 'credit' && (event.currentTarget.selectionStart ?? 0) === 0) {
+      event.preventDefault()
+      focusAmount(rowIndex, 'debit')
+    }
+  }
+
+  const revert = () => {
+    setNumber(entryNumber)
+    setDate(today)
+    setMemo('')
+    setIsAdjusting(false)
+    setAutoReverse(false)
+    setLines(blankLines())
+    nextKey.current = ROW_COUNT + 1
+  }
+
+  const markSave = (next: 'close' | 'new') => {
+    attempt.current += 1
+    afterSave.current = next
+  }
+
   const payload = JSON.stringify({
+    number,
     date,
-    memo,
+    memo: withIntercompanyMemo(memo, intercompany),
     isAdjusting,
-    lines: filled.map((line) => ({
-      accountId: line.accountId,
-      debit: line.debit,
-      credit: line.credit,
-      description: line.description,
-      customerId: line.party?.kind === 'customer' ? line.party.id : null,
-      vendorId: line.party?.kind === 'vendor' ? line.party.id : null,
-    })),
+    autoReverse,
+    lines: filled.map((line) => {
+      const party = partyForLine(line, lines, requirementOf(accountsById.get(line.accountId)))
+      return {
+        accountId: line.accountId,
+        debit: line.debit,
+        credit: line.credit,
+        description: line.description,
+        customerId: party?.kind === 'customer' ? party.id : null,
+        vendorId: party?.kind === 'vendor' ? party.id : null,
+        trackingCategoryId: line.trackingCategoryId,
+      }
+    }),
   })
 
+  const currencyName = CURRENCY_LABEL[currency] ?? currency
+
   return (
-    <form action={formAction} className="space-y-4">
+    <form
+      action={formAction}
+      className="space-y-3"
+      onKeyDown={(event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          if (!canPost) return
+          event.preventDefault()
+          markSave('close')
+          event.currentTarget.requestSubmit()
+        }
+      }}
+    >
       <input type="hidden" name="payload" value={payload} />
 
+      <div className="flex flex-wrap items-center gap-1.5 print:hidden">
+        <RecordNav {...neighborHrefs('/journals', neighbors, undefined, '')} />
+        <JournalFinder currency={currency} />
+        <Button type="button" variant="outline" size="sm" onClick={revert}>
+          <PlusIcon />
+          New
+        </Button>
+        <SubmitButton
+          variant="outline"
+          size="sm"
+          disabled={!canPost}
+          pendingLabel="Saving…"
+          onClick={() => markSave('close')}
+        >
+          <SaveIcon />
+          Save
+        </SubmitButton>
+        <Button type="button" variant="outline" size="sm" onClick={() => window.print()}>
+          <PrinterIcon />
+          Print
+        </Button>
+        <Button type="button" variant="outline" size="sm" onClick={() => setListOpen((open) => !open)}>
+          {listOpen ? 'Hide list' : 'Show list'}
+        </Button>
+      </div>
+
       <Card>
-        <CardContent className="space-y-4 p-4">
+        <CardContent className="space-y-3 p-3">
           <FormStatus state={state} />
 
-          <div className="grid gap-4 sm:grid-cols-[12rem_12rem_1fr]">
-            <Field
-              name="entryNumber"
-              label="Entry number"
-              hint="Assigned when this is posted."
-            >
-              <Input
-                id="entryNumber"
-                value={entryNumber}
-                readOnly
-                disabled
-                className="tabular"
-              />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[11rem_11rem_11rem_auto]">
+            <Field name="currency" label="Currency">
+              <Input id="currency" value={currencyName} readOnly tabIndex={-1} className="bg-muted/40" />
             </Field>
 
             <Field name="date" label="Date" required error={state.fieldErrors?.date}>
@@ -224,62 +450,101 @@ export function JournalEntryForm({
             </Field>
 
             <Field
-              name="memo"
-              label="Description"
-              hint="What this entry records. It appears on the register and on every report that drills into it."
-              required
-              error={state.fieldErrors?.memo}
+              name="number"
+              label="Entry no."
+              error={state.fieldErrors?.number}
+              hint="Type the number you want, or leave the next one."
             >
               <Input
-                {...fieldProps('memo', state.fieldErrors?.memo, true)}
-                value={memo}
-                onChange={(event) => setMemo(event.target.value)}
-                placeholder="Depreciation for March"
-                required
+                id="number"
+                name="number"
+                value={number}
+                onChange={(event) => setNumber(event.target.value)}
+                className="tabular"
+                maxLength={40}
+                autoComplete="off"
+                aria-invalid={state.fieldErrors?.number ? true : undefined}
               />
             </Field>
+
+            <div className="flex flex-wrap items-end gap-4 pb-2 text-sm">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={isAdjusting}
+                  onChange={(event) => setIsAdjusting(event.target.checked)}
+                  className="size-4 rounded border-input"
+                />
+                Adjusting entry
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={autoReverse}
+                  onChange={(event) => setAutoReverse(event.target.checked)}
+                  className="size-4 rounded border-input"
+                />
+                Reverse next period
+              </label>
+            </div>
           </div>
 
-          <label className="flex w-fit items-center gap-2 text-sm">
+          <Field
+            name="memo"
+            label="Memo"
+            error={state.fieldErrors?.memo}
+            hint="Optional. Useful on the register — leave blank when clearing Opening Balance Equity into capital."
+          >
+            <Input
+              {...fieldProps('memo', state.fieldErrors?.memo)}
+              value={memo}
+              onChange={(event) => setMemo(event.target.value)}
+              placeholder="Optional — what this entry is for"
+            />
+          </Field>
+          <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
-              checked={isAdjusting}
-              onChange={(event) => setIsAdjusting(event.target.checked)}
+              checked={intercompany}
+              onChange={(event) => setIntercompany(event.target.checked)}
               className="size-4 rounded border-input"
             />
-            <span>
-              Adjusting entry
-              <span className="ml-1.5 text-xs text-muted-foreground">
-                — flagged separately on reports, for period-end adjustments
-              </span>
-            </span>
+            Intercompany — prefix memo with [IC] so group consolidation skips this journal
           </label>
+
+          <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+            To move money from <strong>Opening Balance Equity</strong> into{' '}
+            <strong>Share Al Furaat</strong> (or any equity): debit Opening Balance Equity and credit
+            the share account here. Bank Transfer only moves between bank and liability accounts —
+            equity needs a journal.
+          </p>
         </CardContent>
       </Card>
 
       <Card className="overflow-hidden p-0">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full border-collapse text-sm">
             <thead>
-              <tr className="border-b bg-muted/30">
-                <th className="min-w-56 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
-                  Account
-                </th>
-                <th className="min-w-44 px-3 py-2 text-left text-xs font-medium text-muted-foreground">
-                  Name
-                </th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
-                  Description
-                </th>
-                <th className="w-36 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Debit</th>
-                <th className="w-36 px-3 py-2 text-right text-xs font-medium text-muted-foreground">Credit</th>
-                <th className="w-10" />
+              <tr className="bg-[#e8ebef] text-[11px] font-semibold uppercase tracking-wide text-slate-600">
+                <th className="min-w-56 px-2 py-1.5 text-left">Account</th>
+                <th className="w-32 px-2 py-1.5 text-right">Debit ({currency})</th>
+                <th className="w-32 px-2 py-1.5 text-right">Credit ({currency})</th>
+                <th className="min-w-40 px-2 py-1.5 text-left">Memo</th>
+                <th className="min-w-52 px-2 py-1.5 text-left">Name</th>
+                {classes.length > 0 ? <th className="min-w-40 px-2 py-1.5 text-left">Class</th> : null}
               </tr>
             </thead>
             <tbody>
-              {lines.map((line) => {
+              {lines.map((line, index) => {
                 const account = accountsById.get(line.accountId)
                 const requires = requirementOf(account)
+                const party = partyForLine(line, lines, requires)
+                const partyRecord =
+                  party?.kind === 'customer'
+                    ? customers.find((row) => row.id === party.id)
+                    : party?.kind === 'vendor'
+                      ? vendors.find((row) => row.id === party.id)
+                      : undefined
                 const options =
                   requires === 'customer'
                     ? customerOptions
@@ -288,114 +553,132 @@ export function JournalEntryForm({
                       : partyOptions
 
                 return (
-                  <tr key={line.key} className="border-b align-top last:border-0">
-                    <td className="px-2 py-1.5">
+                  <tr
+                    key={line.key}
+                    className={cn('align-middle', index % 2 === 1 ? 'ledger-row-alt' : 'ledger-row')}
+                  >
+                    <td className="px-1 py-0.5">
                       <AccountPicker
                         options={accounts}
                         value={line.accountId || null}
                         onChange={(next) => chooseAccount(line, next)}
+                        placeholder="Account"
                         clearable
                       />
-                      {account ? (
-                        <span className="mt-1 block px-1 text-xs text-muted-foreground">
-                          {account.hint}
+                      {account?.subtype === 'BANK' && account.balance != null ? (
+                        <span className="mt-0.5 block px-1.5 text-xs tabular text-muted-foreground">
+                          Balance {formatMoney(account.balance, currency)}
                         </span>
                       ) : null}
                     </td>
-
-                    <td className="px-2 py-1.5">
+                    <td className="px-1 py-0.5">
+                      <Input
+                        aria-label="Debit"
+                        inputMode="decimal"
+                        data-journal-amount={`${index}-debit`}
+                        className={cn(lineInput, 'tabular text-right')}
+                        value={line.debit}
+                        onChange={(event) =>
+                          update(line.key, { debit: event.target.value, credit: '' })
+                        }
+                        onBlur={() => {
+                          if (line.debit.trim() !== '') balanceAgainst(line.key)
+                        }}
+                        onKeyDown={(event) => onAmountKeyDown(event, index, 'debit', line.key)}
+                      />
+                    </td>
+                    <td className="px-1 py-0.5">
+                      <Input
+                        aria-label="Credit"
+                        inputMode="decimal"
+                        data-journal-amount={`${index}-credit`}
+                        className={cn(lineInput, 'tabular text-right')}
+                        value={line.credit}
+                        onChange={(event) =>
+                          update(line.key, { credit: event.target.value, debit: '' })
+                        }
+                        onBlur={() => {
+                          if (line.credit.trim() !== '') balanceAgainst(line.key)
+                        }}
+                        onKeyDown={(event) => onAmountKeyDown(event, index, 'credit', line.key)}
+                      />
+                    </td>
+                    <td className="px-1 py-0.5">
+                      <Input
+                        aria-label="Line memo"
+                        className={lineInput}
+                        value={line.description}
+                        onChange={(event) => update(line.key, { description: event.target.value })}
+                      />
+                    </td>
+                    <td className="px-1 py-0.5">
                       <Combobox
                         options={options}
-                        value={partyKey(line.party)}
+                        value={partyKey(party)}
                         onChange={(next) => update(line.key, { party: parsePartyKey(next) })}
                         placeholder={
                           requires === 'customer'
-                            ? 'Which customer'
+                            ? 'Customer'
                             : requires === 'vendor'
-                              ? 'Which vendor'
+                              ? 'Vendor'
                               : 'Customer or vendor'
                         }
                         emptyMessage="No name matches. Add them under Customers or Vendors."
                         clearable
                         aria-label="Name"
                       />
-                      {requires ? (
-                        <span
-                          className={cn(
-                            'mt-1 block px-1 text-xs',
-                            line.party?.kind === requires
-                              ? 'text-muted-foreground'
-                              : 'text-destructive',
-                          )}
-                        >
-                          {requires === 'customer'
-                            ? 'A customer is required on a receivables line'
-                            : 'A vendor is required on a payables line'}
+                      {party?.kind === 'customer' && partyRecord?.balance != null ? (
+                        <span className="mt-0.5 block px-1.5 text-xs tabular text-muted-foreground">
+                          Owes you {formatMoney(partyRecord.balance, currency)}
+                        </span>
+                      ) : null}
+                      {party?.kind === 'vendor' && partyRecord?.balance != null ? (
+                        <span className="mt-0.5 block px-1.5 text-xs tabular text-muted-foreground">
+                          You owe {formatMoney(partyRecord.balance, currency)}
                         </span>
                       ) : null}
                     </td>
-
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Line description"
-                        value={line.description}
-                        onChange={(event) => update(line.key, { description: event.target.value })}
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Debit"
-                        inputMode="decimal"
-                        className="tabular text-right"
-                        value={line.debit}
-                        onChange={(event) =>
-                          update(line.key, { debit: event.target.value, credit: '' })
-                        }
-                      />
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <Input
-                        aria-label="Credit"
-                        inputMode="decimal"
-                        className="tabular text-right"
-                        value={line.credit}
-                        onChange={(event) =>
-                          update(line.key, { credit: event.target.value, debit: '' })
-                        }
-                      />
-                    </td>
-                    <td className="px-1 py-1.5">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Remove line"
-                        disabled={lines.length <= 2}
-                        onClick={() =>
-                          setLines((current) => current.filter((l) => l.key !== line.key))
-                        }
-                      >
-                        <Trash2Icon />
-                      </Button>
-                    </td>
+                    {classes.length > 0 ? (
+                      <td className="px-1 py-0.5">
+                        <Combobox
+                          options={classes.map((row) => ({ value: row.id, label: row.name }))}
+                          value={line.trackingCategoryId || null}
+                          onChange={(next) => update(line.key, { trackingCategoryId: next ?? '' })}
+                          placeholder="Class"
+                          emptyMessage="No class matches."
+                          clearable
+                          aria-label="Class"
+                        />
+                      </td>
+                    ) : null}
                   </tr>
                 )
               })}
             </tbody>
             <tfoot>
-              <tr className="border-t bg-muted/30 font-medium">
-                <td className="px-3 py-2" colSpan={3}>
-                  Totals
-                </td>
+              <tr className="border-t bg-[#f4f5f6] font-medium">
+                <td className="px-3 py-2">Totals</td>
                 <td className="tabular px-3 py-2 text-right">{formatMoney(totals.debit, currency)}</td>
                 <td className="tabular px-3 py-2 text-right">{formatMoney(totals.credit, currency)}</td>
-                <td />
+                <td colSpan={classes.length > 0 ? 3 : 2} className="px-3 py-2 text-xs font-normal text-muted-foreground">
+                  {!totals.difference.isZero()
+                    ? `Out of balance by ${formatMoney(totals.difference.abs(), currency)}`
+                    : wrongParty
+                      ? `Name the ${
+                          requirementOf(accountsById.get(wrongParty.accountId)) === 'customer'
+                            ? 'customer'
+                            : 'vendor'
+                        } on that line`
+                      : balanced
+                        ? 'Balanced'
+                        : 'Enter the amounts'}
+                </td>
               </tr>
             </tfoot>
           </table>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2 print:hidden">
           <Button
             type="button"
             variant="outline"
@@ -404,40 +687,198 @@ export function JournalEntryForm({
           >
             <PlusIcon /> Add line
           </Button>
-
-          <p
-            aria-live="polite"
-            className={cn(
-              'tabular text-sm font-medium',
-              balanced && !wrongParty ? 'text-success' : 'text-muted-foreground',
-            )}
-          >
-            {!totals.difference.isZero()
-              ? `Out of balance by ${formatMoney(totals.difference.abs(), currency)} — ${
-                  totals.difference.isPositive() ? 'credits' : 'debits'
-                } are short`
-              : !balanced
-                ? 'Enter the amounts'
-                : wrongParty
-                  ? `Name the ${
-                      requirementOf(accountsById.get(wrongParty.accountId)) === 'customer'
-                        ? 'customer'
-                        : 'vendor'
-                    } on the control-account line`
-                  : 'Balanced'}
-          </p>
+          <div className="ml-auto flex items-center gap-2">
+            <Button type="button" variant="outline" onClick={revert}>
+              Revert
+            </Button>
+            <SubmitButton
+              variant="outline"
+              disabled={!canPost}
+              pendingLabel="Saving…"
+              onClick={() => markSave('close')}
+            >
+              Save &amp; Close
+            </SubmitButton>
+            <SubmitButton disabled={!canPost} pendingLabel="Saving…" onClick={() => markSave('new')}>
+              Save &amp; New
+            </SubmitButton>
+          </div>
         </div>
       </Card>
 
-      <div className="flex items-center justify-end gap-2">
-        <Button type="button" variant="outline" onClick={() => router.push('/journals')}>
-          Cancel
-        </Button>
-        <SubmitButton disabled={!canPost} pendingLabel="Posting…">
-          Post journal
-        </SubmitButton>
-      </div>
+      {listOpen ? (
+        <Card className="overflow-hidden p-0 print:hidden">
+          <div className="flex flex-wrap items-center gap-3 border-b bg-muted/60 px-3 py-2">
+            <p className="text-sm font-medium">List of journal entries</p>
+            <select
+              aria-label="Which entries"
+              value={listFilter}
+              onChange={(event) => setListFilter(event.target.value as 'all' | 'manual' | 'adjusting')}
+              className="h-7 rounded-md border border-input bg-card px-2 text-xs"
+            >
+              <option value="all">All</option>
+              <option value="manual">Manual</option>
+              <option value="adjusting">Adjusting</option>
+            </select>
+          </div>
+          <div className="max-h-56 overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-secondary text-[11px] font-semibold uppercase tracking-wide text-secondary-foreground">
+                <tr>
+                  <th className="px-3 py-1.5 text-left">Date</th>
+                  <th className="px-3 py-1.5 text-left">Entry no.</th>
+                  <th className="px-3 py-1.5 text-left">Adj</th>
+                  <th className="px-3 py-1.5 text-left">Account</th>
+                  <th className="px-3 py-1.5 text-left">Memo</th>
+                  <th className="px-3 py-1.5 text-right">Debit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {listed.map((line) => (
+                  <tr key={line.lineId} className="border-t hover:bg-muted/50">
+                    <td className="tabular whitespace-nowrap px-3 py-1.5 text-muted-foreground">
+                      {formatDate(line.date)}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <button
+                        type="button"
+                        className="tabular font-medium underline-offset-4 hover:underline"
+                        onClick={() => router.push(`/journals/${line.journalId}`)}
+                      >
+                        {line.number}
+                      </button>
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground">{line.adjusting ? 'Yes' : ''}</td>
+                    <td className="px-3 py-1.5">{line.account}</td>
+                    <td className="px-3 py-1.5 text-muted-foreground">{line.memo ?? ''}</td>
+                    <td className="tabular px-3 py-1.5 text-right">{formatMoney(line.amount, currency)}</td>
+                  </tr>
+                ))}
+                {listed.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-4 text-sm text-muted-foreground">
+                      No journal entries in this list.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      ) : null}
+
     </form>
+  )
+}
+
+function JournalFinder({ currency }: { currency: string }) {
+  const router = useRouter()
+  const [open, setOpen] = useState(false)
+  const [number, setNumber] = useState('')
+  const [date, setDate] = useState('')
+  const [amount, setAmount] = useState('')
+  const [rows, setRows] = useState<
+    {
+      id: string
+      number: string
+      date: string
+      memo: string | null
+      party: string | null
+      total: string
+    }[]
+  >([])
+  const [note, setNote] = useState<string | null>(null)
+
+  async function search(next?: { number?: string; date?: string; amount?: string }) {
+    const result = await findJournals({
+      number: next?.number ?? number,
+      date: next?.date ?? date,
+      amount: next?.amount ?? amount,
+    })
+    if (result.ok) {
+      setRows(result.data)
+      setNote(null)
+    } else {
+      setRows([])
+      setNote(result.error.message)
+    }
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) void search({ number: '', date: '', amount: '' })
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" size="sm">
+          <SearchIcon />
+          Find
+        </Button>
+      </DialogTrigger>
+      <DialogContent size="sm">
+        <DialogHeader>
+          <DialogTitle>Find a journal entry</DialogTitle>
+          <DialogDescription>Search by the entry number, the date, or the amount.</DialogDescription>
+        </DialogHeader>
+        <div className="mt-4 grid gap-3">
+          <Field name="findNumber" label="Entry no.">
+            <Input
+              id="findNumber"
+              value={number}
+              onChange={(event) => setNumber(event.target.value)}
+              placeholder="JE-00001"
+              autoComplete="off"
+            />
+          </Field>
+          <Field name="findDate" label="Date">
+            <DateField id="findDate" value={date} onChange={setDate} />
+          </Field>
+          <Field name="findAmount" label="Amount">
+            <Input
+              id="findAmount"
+              value={amount}
+              onChange={(event) => setAmount(event.target.value)}
+              inputMode="decimal"
+              placeholder="100"
+              autoComplete="off"
+            />
+          </Field>
+          <Button type="button" onClick={() => void search()}>
+            <SearchIcon />
+            Find
+          </Button>
+        </div>
+        <ul className="mt-4 max-h-64 space-y-1 overflow-y-auto">
+          {rows.map((row) => (
+            <li key={row.id}>
+              <button
+                type="button"
+                className="flex w-full items-baseline justify-between gap-3 rounded-md px-2 py-2 text-left text-sm text-foreground hover:bg-accent hover:text-accent-foreground"
+                onClick={() => {
+                  setOpen(false)
+                  router.push(`/journals/${row.id}`)
+                }}
+              >
+                <span>
+                  <span className="font-medium">{row.number}</span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {[row.party, row.memo, formatDate(row.date)].filter(Boolean).join(' · ')}
+                  </span>
+                </span>
+                <span className="tabular">{formatMoney(row.total, currency)}</span>
+              </button>
+            </li>
+          ))}
+          {note ? <li className="px-2 py-3 text-sm text-destructive">{note}</li> : null}
+          {!note && rows.length === 0 ? (
+            <li className="px-2 py-3 text-sm text-muted-foreground">No journal entry matches.</li>
+          ) : null}
+        </ul>
+      </DialogContent>
+    </Dialog>
   )
 }
 

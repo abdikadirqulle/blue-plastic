@@ -1,14 +1,51 @@
+import { Suspense } from 'react'
 import { redirect } from 'next/navigation'
 
 import { AppShell } from '@/components/layout/app-shell'
+import { OnboardingGate } from '@/components/onboarding/onboarding-gate'
+import { withDatabasePage } from '@/lib/page-guard'
 import { getOrgContext } from '@/server/auth/context'
+import { listSwitchableCompanies } from '@/server/services/backup-import.service'
+import { canViewGroupReports } from '@/server/services/company-group.service'
+import * as onboardingService from '@/server/services/onboarding.service'
+import { RentBanner } from './rent-banner'
+import { balanceAlertsSlot, calendarAlertsSlot, stockAlertsSlot } from './shell-alerts'
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  const ctx = await getOrgContext()
+  return withDatabasePage(async () => {
+    const ctx = await getOrgContext()
 
-  // No session, a revoked membership, or a token issued before a role change
-  // (ADR-0007) all land here.
-  if (!ctx) redirect('/sign-in')
+    // No session, a revoked membership, or a token issued before a role change
+    // (ADR-0007) all land here.
+    if (!ctx) redirect('/login/company')
+    // Portal logins never enter the ERP shell.
+    if (ctx.role === 'CUSTOMER') redirect('/portal')
 
-  return <AppShell ctx={ctx}>{children}</AppShell>
+    const canSwitch = ctx.isSystemOwner || ctx.canConnect
+    // Light switcher list only — File size estimates stay on /databases.
+    const [showCompanyReports, databases, needsWizard] = await Promise.all([
+      canViewGroupReports(ctx),
+      canSwitch ? listSwitchableCompanies(ctx) : Promise.resolve([]),
+      onboardingService.needsWizard(ctx),
+    ])
+
+    // Month P&L chart lives on /reports only (see reports/page.tsx). Loading it
+    // from this layout re-ran a full ledger scan on every signed-in navigation.
+    return (
+      <AppShell
+        ctx={ctx}
+        stockAlertsSlot={stockAlertsSlot(ctx)}
+        balanceAlertsSlot={balanceAlertsSlot(ctx)}
+        calendarAlertsSlot={calendarAlertsSlot(ctx)}
+        showCompanyReports={showCompanyReports}
+        databases={databases}
+      >
+        <OnboardingGate needed={needsWizard} />
+        <Suspense fallback={null}>
+          <RentBanner />
+        </Suspense>
+        {children}
+      </AppShell>
+    )
+  })
 }

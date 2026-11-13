@@ -1,17 +1,26 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
-import { ArrowLeftIcon } from 'lucide-react'
 
+import { AccountTypeIcon } from '@/components/accounts/account-type-icon'
+import { ApprovalTrailPanel } from '@/app/(app)/approvals/approval-trail-panel'
+import { DeleteButton } from '@/components/data/delete-record'
+import { DocumentAttachments } from '@/components/data/document-attachments'
+import { DocumentHistory } from '@/components/data/document-history'
 import { PageHeader } from '@/components/data/page-header'
+import { RecordedBy } from '@/components/data/recorded-by'
+import { RecordNav } from '@/components/forms/record-nav'
+import { neighborHrefs } from '@/lib/record-nav'
+import { DocumentActions } from '@/components/print/document-actions'
 import { Badge } from '@/components/ui/badge'
-import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { JOURNAL_SOURCE_LABELS, PERIOD_STATUS_LABELS } from '@/lib/accounting-labels'
-import { formatDate, formatDateTime, toCalendarDate } from '@/lib/date'
+import { formatDate, formatDateTime, formatTransactionDate, toCalendarDate } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
 import { requireOrgContext } from '@/server/auth/context'
+import { listForJournal } from '@/server/files/ledger-files'
+import { historyFor, trailFor } from '@/server/services/audit.service'
 import * as journalService from '@/server/services/journal.service'
 import { ReverseDialog } from './reverse-dialog'
 
@@ -23,17 +32,36 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
 
   const journal = await journalService.get(ctx, id).catch(() => null)
   if (!journal) notFound()
+  const isManual = journal.sourceType === 'MANUAL'
+  const [trail, history, papers, neighbors] = await Promise.all([
+    trailFor(ctx, journal.id),
+    historyFor(ctx, journal.id),
+    listForJournal(ctx, journal.id),
+    isManual ? journalService.neighbors(ctx, id) : Promise.resolve(undefined),
+  ])
 
   const currency = ctx.organization.baseCurrency
   const canReverse = ctx.permissions.has('journal:reverse') && journal.status === 'POSTED'
+  const canDelete =
+    ctx.features.allowJournalDelete &&
+    ctx.permissions.has('journal:reverse') &&
+    journal.status !== 'DELETED'
+  const canAttach = isManual && ctx.permissions.has('journal:post') && journal.status !== 'DELETED'
+  const lineCustomer = journal.lines.find((line) => line.customer)?.customer
+  const lineVendor = journal.lines.find((line) => line.vendor)?.vendor
+  const party = journal.source.partyName
+    ? { name: journal.source.partyName, href: journal.source.partyHref ?? undefined }
+    : lineCustomer
+      ? { name: lineCustomer.displayName, href: `/customers?id=${lineCustomer.id}` }
+      : lineVendor
+        ? { name: lineVendor.displayName, href: `/vendors/${lineVendor.id}` }
+        : null
 
   return (
     <>
-      <Link href="/journals" className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}>
-        <ArrowLeftIcon /> Journal entries
-      </Link>
 
       <PageHeader
+        className="print:hidden"
         title={journal.journalNumber}
         description={
           journal.memo ??
@@ -41,156 +69,216 @@ export default async function JournalDetailPage({ params }: { params: Promise<{ 
           undefined
         }
         actions={
-          canReverse ? (
-            <ReverseDialog
-              journalId={journal.id}
-              journalNumber={journal.journalNumber}
-              defaultDate={toCalendarDate(journal.date)}
+          <>
+            <DocumentActions
+              paper="journal entry"
+              filename={journal.journalNumber}
+              pdfMatchesPrint
+              excelHref={`/api/journals/${journal.id}/export`}
+              defaultSubject={`${journal.journalNumber} — ${ctx.organization.name}`}
+              defaultBody={[
+                journal.journalNumber,
+                journal.memo ?? '',
+                `Date: ${formatTransactionDate(toCalendarDate(journal.date), journal.postedAt, ctx.organization.timeZone)}`,
+                party ? `Party: ${party.name}` : null,
+                '',
+                ctx.organization.name,
+              ]
+                .filter((line) => line !== null)
+                .join('\n')}
             />
-          ) : undefined
+            {canDelete ? (
+              <DeleteButton
+                kind="journal"
+                id={journal.id}
+                number={journal.journalNumber}
+                redirectTo="/journals"
+              />
+            ) : null}
+            {canReverse ? (
+              <ReverseDialog
+                journalId={journal.id}
+                journalNumber={journal.journalNumber}
+                defaultDate={toCalendarDate(journal.date)}
+              />
+            ) : null}
+          </>
         }
       />
 
-      <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Detail label="Date" value={formatDate(toCalendarDate(journal.date))} />
-        <Detail
-          label="Source"
-          value={JOURNAL_SOURCE_LABELS[journal.sourceType] ?? journal.sourceType}
-          href={journal.source.href ?? undefined}
-          extra={journal.source.number ?? undefined}
-        />
-        <Detail
-          label="Period"
-          value={`${formatDate(toCalendarDate(journal.period.startDate))} — ${PERIOD_STATUS_LABELS[journal.period.status]}`}
-        />
-        {journal.source.partyName ? (
-          <Detail
-            label="Customer / vendor"
-            value={journal.source.partyName}
-            href={journal.source.partyHref ?? undefined}
-          />
-        ) : (
-          <Detail label="Posted" value={formatDateTime(journal.postedAt, ctx.organization.timeZone)} />
-        )}
-      </div>
+      <RecordedBy trail={trail} timeZone={ctx.organization.timeZone} />
 
-      {journal.source.partyName ? (
-        <p className="mb-4 text-xs text-muted-foreground">
-          Posted {formatDateTime(journal.postedAt, ctx.organization.timeZone)}
-        </p>
+      {isManual ? (
+        <DocumentAttachments
+          target={{ kind: 'journal', id }}
+          files={papers}
+          canEdit={canAttach}
+          hint="Supporting paper for this entry · PDF or image · 4 MB or smaller"
+        />
       ) : null}
 
-      {journal.status === 'DELETED' ? (
-        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
-          This entry was deleted
-          {journal.deletedAt
-            ? ` on ${formatDate(toCalendarDate(journal.deletedAt))}`
-            : ''}
-          {journal.deleteReason ? ` — ${journal.deleteReason}` : ''}. It is excluded from every
-          balance and every report. The entry is kept, exactly as it was posted, so what was once in
-          the books can still be read.
+      {isManual && neighbors ? (
+        <div className="mb-4 flex flex-wrap items-center gap-1 print:hidden">
+          <RecordNav {...neighborHrefs('/journals', neighbors, journal.id, '')} />
         </div>
       ) : null}
 
-      {journal.status === 'REVERSED' && journal.reversedBy ? (
-        <Notice>
-          This entry was reversed by{' '}
-          <Link href={`/journals/${journal.reversedBy.id}`} className="font-medium underline underline-offset-4">
-            {journal.reversedBy.journalNumber}
-          </Link>{' '}
-          on {formatDate(toCalendarDate(journal.reversedBy.date))}. Both remain in the ledger and cancel out.
-        </Notice>
-      ) : null}
+      <div data-print-root className="space-y-4">
+        <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Detail
+            label="Date"
+            value={formatTransactionDate(toCalendarDate(journal.date), journal.postedAt, ctx.organization.timeZone)}
+          />
+          <Detail
+            label="Source"
+            value={
+              journal.source.number
+                ? `${JOURNAL_SOURCE_LABELS[journal.sourceType] ?? journal.sourceType} ${journal.source.number}`
+                : (JOURNAL_SOURCE_LABELS[journal.sourceType] ?? journal.sourceType)
+            }
+            href={journal.source.href ?? undefined}
+          />
+          <Detail
+            label="Period"
+            value={`${formatDate(toCalendarDate(journal.period.startDate))} — ${PERIOD_STATUS_LABELS[journal.period.status]}`}
+          />
+          {party ? (
+            <Detail label="Customer / vendor" value={party.name} href={party.href} />
+          ) : (
+            <Detail label="Posted" value={formatDateTime(journal.postedAt, ctx.organization.timeZone)} />
+          )}
+        </div>
 
-      {journal.reversalOf ? (
-        <Notice>
-          This is the reversal of{' '}
-          <Link href={`/journals/${journal.reversalOf.id}`} className="font-medium underline underline-offset-4">
-            {journal.reversalOf.journalNumber}
-          </Link>
-          {journal.reversalReason ? ` — ${journal.reversalReason}` : null}.
-        </Notice>
-      ) : null}
+        {party ? (
+          <p className="mb-4 text-xs text-muted-foreground">
+            Posted {formatDateTime(journal.postedAt, ctx.organization.timeZone)}
+          </p>
+        ) : null}
 
-      <Card className="overflow-hidden p-0">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-12">#</TableHead>
-              <TableHead>Account</TableHead>
-              <TableHead className="w-48">Customer / vendor</TableHead>
-              <TableHead>Description</TableHead>
-              <TableHead className="numeric w-36">Debit</TableHead>
-              <TableHead className="numeric w-36">Credit</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {journal.lines.map((line) => (
-              <TableRow key={line.id}>
-                <TableCell className="tabular text-muted-foreground">{line.lineNumber}</TableCell>
-                <TableCell>
-                  <Link
-                    href={`/accounts/${line.account.id}`}
-                    className="underline-offset-4 hover:underline"
-                  >
-                    <span className="tabular text-muted-foreground">{line.account.code}</span>{' '}
-                    {line.account.name}
-                  </Link>
-                </TableCell>
-                <TableCell>
-                  {line.customer ? (
+        {journal.autoReverse && journal.status === 'POSTED' && !journal.reversedBy ? (
+          <Notice>
+            Marked to reverse automatically on the first day of the next period. The mirror entry has
+            not been written yet (for example if this is still waiting on approval).
+          </Notice>
+        ) : null}
+
+        {journal.autoReverse && journal.reversedBy ? (
+          <Notice>
+            Auto-reversed into the next period by{' '}
+            <Link href={`/journals/${journal.reversedBy.id}`} className="font-medium underline underline-offset-4">
+              {journal.reversedBy.journalNumber}
+            </Link>{' '}
+            dated {formatDate(toCalendarDate(journal.reversedBy.date))}.
+          </Notice>
+        ) : null}
+
+        {journal.status === 'REVERSED' && journal.reversedBy && !journal.autoReverse ? (
+          <Notice>
+            This entry was reversed by{' '}
+            <Link href={`/journals/${journal.reversedBy.id}`} className="font-medium underline underline-offset-4">
+              {journal.reversedBy.journalNumber}
+            </Link>{' '}
+            on {formatDate(toCalendarDate(journal.reversedBy.date))}. Both remain in the ledger and cancel out.
+          </Notice>
+        ) : null}
+
+        {journal.reversalOf ? (
+          <Notice>
+            This is the reversal of{' '}
+            <Link href={`/journals/${journal.reversalOf.id}`} className="font-medium underline underline-offset-4">
+              {journal.reversalOf.journalNumber}
+            </Link>
+            {journal.reversalReason ? ` — ${journal.reversalReason}` : null}.
+          </Notice>
+        ) : null}
+
+        <Card className="overflow-hidden p-0">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Account</TableHead>
+                <TableHead className="numeric w-36">Debit</TableHead>
+                <TableHead className="numeric w-36">Credit</TableHead>
+                <TableHead>Memo</TableHead>
+                <TableHead className="w-48">Name</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {journal.lines.map((line) => (
+                <TableRow key={line.id}>
+                  <TableCell>
                     <Link
-                      href={`/customers/${line.customer.id}`}
-                      className="underline-offset-4 hover:underline"
+                      href={`/accounts/${line.account.id}`}
+                      className="inline-flex items-center gap-1.5 underline-offset-4 hover:underline"
                     >
-                      {line.customer.displayName}
+                      <AccountTypeIcon type={line.account.type} size="sm" />
+                      <span>
+                        <span className="tabular text-muted-foreground">{line.account.code}</span>{' '}
+                        {line.account.name}
+                      </span>
                     </Link>
-                  ) : line.vendor ? (
-                    <Link
-                      href={`/vendors/${line.vendor.id}`}
-                      className="underline-offset-4 hover:underline"
-                    >
-                      {line.vendor.displayName}
-                    </Link>
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
+                  </TableCell>
+                  <TableCell className="numeric tabular">
+                    {line.debit === '0' ? '' : formatMoney(line.debit, currency)}
+                  </TableCell>
+                  <TableCell className="numeric tabular">
+                    {line.credit === '0' ? '' : formatMoney(line.credit, currency)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">{line.description ?? '—'}</TableCell>
+                  <TableCell>
+                    {line.customer ? (
+                      <Link
+                        href={`/customers?id=${line.customer.id}`}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {line.customer.displayName}
+                      </Link>
+                    ) : line.vendor ? (
+                      <Link
+                        href={`/vendors/${line.vendor.id}`}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {line.vendor.displayName}
+                      </Link>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+            <TableFooter>
+              <TableRow>
+                <TableCell className="font-medium">
+                  Totals
+                  {journal.balanced ? null : (
+                    <Badge variant="destructive" className="ml-2">
+                      out of balance
+                    </Badge>
                   )}
                 </TableCell>
-                <TableCell className="text-muted-foreground">{line.description ?? '—'}</TableCell>
-                <TableCell className="numeric tabular">
-                  {line.debit === '0' ? '' : formatMoney(line.debit, currency)}
+                <TableCell className="numeric tabular font-semibold">
+                  {formatMoney(journal.totalDebit, currency)}
                 </TableCell>
-                <TableCell className="numeric tabular">
-                  {line.credit === '0' ? '' : formatMoney(line.credit, currency)}
+                <TableCell className="numeric tabular font-semibold">
+                  {formatMoney(journal.totalCredit, currency)}
                 </TableCell>
+                <TableCell colSpan={2} />
               </TableRow>
-            ))}
-          </TableBody>
-          <TableFooter>
-            <TableRow>
-              <TableCell colSpan={4} className="font-medium">
-                Totals
-                {journal.balanced ? null : (
-                  <Badge variant="destructive" className="ml-2">
-                    out of balance
-                  </Badge>
-                )}
-              </TableCell>
-              <TableCell className="numeric tabular font-semibold">
-                {formatMoney(journal.totalDebit, currency)}
-              </TableCell>
-              <TableCell className="numeric tabular font-semibold">
-                {formatMoney(journal.totalCredit, currency)}
-              </TableCell>
-            </TableRow>
-          </TableFooter>
-        </Table>
-      </Card>
+            </TableFooter>
+          </Table>
+        </Card>
+      </div>
 
       <p className="mt-4 text-xs text-muted-foreground">
-        Posted entries cannot be edited or deleted, by this application or by anything else with access to
-        the database. Corrections are reversals.
+        Posted amounts are never rewritten. Delete withdraws the entry from balances and reports while
+        keeping the row for history. Reverse posts an equal opposite entry. Configuration → Settings
+        controls whether Delete is offered.
       </p>
+
+      <ApprovalTrailPanel entityType="JOURNAL" entityId={journal.id} />
+
+      <DocumentHistory events={history} timeZone={ctx.organization.timeZone} />
     </>
   )
 }

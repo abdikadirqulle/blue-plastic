@@ -1,7 +1,33 @@
 import 'server-only'
 
+import { cookies } from 'next/headers'
+
+import { parseDocumentTemplate, type DocumentTemplate } from '@/lib/document-template'
+import { applyPaperChoice, PAPER_CHOICE_COOKIE, parsePaperChoice } from '@/lib/paper-choice'
+import {
+  parseOrgFormTemplates,
+  removeTemplateInOrg,
+  setActiveInOrg,
+  upsertTemplateInOrg,
+  type FormFamilyKey,
+  type FormTemplate,
+  type OrgFormTemplates,
+} from '@/lib/form-templates'
+import {
+  modulesClampedToGrants,
+  parseFeatureFlags,
+  type ModuleFlag,
+  type OrgFeatureFlags,
+} from '@/lib/feature-flags'
+import {
+  documentKindsFromFeaturesInput,
+  modulesFromFeaturesInput,
+} from '@/lib/validation/organization'
 import type {
+  DocumentTemplateInput,
   OrganizationAccountingInput,
+  OrganizationBrandingInput,
+  OrganizationFeaturesInput,
   OrganizationUpdateInput,
 } from '@/lib/validation/organization'
 import { requestMeta, writeAudit } from '@/server/audit'
@@ -26,7 +52,11 @@ const PROFILE_SELECT = {
   email: true,
   website: true,
   timeZone: true,
+  brandMark: true,
+  logoStorageKey: true,
+  logoContentType: true,
   createdAt: true,
+  updatedAt: true,
 } as const
 
 export async function get(ctx: OrgContext) {
@@ -58,6 +88,38 @@ export async function update(ctx: OrgContext, input: OrganizationUpdateInput) {
       tx,
       ctx,
       { entity: 'Organization', entityId: ctx.orgId, action: 'UPDATE', before, after },
+      meta,
+    )
+    return after
+  })
+}
+
+export async function updateBranding(ctx: OrgContext, input: OrganizationBrandingInput) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const before = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { brandMark: true, logoStorageKey: true },
+    })
+    if (!before) throw notFound('Organisation')
+
+    const after = await tx.organization.update({
+      where: { id: ctx.orgId },
+      data: { brandMark: input.brandMark },
+      select: PROFILE_SELECT,
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Organization',
+        entityId: ctx.orgId,
+        action: 'UPDATE',
+        before: { brandMark: before.brandMark },
+        after: { brandMark: after.brandMark },
+      },
       meta,
     )
     return after
@@ -113,6 +175,307 @@ export async function updateAccountingSettings(
  * True once anything has been posted to the ledger. The journal tables arrive in
  * Phase 2; until then there is by definition no activity to protect.
  */
+/**
+ * Sign-in renders before there is a session, so it cannot use OrgContext. The
+ * instance's first organisation decides whether the creator brand shows there.
+ * Read-only.
+ */
+export async function creatorBrandVisibleBeforeSignIn(): Promise<boolean> {
+  const org = await db.organization.findFirst({
+    orderBy: { createdAt: 'asc' },
+    select: { featureFlags: true },
+  })
+  return parseFeatureFlags(org?.featureFlags).showCreatorBrand
+}
+
+export async function getFeatureFlags(ctx: OrgContext): Promise<OrgFeatureFlags> {
+  const org = await db.organization.findUnique({
+    where: { id: ctx.orgId },
+    select: { featureFlags: true },
+  })
+  if (!org) throw notFound('Organisation')
+  return parseFeatureFlags(org.featureFlags)
+}
+
+export async function updateFeatureFlags(ctx: OrgContext, input: OrganizationFeaturesInput) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const before = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { featureFlags: true },
+    })
+    if (!before) throw notFound('Organisation')
+
+    // Keep company tax (Settings → Tax) separate from apps/deletes saved here.
+    // Grants stay owner-controlled; this page only turns granted apps on/off.
+    const previous = parseFeatureFlags(before.featureFlags)
+    const flags: OrgFeatureFlags = {
+      allowJournalDelete: input.allowJournalDelete,
+      allowCustomerDelete: input.allowCustomerDelete,
+      allowVendorDelete: input.allowVendorDelete,
+      allowItemDelete: input.allowItemDelete,
+      allowAccountDelete: input.allowAccountDelete,
+      allowDocumentDelete: input.allowDocumentDelete,
+      showCreatorBrand: input.showCreatorBrand,
+      enableTax: input.enableTax ?? previous.enableTax,
+      enableCustomerPortal: input.enableCustomerPortal,
+      enableDocumentApprovals: input.enableDocumentApprovals,
+      creditLimitWarn: input.creditLimitWarn,
+      payrollStandard: input.payrollStandard,
+      closeHardGates: input.closeHardGates ?? previous.closeHardGates,
+      grantedModules: previous.grantedModules,
+      modules: modulesClampedToGrants(modulesFromFeaturesInput(input), previous.grantedModules),
+      documentKinds: documentKindsFromFeaturesInput(input),
+    }
+
+    const after = await tx.organization.update({
+      where: { id: ctx.orgId },
+      data: { featureFlags: flags },
+      select: { featureFlags: true },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Organization',
+        entityId: ctx.orgId,
+        action: 'UPDATE',
+        before: { featureFlags: before.featureFlags },
+        after: { featureFlags: after.featureFlags },
+      },
+      meta,
+    )
+    return parseFeatureFlags(after.featureFlags)
+  })
+}
+
+/** Header / quick power: flip one granted app on or off. Preserves nested kinds. */
+export async function updateModuleEnabled(
+  ctx: OrgContext,
+  module: ModuleFlag,
+  enabled: boolean,
+) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const before = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { featureFlags: true },
+    })
+    if (!before) throw notFound('Organisation')
+
+    const previous = parseFeatureFlags(before.featureFlags)
+    if (!previous.grantedModules[module]) {
+      throw precondition('This app was not granted to this company.')
+    }
+
+    const flags: OrgFeatureFlags = {
+      ...previous,
+      modules: modulesClampedToGrants(
+        { ...previous.modules, [module]: enabled },
+        previous.grantedModules,
+      ),
+    }
+
+    const after = await tx.organization.update({
+      where: { id: ctx.orgId },
+      data: { featureFlags: flags },
+      select: { featureFlags: true },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Organization',
+        entityId: ctx.orgId,
+        action: 'UPDATE',
+        before: { modules: previous.modules },
+        after: { modules: flags.modules },
+      },
+      meta,
+    )
+    return parseFeatureFlags(after.featureFlags)
+  })
+}
+
+/** Company tax on/off — Settings → Tax. Not ERP Databases → Limits. */
+export async function updateEnableTax(ctx: OrgContext, enableTax: boolean) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const before = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { featureFlags: true },
+    })
+    if (!before) throw notFound('Organisation')
+
+    const flags: OrgFeatureFlags = {
+      ...parseFeatureFlags(before.featureFlags),
+      enableTax,
+    }
+
+    const after = await tx.organization.update({
+      where: { id: ctx.orgId },
+      data: { featureFlags: flags },
+      select: { featureFlags: true },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Organization',
+        entityId: ctx.orgId,
+        action: 'UPDATE',
+        before: { enableTax: parseFeatureFlags(before.featureFlags).enableTax },
+        after: { enableTax },
+      },
+      meta,
+    )
+    return parseFeatureFlags(after.featureFlags)
+  })
+}
+
+export async function getDocumentTemplate(ctx: OrgContext): Promise<DocumentTemplate> {
+  const org = await db.organization.findUnique({
+    where: { id: ctx.orgId },
+    select: { documentTemplate: true },
+  })
+  if (!org) throw notFound('Organisation')
+  return parseDocumentTemplate(org.documentTemplate)
+}
+
+/** Saved paper, then the Print/PDF choice (query wins over the browser cookie). */
+export async function getPrintTemplate(
+  ctx: OrgContext,
+  queryPaper?: string | null,
+): Promise<DocumentTemplate> {
+  const saved = await getDocumentTemplate(ctx)
+  const query = parsePaperChoice(queryPaper)
+  if (query) return applyPaperChoice(saved, query)
+  const jar = await cookies()
+  return applyPaperChoice(saved, parsePaperChoice(jar.get(PAPER_CHOICE_COOKIE)?.value))
+}
+
+export async function getFormTemplates(ctx: OrgContext): Promise<OrgFormTemplates> {
+  const org = await db.organization.findUnique({
+    where: { id: ctx.orgId },
+    select: { formTemplates: true },
+  })
+  if (!org) throw notFound('Organisation')
+  return parseOrgFormTemplates(org.formTemplates)
+}
+
+async function writeFormTemplates(
+  ctx: OrgContext,
+  next: OrgFormTemplates,
+): Promise<OrgFormTemplates> {
+  const meta = await requestMeta()
+  return db.$transaction(async (tx) => {
+    const before = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { formTemplates: true },
+    })
+    if (!before) throw notFound('Organisation')
+
+    const after = await tx.organization.update({
+      where: { id: ctx.orgId },
+      data: { formTemplates: next },
+      select: { formTemplates: true },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Organization',
+        entityId: ctx.orgId,
+        action: 'UPDATE',
+        before: { formTemplates: before.formTemplates },
+        after: { formTemplates: after.formTemplates },
+      },
+      meta,
+    )
+    return parseOrgFormTemplates(after.formTemplates)
+  })
+}
+
+export async function upsertFormTemplate(
+  ctx: OrgContext,
+  family: FormFamilyKey,
+  template: FormTemplate,
+  makeActive: boolean,
+): Promise<OrgFormTemplates> {
+  const current = await getFormTemplates(ctx)
+  return writeFormTemplates(ctx, upsertTemplateInOrg(current, family, template, makeActive))
+}
+
+export async function setActiveFormTemplate(
+  ctx: OrgContext,
+  family: FormFamilyKey,
+  templateId: string,
+): Promise<OrgFormTemplates> {
+  const current = await getFormTemplates(ctx)
+  return writeFormTemplates(ctx, setActiveInOrg(current, family, templateId))
+}
+
+export async function deleteFormTemplate(
+  ctx: OrgContext,
+  family: FormFamilyKey,
+  templateId: string,
+): Promise<OrgFormTemplates> {
+  const current = await getFormTemplates(ctx)
+  return writeFormTemplates(ctx, removeTemplateInOrg(current, family, templateId))
+}
+
+export async function updateDocumentTemplate(ctx: OrgContext, input: DocumentTemplateInput) {
+  const meta = await requestMeta()
+  const template: DocumentTemplate = parseDocumentTemplate({
+    accent: input.accent,
+    vendorAccent: input.vendorAccent,
+    terms: input.terms ?? '',
+    footerTitle: input.footerTitle ?? '',
+    footerNote: input.footerNote ?? '',
+    footerLayout: input.footerLayout,
+    showClassicPaper: input.showClassicPaper,
+    paperStyle: input.paperStyle,
+    banks: input.banks
+      .map((bank) => ({ name: bank.name ?? '', account: bank.account ?? '' }))
+      .filter((bank) => bank.name || bank.account),
+  })
+
+  return db.$transaction(async (tx) => {
+    const before = await tx.organization.findUnique({
+      where: { id: ctx.orgId },
+      select: { documentTemplate: true },
+    })
+    if (!before) throw notFound('Organisation')
+
+    const after = await tx.organization.update({
+      where: { id: ctx.orgId },
+      data: { documentTemplate: template },
+      select: { documentTemplate: true },
+    })
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'Organization',
+        entityId: ctx.orgId,
+        action: 'UPDATE',
+        before: { documentTemplate: before.documentTemplate },
+        after: { documentTemplate: after.documentTemplate },
+      },
+      meta,
+    )
+    return parseDocumentTemplate(after.documentTemplate)
+  })
+}
+
 async function hasLedgerActivity(orgId: string): Promise<boolean> {
   const [row] = await db.$queryRaw<{ exists: boolean }[]>`
     SELECT EXISTS (

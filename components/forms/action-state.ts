@@ -1,3 +1,4 @@
+import { formatAccessDeniedMessage } from '@/lib/access-denied'
 import type { ActionResult } from '@/server/action'
 
 /**
@@ -8,6 +9,8 @@ import type { ActionResult } from '@/server/action'
 export type FormState = {
   status: 'idle' | 'success' | 'error'
   message?: string
+  /** AppError code, so a forbidden submit can be told apart from a typo. */
+  code?: string
   fieldErrors?: Record<string, string[]>
   /**
    * The record that was created or saved. Carried so a dialog opened from
@@ -15,6 +18,28 @@ export type FormState = {
    * without the caller having to re-fetch the list and guess which one is new.
    */
   created?: { id: string; label?: string }
+  /** Accept-invite URL when staff chose “send invite link” mode. */
+  inviteUrl?: string
+  /** Branded customer portal sign-in URL for this company (password mode). */
+  portalLoginUrl?: string
+  /** Email for a newly created portal login (shown once after invite). */
+  portalEmail?: string
+  /** Temporary password shown once after invite / reset. */
+  temporaryPassword?: string
+  /**
+   * Rename hit an existing name — the form can offer to merge into that record
+   * instead of leaving the user with a dead-end conflict.
+   */
+  mergeClash?: { id: string; name: string }
+  /** Soft warning after a successful save (e.g. to-do saved but email notify failed). */
+  warning?: string
+  /**
+   * A likely duplicate. The form asks once, then resubmits with
+   * acknowledgeDuplicate so the save is allowed through.
+   */
+  duplicate?: { existingId: string; existingNumber: string }
+  /** WhatsApp wa.me URL to open after assigning a to-do. */
+  whatsappUrl?: string
 }
 
 export const idleState: FormState = { status: 'idle' }
@@ -28,12 +53,43 @@ export function toFormState(result: ActionResult<unknown>, successMessage: strin
       created: data?.id ? { id: data.id, label: data.displayName ?? data.name } : undefined,
     }
   }
+  if (result.error.code === 'FORBIDDEN') {
+    return { status: 'error', code: 'FORBIDDEN', message: formatAccessDeniedMessage() }
+  }
+  const details = result.error.details
+  if (
+    result.error.code === 'CONFLICT' &&
+    details?.merge?.[0] === 'true' &&
+    details.clashId?.[0]
+  ) {
+    return {
+      status: 'error',
+      code: 'CONFLICT',
+      message: result.error.message,
+      mergeClash: {
+        id: details.clashId[0],
+        name: details.clashName?.[0] ?? '',
+      },
+    }
+  }
+  if (result.error.code === 'CONFLICT' && details?.duplicate?.[0] === 'true') {
+    return {
+      status: 'error',
+      code: 'CONFLICT',
+      message: result.error.message,
+      duplicate: {
+        existingId: details.existingId?.[0] ?? '',
+        existingNumber: details.existingNumber?.[0] ?? '',
+      },
+    }
+  }
   return {
     status: 'error',
+    code: result.error.code,
     // Field-level errors are shown against their fields; only show a banner for
     // failures that belong to the form as a whole.
-    message: result.error.details ? undefined : result.error.message,
-    fieldErrors: result.error.details,
+    message: details ? undefined : result.error.message,
+    fieldErrors: details,
   }
 }
 

@@ -26,7 +26,8 @@ export function SetupForm() {
         <Field name="organizationName" label="Organisation name" required error={state.fieldErrors?.organizationName}>
           <Input
             {...fieldProps('organizationName', state.fieldErrors?.organizationName)}
-            defaultValue={v.organizationName ?? 'Blue Plastic Center'}
+            defaultValue={v.organizationName ?? ''}
+            placeholder="Your company name"
             autoFocus
             required
           />
@@ -95,7 +96,7 @@ export function SetupForm() {
           <Field
             name="password"
             label="Password"
-            hint="At least 12 characters."
+            hint="At least 6 characters. Letters, numbers, and symbols are fine."
             required
             error={state.fieldErrors?.password}
           >

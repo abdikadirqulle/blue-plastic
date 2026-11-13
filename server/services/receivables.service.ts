@@ -78,7 +78,7 @@ export async function aging(
     >`
       SELECT d."customerId"                       AS "customerId",
              c."displayName"                      AS "customerName",
-             (${asOfDate}::date - d."dueDate")    AS days,
+             (${asOfDate}::date - COALESCE(d."promisedDate", d."dueDate")) AS days,
              (d.total - COALESCE((
                 SELECT SUM(a.amount) FROM sales_applications a WHERE a."invoiceId" = d.id
              ), 0))                               AS outstanding
@@ -88,6 +88,7 @@ export async function aging(
          AND d."deletedAt" IS NULL
          AND d.type     = 'INVOICE'
          AND d.status  IN ('OPEN', 'PARTIAL')
+         AND d."excludeFromOverdue" = false
          AND d.date    <= ${asOfDate}
     `,
     // The control account, broken down by whose balance it is.
@@ -188,16 +189,44 @@ function bucketFor(daysOverdue: number | null): AgingBucket {
   return 'd90_plus'
 }
 
+export type StatementKind =
+  | 'INVOICE'
+  | 'CREDIT_MEMO'
+  | 'PAYMENT'
+  | 'SALES_RECEIPT'
+  | 'REFUND_RECEIPT'
+  | 'EXPENSE'
+  | 'JOURNAL'
+  | 'ESTIMATE'
+  | 'QUOTATION'
+
+/** One written line of an invoice, credit, receipt or refund. */
+export type StatementItem = {
+  description: string
+  quantity: string
+  rate: string
+  amount: string
+}
+
 export type StatementEntry = {
   id: string
-  kind: 'INVOICE' | 'CREDIT_MEMO' | 'PAYMENT' | 'SALES_RECEIPT' | 'REFUND_RECEIPT'
+  kind: StatementKind
   number: string
   date: Date
   dueDate: Date | null
   description: string
   charge: Decimal
   credit: Decimal
+  /**
+   * What is still open on this document: unpaid invoice, unused credit, or
+   * unapplied payment. Zero when the row does not carry a balance of its own.
+   */
+  openAmount: Decimal
+  /** Document total, before anything was applied. */
+  original: Decimal
   balance: Decimal
+  status: string
+  lines: StatementItem[]
   /** Where the document lives, so a statement line is a way in to it. */
   href: string
 }
@@ -205,6 +234,10 @@ export type StatementEntry = {
 /**
  * A customer statement: everything that moved their balance, in date order,
  * with a running total. This is what gets sent when someone asks "what do I owe?"
+ *
+ * Journals that are not already an invoice or a payment are included, so an
+ * opening balance still appears as its own line. Estimates are included so a
+ * type filter can show them; they do not move the balance.
  */
 export async function statement(
   ctx: OrgContext,
@@ -213,29 +246,58 @@ export async function statement(
   options: { client?: Tx } = {},
 ): Promise<{ opening: Decimal; entries: StatementEntry[]; closing: Decimal }> {
   const client = options.client ?? db
+  const from = toDate(range.from)
+  const to = toDate(range.to)
 
   const [openingRow] = await client.$queryRaw<{ balance: string }[]>`
     SELECT COALESCE(SUM(l.debit - l.credit), 0) AS balance
       FROM journal_lines l
       JOIN journals j ON j.id = l."journalId" AND j.status NOT IN ('DRAFT', 'DELETED')
+      JOIN ledger_accounts a ON a.id = l."accountId"
      WHERE l."orgId" = ${ctx.orgId}
        AND l."customerId" = ${customerId}
-       AND l."journalDate" < ${toDate(range.from)}
+       AND a.subtype::text = 'ACCOUNTS_RECEIVABLE'
+       AND l."journalDate" < ${from}
   `
   const opening = new Decimal(openingRow?.balance ?? '0')
 
-  const [documents, payments] = await Promise.all([
+  // Documents, payments, and customer-offset expenses first. Journals are loaded
+  // after so we can skip any posting that already appears as one of those —
+  // including legacy rows where only `sourceId` is set and `journalId` is null.
+  const [documents, payments, expenses] = await Promise.all([
     client.salesDocument.findMany({
       where: {
         orgId: ctx.orgId,
         customerId,
-        status: { notIn: ['DRAFT', 'VOID'] },
-        type: { in: ['INVOICE', 'CREDIT_MEMO', 'SALES_RECEIPT', 'REFUND_RECEIPT'] },
-        date: { gte: toDate(range.from), lte: toDate(range.to) },
+        status: { notIn: ['DRAFT', 'VOID', 'DECLINED'] },
+        type: { not: 'SALES_ORDER' },
+        date: { gte: from, lte: to },
       },
       select: {
-        id: true, type: true, number: true, date: true, dueDate: true, total: true, memo: true,
+        id: true,
+        journalId: true,
+        type: true,
+        number: true,
+        date: true,
+        dueDate: true,
+        total: true,
+        taxTotal: true,
+        discountAmount: true,
+        memo: true,
         reference: true,
+        status: true,
+        applications: { select: { amount: true } },
+        creditsApplied: { select: { amount: true } },
+        lines: {
+          orderBy: { lineNumber: 'asc' },
+          select: {
+            description: true,
+            quantity: true,
+            unitPrice: true,
+            amount: true,
+            item: { select: { name: true } },
+          },
+        },
       },
     }),
     client.customerPayment.findMany({
@@ -243,43 +305,314 @@ export async function statement(
         orgId: ctx.orgId,
         customerId,
         status: { not: 'VOID' },
-        date: { gte: toDate(range.from), lte: toDate(range.to) },
+        date: { gte: from, lte: to },
       },
-      select: { id: true, number: true, date: true, amount: true, memo: true },
+      select: {
+        id: true,
+        journalId: true,
+        number: true,
+        date: true,
+        amount: true,
+        memo: true,
+        status: true,
+        applications: { select: { amount: true } },
+      },
+    }),
+    client.purchaseDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        offsetCustomerId: customerId,
+        type: 'EXPENSE',
+        status: { notIn: ['DRAFT', 'VOID'] },
+        date: { gte: from, lte: to },
+      },
+      select: {
+        id: true,
+        journalId: true,
+        number: true,
+        date: true,
+        total: true,
+        taxTotal: true,
+        memo: true,
+        reference: true,
+        status: true,
+        lines: {
+          orderBy: { lineNumber: 'asc' },
+          select: {
+            description: true,
+            quantity: true,
+            unitPrice: true,
+            amount: true,
+            item: { select: { name: true } },
+            expenseAccount: { select: { name: true } },
+          },
+        },
+      },
     }),
   ])
 
+  // Cover every document/payment/expense for this customer (any date) so a journal
+  // in the period is not double-counted when its document falls outside the filter.
+  const [allDocumentLinks, allPaymentLinks, allExpenseLinks] = await Promise.all([
+    client.salesDocument.findMany({
+      where: { orgId: ctx.orgId, customerId, type: { not: 'SALES_ORDER' } },
+      select: { id: true, journalId: true },
+    }),
+    client.customerPayment.findMany({
+      where: { orgId: ctx.orgId, customerId },
+      select: { id: true, journalId: true },
+    }),
+    client.purchaseDocument.findMany({
+      where: { orgId: ctx.orgId, offsetCustomerId: customerId, type: 'EXPENSE' },
+      select: { id: true, journalId: true },
+    }),
+  ])
+
+  const coveredJournalIds = [
+    ...allDocumentLinks.map((row) => row.journalId).filter((id): id is string => Boolean(id)),
+    ...allPaymentLinks.map((row) => row.journalId).filter((id): id is string => Boolean(id)),
+    ...allExpenseLinks.map((row) => row.journalId).filter((id): id is string => Boolean(id)),
+  ]
+  const coveredSourceIds = [
+    ...allDocumentLinks.map((row) => row.id),
+    ...allPaymentLinks.map((row) => row.id),
+    ...allExpenseLinks.map((row) => row.id),
+  ]
+
+  // Prefer posted AR amounts over document/payment totals so a legacy import
+  // drift (payment $7000, journal credit $7010) cannot leave the statement off
+  // the subledger by that difference.
+  const arByJournalId = new Map<string, Decimal>()
+  if (coveredJournalIds.length > 0) {
+    const arLines = await client.journalLine.findMany({
+      where: {
+        orgId: ctx.orgId,
+        customerId,
+        journalId: { in: coveredJournalIds },
+        account: { subtype: 'ACCOUNTS_RECEIVABLE' },
+      },
+      select: { journalId: true, debit: true, credit: true },
+    })
+    for (const line of arLines) {
+      const delta = new Decimal(line.debit.toString()).minus(line.credit.toString())
+      arByJournalId.set(
+        line.journalId,
+        (arByJournalId.get(line.journalId) ?? ZERO).plus(delta),
+      )
+    }
+  }
+
+  const journals = await client.journalLine.findMany({
+    where: {
+      orgId: ctx.orgId,
+      customerId,
+      journalDate: { gte: from, lte: to },
+      account: { subtype: 'ACCOUNTS_RECEIVABLE' },
+      journal: {
+        // REVERSED originals and their REVERSAL mirrors are not statement rows —
+        // the live invoice / payment / expense already carries the balance.
+        status: { notIn: ['DRAFT', 'DELETED', 'REVERSED'] },
+        salesDocuments: { none: {} },
+        customerPayments: { none: {} },
+        purchaseDocuments: { none: {} },
+        ...(coveredJournalIds.length > 0 ? { id: { notIn: coveredJournalIds } } : {}),
+        ...(coveredSourceIds.length > 0
+          ? {
+              OR: [{ sourceId: null }, { sourceId: { notIn: coveredSourceIds } }],
+            }
+          : {}),
+        // Document-backed source types always belong on the document/payment/expense row.
+        // REVERSAL points at a journal id, not a document id, so it must be listed too.
+        sourceType: {
+          notIn: [
+            'INVOICE',
+            'CREDIT_MEMO',
+            'SALES_RECEIPT',
+            'REFUND_RECEIPT',
+            'CUSTOMER_PAYMENT',
+            'EXPENSE',
+            'REVERSAL',
+          ],
+        },
+      },
+    },
+    select: {
+      id: true,
+      debit: true,
+      credit: true,
+      description: true,
+      journalDate: true,
+      journal: { select: { id: true, journalNumber: true, memo: true } },
+    },
+  })
+
   const entries: Omit<StatementEntry, 'balance'>[] = [
-    ...documents.map((document) => {
+    ...documents.flatMap((document) => {
+      // Trial-balance imports kept invoice paper without a journal. Those rows
+      // must not hit the statement as new charges — AR already holds the balance.
+      if (!document.journalId && (document.type === 'INVOICE' || document.type === 'CREDIT_MEMO')) {
+        return []
+      }
       const total = new Decimal(document.total.toString())
+      const applied = sumAmounts(document.applications)
+      const creditUsed = sumAmounts(document.creditsApplied)
       // An invoice increases what the customer owes; a credit memo reduces it.
-      // Receipts and refunds never touched receivables, so they are shown for
-      // completeness with no effect on the running balance.
+      // Receipts, refunds and estimates never touched receivables, so they are
+      // shown for completeness with no effect on the running balance.
       const isCharge = document.type === 'INVOICE'
       const isCredit = document.type === 'CREDIT_MEMO'
+      const posted = postedChargeCredit(
+        document.journalId ? arByJournalId.get(document.journalId) : undefined,
+        isCharge ? total : ZERO,
+        isCredit ? total : ZERO,
+      )
+      // Prefer the AR journal (open-item conversion posts remaining only) over
+      // document total minus applications when the two disagree.
+      const openFromLedger =
+        document.journalId && arByJournalId.has(document.journalId)
+          ? arByJournalId.get(document.journalId)!
+          : null
+      const openAmount = isCharge
+        ? openFromLedger
+          ? openFromLedger.isNegative()
+            ? ZERO
+            : openFromLedger
+          : total.minus(applied)
+        : isCredit
+          ? total.minus(creditUsed)
+          : ZERO
+      const items: StatementItem[] = document.lines.map((line) => {
+        const name = line.item?.name
+        const note = line.description
+        const description =
+          name && note && name !== note ? `${name} — ${note}` : name || note || 'Line'
+        return {
+          description,
+          quantity: line.quantity.toString(),
+          rate: line.unitPrice.toString(),
+          amount: line.amount.toString(),
+        }
+      })
+      if (!new Decimal(document.discountAmount.toString()).isZero()) {
+        items.push({
+          description: 'Discount',
+          quantity: '',
+          rate: '',
+          amount: new Decimal(document.discountAmount.toString()).negated().toString(),
+        })
+      }
+      if (!new Decimal(document.taxTotal.toString()).isZero()) {
+        items.push({
+          description: 'Tax',
+          quantity: '',
+          rate: '',
+          amount: document.taxTotal.toString(),
+        })
+      }
+      return [
+        {
+          id: document.id,
+          kind: document.type as StatementKind,
+          number: document.number,
+          date: document.date,
+          dueDate: document.dueDate,
+          description: document.memo ?? document.reference ?? labelFor(document.type),
+          charge: posted.charge,
+          credit: posted.credit,
+          openAmount,
+          original: total,
+          status: document.status,
+          lines: items,
+          href: `/sales/${SLUG[document.type] ?? 'invoices'}/${document.id}`,
+        },
+      ]
+    }),
+    ...payments.map((payment) => {
+      const amount = new Decimal(payment.amount.toString())
+      const posted = postedChargeCredit(
+        payment.journalId ? arByJournalId.get(payment.journalId) : undefined,
+        ZERO,
+        amount,
+      )
       return {
-        id: document.id,
-        kind: document.type as StatementEntry['kind'],
-        number: document.number,
-        date: document.date,
-        dueDate: document.dueDate,
-        description: document.memo ?? document.reference ?? labelFor(document.type),
-        charge: isCharge ? total : ZERO,
-        credit: isCredit ? total : ZERO,
-        href: `/sales/${SLUG[document.type] ?? 'invoices'}/${document.id}`,
+        id: payment.id,
+        kind: 'PAYMENT' as const,
+        number: payment.number,
+        date: payment.date,
+        dueDate: null,
+        description: payment.memo ?? 'Payment received',
+        charge: posted.charge,
+        credit: posted.credit,
+        openAmount: amount.minus(sumAmounts(payment.applications)),
+        original: amount,
+        status: payment.status,
+        lines: [],
+        href: `/payments?q=${encodeURIComponent(payment.number)}`,
       }
     }),
-    ...payments.map((payment) => ({
-      id: payment.id,
-      kind: 'PAYMENT' as const,
-      number: payment.number,
-      date: payment.date,
-      dueDate: null,
-      description: payment.memo ?? 'Payment received',
-      charge: ZERO,
-      credit: new Decimal(payment.amount.toString()),
-      href: '/payments',
-    })),
+    ...expenses.map((document) => {
+      const total = new Decimal(document.total.toString())
+      // Customer-offset expenses credit AR (goods/services taken against what they owe).
+      const posted = postedChargeCredit(
+        document.journalId ? arByJournalId.get(document.journalId) : undefined,
+        ZERO,
+        total,
+      )
+      const items: StatementItem[] = document.lines.map((line) => {
+        const name = line.item?.name ?? line.expenseAccount?.name
+        const note = line.description
+        const description =
+          name && note && name !== note ? `${name} — ${note}` : name || note || 'Line'
+        return {
+          description,
+          quantity: line.quantity.toString(),
+          rate: line.unitPrice.toString(),
+          amount: line.amount.toString(),
+        }
+      })
+      if (!new Decimal(document.taxTotal.toString()).isZero()) {
+        items.push({
+          description: 'Tax',
+          quantity: '',
+          rate: '',
+          amount: document.taxTotal.toString(),
+        })
+      }
+      return {
+        id: document.id,
+        kind: 'EXPENSE' as const,
+        number: document.number,
+        date: document.date,
+        dueDate: null,
+        description: document.memo ?? document.reference ?? 'Expense',
+        charge: posted.charge,
+        credit: posted.credit,
+        openAmount: ZERO,
+        original: total,
+        status: document.status,
+        lines: items,
+        href: `/purchases/expenses/${document.id}`,
+      }
+    }),
+    ...journals.map((line) => {
+      const debit = new Decimal(line.debit.toString())
+      const credit = new Decimal(line.credit.toString())
+      return {
+        id: line.id,
+        kind: 'JOURNAL' as const,
+        number: line.journal.journalNumber,
+        date: line.journalDate,
+        dueDate: null,
+        description: line.description ?? line.journal.memo ?? 'Journal entry',
+        charge: debit,
+        credit,
+        openAmount: debit.minus(credit),
+        original: debit.minus(credit).abs(),
+        status: 'POSTED',
+        lines: [],
+        href: `/journals/${line.journal.id}`,
+      }
+    }),
   ].sort((a, b) => a.date.getTime() - b.date.getTime() || a.number.localeCompare(b.number))
 
   let running = opening
@@ -291,8 +624,27 @@ export async function statement(
   return { opening, entries: withBalances, closing: running }
 }
 
+function sumAmounts(rows: { amount: { toString(): string } }[]): Decimal {
+  return rows.reduce((sum, row) => sum.plus(row.amount.toString()), ZERO)
+}
+
+/** Map a signed control-account delta onto statement charge/credit columns. */
+function postedChargeCredit(
+  posted: Decimal | undefined,
+  fallbackCharge: Decimal,
+  fallbackCredit: Decimal,
+): { charge: Decimal; credit: Decimal } {
+  if (posted === undefined) return { charge: fallbackCharge, credit: fallbackCredit }
+  if (posted.greaterThan(0)) return { charge: posted, credit: ZERO }
+  if (posted.lessThan(0)) return { charge: ZERO, credit: posted.abs() }
+  return { charge: ZERO, credit: ZERO }
+}
+
 const SLUG: Record<string, string> = {
   INVOICE: 'invoices',
+  ESTIMATE: 'estimates',
+  QUOTATION: 'quotations',
+  SALES_ORDER: 'sales-orders',
   CREDIT_MEMO: 'credit-memos',
   SALES_RECEIPT: 'sales-receipts',
   REFUND_RECEIPT: 'refunds',
@@ -302,6 +654,10 @@ function labelFor(type: string): string {
   switch (type) {
     case 'INVOICE':
       return 'Invoice'
+    case 'ESTIMATE':
+      return 'Estimate'
+    case 'QUOTATION':
+      return 'Quotation'
     case 'CREDIT_MEMO':
       return 'Credit memo'
     case 'SALES_RECEIPT':

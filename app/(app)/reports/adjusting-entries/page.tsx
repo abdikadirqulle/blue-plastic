@@ -3,17 +3,19 @@ import Link from 'next/link'
 
 import { EmptyState } from '@/components/data/empty-state'
 import { PageHeader } from '@/components/data/page-header'
+import { ClickableRow } from '@/components/reports/clickable-row'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatDate, toCalendarDate } from '@/lib/date'
 import { formatMoney } from '@/lib/money'
+import { REPORT_DRILL_LINK } from '@/lib/report-drill'
 import { adjustingEntries } from '@/server/accounting/close-checklist'
 import { requireOrgContext } from '@/server/auth/context'
 import { ReportControls } from '../report-controls'
 import { readSettings, type SearchParams } from '../params'
 
-export const metadata: Metadata = { title: 'Adjusting entries' }
+export const metadata: Metadata = { title: 'Adjusting Journal Entries' }
 
 /**
  * Adjusting and closing entries, on their own.
@@ -38,7 +40,8 @@ export default async function AdjustingEntriesPage({
   return (
     <>
       <PageHeader
-        title="Adjusting entries"
+        organization={ctx.organization}
+        title="Adjusting Journal Entries"
         description={`Adjusting and year-end entries between ${formatDate(settings.range.from)} and ${formatDate(settings.range.to)}.`}
       />
 
@@ -90,14 +93,17 @@ export default async function AdjustingEntriesPage({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {journal.lines.map((line) => (
-                    <TableRow key={line.id}>
+                  {journal.lines.map((line) => {
+                    const href = `/reports/transaction-detail?account=${line.account.id}&period=custom&from=${settings.range.from}&to=${settings.range.to}&back=/reports/adjusting-entries`
+                    return (
+                    <ClickableRow
+                      key={line.id}
+                      href={href}
+                      title="Open transactions for this account"
+                    >
                       <TableCell className="tabular text-muted-foreground">{line.account.code}</TableCell>
                       <TableCell>
-                        <Link
-                          href={`/reports/transaction-detail?account=${line.account.id}&period=custom&from=${settings.range.from}&to=${settings.range.to}&back=/reports/adjusting-entries`}
-                          className="underline-offset-4 hover:underline"
-                        >
+                        <Link href={href} className={REPORT_DRILL_LINK} title="Open transactions for this account">
                           {line.account.name}
                         </Link>
                         {line.description ? (
@@ -105,13 +111,26 @@ export default async function AdjustingEntriesPage({
                         ) : null}
                       </TableCell>
                       <TableCell className="numeric tabular">
-                        {line.debit.isZero() ? '' : formatMoney(line.debit, currency)}
+                        {line.debit.isZero() ? (
+                          ''
+                        ) : (
+                          <Link href={href} className={REPORT_DRILL_LINK}>
+                            {formatMoney(line.debit, currency)}
+                          </Link>
+                        )}
                       </TableCell>
                       <TableCell className="numeric tabular">
-                        {line.credit.isZero() ? '' : formatMoney(line.credit, currency)}
+                        {line.credit.isZero() ? (
+                          ''
+                        ) : (
+                          <Link href={href} className={REPORT_DRILL_LINK}>
+                            {formatMoney(line.credit, currency)}
+                          </Link>
+                        )}
                       </TableCell>
-                    </TableRow>
-                  ))}
+                    </ClickableRow>
+                    )
+                  })}
                 </TableBody>
               </Table>
             </Card>

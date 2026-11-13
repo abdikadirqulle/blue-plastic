@@ -1,10 +1,13 @@
 'use server'
 
+import { z } from 'zod'
+
 import { accountOptions } from '@/lib/account-options'
 import { today } from '@/lib/date'
 import { action } from '@/server/action'
 import { db } from '@/server/db'
 import * as accountService from '@/server/services/account.service'
+import * as contactService from '@/server/services/contact.service'
 import * as itemService from '@/server/services/item.service'
 import * as taxService from '@/server/services/tax.service'
 
@@ -39,6 +42,19 @@ export const contactDialogOptions = action
     }
   })
 
+/** Vendors (or customers) available to link as the same trading party. */
+export const linkPartyOptions = action
+  .input(z.object({ side: z.enum(['customer', 'vendor']) }))
+  .requires('customer:read')
+  .handler(async (ctx, input) => {
+    // Editing a customer needs vendor targets; editing a vendor needs customers.
+    const targets = await contactService.listLinkTargets(
+      ctx,
+      input.side === 'customer' ? 'customer' : 'vendor',
+    )
+    return { options: targets }
+  })
+
 export const itemDialogOptions = action
   .requires('item:read')
   .handler(async (ctx) => {
@@ -50,7 +66,9 @@ export const itemDialogOptions = action
 
     return {
       accounts,
-      taxCodes: taxCodes.filter((code) => code.isActive).map((code) => ({ id: code.id, label: code.name })),
+      taxCodes: ctx.features.enableTax
+        ? taxCodes.filter((code) => code.isActive).map((code) => ({ id: code.id, label: code.name }))
+        : [],
       categories: categories.map((category) => ({ id: category.id, label: category.name })),
       today: today(ctx.organization.timeZone),
       currency: ctx.organization.baseCurrency,

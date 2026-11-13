@@ -1,0 +1,24 @@
+import type { Metadata } from 'next'
+
+import { PageHeader } from '@/components/data/page-header'
+import { NamedReportList } from '@/components/reports/named-report-list'
+import { ReportCentreTabs } from '@/components/reports/report-centre-tabs'
+import { SPREADSHEET_EXPORTS } from '@/lib/standard-reports'
+import { requireOrgContext } from '@/server/auth/context'
+
+export const metadata: Metadata = { title: 'Spreadsheet sync' }
+
+export default async function SpreadsheetReportsPage() {
+  const ctx = await requireOrgContext('report:read')
+  return (
+    <>
+      <ReportCentreTabs active="spreadsheet" />
+      <PageHeader
+        organization={ctx.organization}
+        title="Spreadsheet sync"
+        description="Download Excel of a report that already exists — company letterhead and tidy columns."
+      />
+      <NamedReportList reports={SPREADSHEET_EXPORTS} />
+    </>
+  )
+}

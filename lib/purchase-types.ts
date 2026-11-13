@@ -18,6 +18,8 @@ export type PurchaseTypeConfig = {
   /** True when the money leaves at once and it never becomes a payable. */
   needsPaymentAccount: boolean
   posts: boolean
+  /** Vendor may be blank (internal purchase request). */
+  vendorOptional?: boolean
 }
 
 export const PURCHASE_TYPES: PurchaseTypeConfig[] = [
@@ -37,7 +39,7 @@ export const PURCHASE_TYPES: PurchaseTypeConfig[] = [
     singular: 'Expense',
     plural: 'Expenses',
     effect:
-      'A purchase receipt: bought and paid at once. The money leaves the account you name, the cost is recognised, and any tracked stock on it is received — it never becomes a payable, so it is settled the moment it is entered.',
+      'A purchase receipt: bought and paid at once — from a bank account, or by deducting a customer balance (buy items from their shop / settle a cost they charged you). The cost is recognised, tracked stock is received, and it never becomes a payable.',
     needsPaymentAccount: true,
     posts: true,
   },
@@ -59,9 +61,36 @@ export const PURCHASE_TYPES: PurchaseTypeConfig[] = [
     needsPaymentAccount: false,
     posts: false,
   },
+  {
+    type: 'PURCHASE_REQUEST',
+    slug: 'purchase-requests',
+    singular: 'Purchase request',
+    plural: 'Purchase requests',
+    effect:
+      'An internal request from staff or the store. No catalog price — it becomes an RFQ or a purchase order, and the vendor states the price.',
+    needsPaymentAccount: false,
+    posts: false,
+    vendorOptional: true,
+  },
+  {
+    type: 'RFQ',
+    slug: 'rfqs',
+    singular: 'RFQ',
+    plural: 'RFQs',
+    effect:
+      'Sent to one vendor to ask their price. Nothing is filled from the item cost. Accepting it creates a purchase order.',
+    needsPaymentAccount: false,
+    posts: false,
+  },
 ]
 
 export const purchaseBySlug = (slug: string) =>
   PURCHASE_TYPES.find((c) => c.slug === slug || c.aliases?.includes(slug))
 export const purchaseByType = (type: PurchaseDocumentType) =>
   PURCHASE_TYPES.find((c) => c.type === type)!
+
+/** Blank item rows on a new purchase form. Expense is shorter; bills and kin get 15. */
+export function defaultPurchaseLineRows(type?: PurchaseDocumentType): number {
+  if (type === 'EXPENSE') return 10
+  return 15
+}

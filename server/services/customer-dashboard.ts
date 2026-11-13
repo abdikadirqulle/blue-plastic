@@ -1,0 +1,311 @@
+import 'server-only'
+
+import { addDays, toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
+import { overdueClock } from '@/lib/invoice-overdue'
+import { Decimal } from '@/lib/money'
+import { byType } from '@/lib/sales-types'
+import type { OrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
+import { customerBands, type BandKey, type CustomerBand } from '@/lib/customer-bands'
+import { subledgerBalances } from '@/server/services/contact.service'
+
+export type { BandKey, CustomerBand }
+
+const BAND_KEYS: BandKey[] = ['estimates', 'overdue', 'open', 'paid']
+
+export function isBandKey(value: string | undefined): value is BandKey {
+  return BAND_KEYS.includes(value as BandKey)
+}
+
+/**
+ * The four figures on the customer list, read from the documents and the
+ * payments. Deleted rows stay out: raw SQL does not get the client's soft-delete
+ * filter, so it is written here.
+ */
+export async function customerMoneyBar(ctx: OrgContext, asOf: CalendarDate) {
+  const [documents, payments, people] = await Promise.all([
+    db.$queryRaw<
+      {
+        customerId: string
+        type: string
+        status: string
+        total: string
+        applied: string
+        due: Date | null
+        promisedDate: Date | null
+        excludeFromOverdue: boolean
+        date: Date
+        partyBalanceDate: Date | null
+        partyAgreementDate: Date | null
+        partyBalanceTime: string | null
+      }[]
+    >`
+      SELECT d."customerId"                          AS "customerId",
+             d.type::text                            AS type,
+             d.status::text                          AS status,
+             d.total::text                           AS total,
+             COALESCE((
+               SELECT SUM(amount)
+                 FROM sales_applications
+                WHERE "invoiceId" = d.id OR "creditDocumentId" = d.id
+             ), 0)::text                             AS applied,
+             d."dueDate"                             AS due,
+             d."promisedDate"                        AS "promisedDate",
+             d."excludeFromOverdue"                  AS "excludeFromOverdue",
+             d.date                                  AS date,
+             c."balanceDate"                         AS "partyBalanceDate",
+             c."agreementDate"                       AS "partyAgreementDate",
+             c."balanceTime"                         AS "partyBalanceTime"
+        FROM sales_documents d
+        JOIN customers c ON c.id = d."customerId"
+       WHERE d."orgId" = ${ctx.orgId}
+         AND d."deletedAt" IS NULL
+         AND d.type::text IN ('INVOICE', 'ESTIMATE', 'QUOTATION', 'CREDIT_MEMO')
+         AND d.status::text NOT IN ('VOID', 'DECLINED')
+    `,
+    db.$queryRaw<{ customerId: string; status: string; amount: string; date: Date }[]>`
+      SELECT "customerId" AS "customerId",
+             status::text AS status,
+             amount::text AS amount,
+             date         AS date
+        FROM customer_payments
+       WHERE "orgId" = ${ctx.orgId}
+         AND "deletedAt" IS NULL
+         AND status::text <> 'VOID'
+         AND date >= ${toDate(addDays(asOf, -30))}
+         AND date <= ${toDate(asOf)}
+    `,
+    db.customer.findMany({
+      where: { orgId: ctx.orgId, isActive: true },
+      select: { id: true, balanceDate: true, agreementDate: true, balanceTime: true },
+    }),
+  ])
+
+  const ledger = await subledgerBalances(db, ctx, 'customer', people.map((person) => person.id))
+  const byId = new Map(people.map((person) => [person.id, person]))
+
+  return customerBands(
+    documents.map((row) => ({
+      customerId: row.customerId,
+      type: row.type,
+      status: row.status,
+      total: row.total,
+      applied: row.applied,
+      due: row.due ? toCalendarDate(row.due) : null,
+      promisedDate: row.promisedDate ? toCalendarDate(row.promisedDate) : null,
+      partyBalanceDate: row.partyBalanceDate ? toCalendarDate(row.partyBalanceDate) : null,
+      partyAgreementDate: row.partyAgreementDate ? toCalendarDate(row.partyAgreementDate) : null,
+      partyBalanceTime: row.partyBalanceTime,
+      excludeFromOverdue: row.excludeFromOverdue,
+      date: toCalendarDate(row.date),
+    })),
+    payments.map((row) => ({
+      customerId: row.customerId,
+      status: row.status,
+      amount: row.amount,
+      date: toCalendarDate(row.date),
+    })),
+    asOf,
+    addDays(asOf, -30),
+    [...ledger.entries()].map(([customerId, balance]) => {
+      const person = byId.get(customerId)
+      return {
+        customerId,
+        balance: balance.toString(),
+        partyBalanceDate: person?.balanceDate ? toCalendarDate(person.balanceDate) : null,
+        partyAgreementDate: person?.agreementDate ? toCalendarDate(person.agreementDate) : null,
+        partyBalanceTime: person?.balanceTime ?? null,
+      }
+    }),
+    overdueClock(ctx.organization.timeZone),
+  )
+}
+
+export type CustomerActivityRow = {
+  id: string
+  href: string
+  kind: string
+  number: string
+  date: string
+  due: string | null
+  account: string | null
+  amount: string
+  status: string
+}
+
+/** Every sale, payment, customer-offset expense, delivery note, and opening journal for one customer, newest first. */
+export async function customerActivity(ctx: OrgContext, customerId: string): Promise<CustomerActivityRow[]> {
+  const [documents, payments, expenses, journals, deliveries] = await Promise.all([
+    db.salesDocument.findMany({
+      where: { orgId: ctx.orgId, customerId },
+      select: {
+        id: true,
+        type: true,
+        number: true,
+        date: true,
+        dueDate: true,
+        total: true,
+        status: true,
+        lines: {
+          orderBy: { lineNumber: 'asc' },
+          take: 1,
+          select: { incomeAccount: { select: { name: true } } },
+        },
+      },
+      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      take: 80,
+    }),
+    db.customerPayment.findMany({
+      where: { orgId: ctx.orgId, customerId },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        amount: true,
+        status: true,
+        depositAccount: { select: { name: true } },
+      },
+      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      take: 80,
+    }),
+    db.purchaseDocument.findMany({
+      where: { orgId: ctx.orgId, offsetCustomerId: customerId, type: 'EXPENSE' },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        total: true,
+        status: true,
+        lines: {
+          orderBy: { lineNumber: 'asc' },
+          take: 1,
+          select: {
+            expenseAccount: { select: { name: true } },
+            item: { select: { name: true } },
+          },
+        },
+      },
+      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      take: 80,
+    }),
+    db.journalLine.findMany({
+      where: {
+        orgId: ctx.orgId,
+        customerId,
+        account: { subtype: 'ACCOUNTS_RECEIVABLE' },
+        journal: {
+          deletedAt: null,
+          status: { notIn: ['DRAFT', 'DELETED', 'REVERSED'] },
+          salesDocuments: { none: {} },
+          customerPayments: { none: {} },
+          purchaseDocuments: { none: {} },
+          sourceType: {
+            notIn: [
+              'INVOICE',
+              'CREDIT_MEMO',
+              'SALES_RECEIPT',
+              'REFUND_RECEIPT',
+              'CUSTOMER_PAYMENT',
+              'EXPENSE',
+              'REVERSAL',
+            ],
+          },
+        },
+      },
+      select: {
+        id: true,
+        debit: true,
+        credit: true,
+        journalDate: true,
+        account: { select: { name: true } },
+        journal: { select: { id: true, journalNumber: true } },
+      },
+      orderBy: [{ journalDate: 'desc' }, { journal: { journalNumber: 'desc' } }],
+      take: 80,
+    }),
+    db.deliveryNote.findMany({
+      where: { orgId: ctx.orgId, customerId },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        status: true,
+        salesDocument: { select: { number: true } },
+        lines: { select: { quantity: true } },
+      },
+      orderBy: [{ date: 'desc' }, { number: 'desc' }],
+      take: 80,
+    }),
+  ])
+
+  const rows: (CustomerActivityRow & { sort: string })[] = [
+    ...documents.map((document) => {
+      const config = byType(document.type)
+      return {
+        id: document.id,
+        href: `/sales/${config.slug}/${document.id}`,
+        kind: config.singular,
+        number: document.number,
+        date: toCalendarDate(document.date),
+        due: document.dueDate ? toCalendarDate(document.dueDate) : null,
+        account: document.lines[0]?.incomeAccount?.name ?? null,
+        amount: document.total.toString(),
+        status: document.status,
+        sort: `${toCalendarDate(document.date)}-${document.number}`,
+      }
+    }),
+    ...payments.map((payment) => ({
+      id: payment.id,
+      href: `/payments/${payment.id}`,
+      kind: 'Payment',
+      number: payment.number,
+      date: toCalendarDate(payment.date),
+      due: null,
+      account: payment.depositAccount.name,
+      amount: payment.amount.toString(),
+      status: payment.status,
+      sort: `${toCalendarDate(payment.date)}-${payment.number}`,
+    })),
+    ...expenses.map((document) => ({
+      id: document.id,
+      href: `/purchases/expenses/${document.id}`,
+      kind: 'Expense',
+      number: document.number,
+      date: toCalendarDate(document.date),
+      due: null,
+      account: document.lines[0]?.item?.name ?? document.lines[0]?.expenseAccount?.name ?? null,
+      amount: document.total.toString(),
+      status: document.status,
+      sort: `${toCalendarDate(document.date)}-${document.number}`,
+    })),
+    ...journals.map((line) => ({
+      id: line.id,
+      href: `/journals/${line.journal.id}`,
+      kind: 'Journal',
+      number: line.journal.journalNumber,
+      date: toCalendarDate(line.journalDate),
+      due: null,
+      account: line.account.name,
+      amount: new Decimal(line.debit).minus(line.credit).toString(),
+      status: 'POSTED',
+      sort: `${toCalendarDate(line.journalDate)}-${line.journal.journalNumber}`,
+    })),
+    ...deliveries.map((note) => {
+      const qty = note.lines.reduce((sum, line) => sum.plus(line.quantity.toString()), new Decimal(0))
+      return {
+        id: note.id,
+        href: `/sales/delivery/${note.id}`,
+        kind: 'Delivery',
+        number: note.number,
+        date: toCalendarDate(note.date),
+        due: null,
+        account: note.salesDocument.number,
+        amount: qty.toFixed(2),
+        status: note.status,
+        sort: `${toCalendarDate(note.date)}-${note.number}`,
+      }
+    }),
+  ]
+
+  return rows.sort((a, b) => b.sort.localeCompare(a.sort)).map(({ sort: _sort, ...row }) => row)
+}

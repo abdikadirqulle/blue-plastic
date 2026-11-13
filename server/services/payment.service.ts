@@ -1,26 +1,29 @@
 import 'server-only'
 import type { Prisma } from '@prisma/client'
 
-import { toCalendarDate, toDate } from '@/lib/date'
+import { toCalendarDate, toDate, type CalendarDate } from '@/lib/date'
+import { isCollectionOverdue, overdueClock, partyFromContact } from '@/lib/invoice-overdue'
 import { Decimal, toMoneyString, ZERO } from '@/lib/money'
+import { allocatePaymentToInvoices, sortInvoicesForAllocation } from '@/lib/payment-allocate'
 import { type ListQuery, paged, paginate } from '@/lib/validation/common'
 import type { PaymentInput } from '@/lib/validation/sales'
 import { systemAccountId } from '@/server/accounting/chart-of-accounts'
 import { buildCustomerPaymentJournal } from '@/server/accounting/builders/sales'
-import { softDeleteDocument } from '@/server/accounting/deletion'
+import { CLEAR_DELETION, restoreSoftDeletedDocument, softDeleteDocument } from '@/server/accounting/deletion'
 import { removeDepositWithin } from '@/server/services/banking.service'
-import { postJournal } from '@/server/accounting/posting'
+import { postJournal, reverseJournal } from '@/server/accounting/posting'
 import { requestMeta, writeAudit } from '@/server/audit'
 import type { OrgContext } from '@/server/auth/context'
 import { db, type Tx } from '@/server/db'
-import { notFound, precondition, validation } from '@/server/errors'
-import { nextDocumentNumber } from '@/server/sequences'
+import { conflict, notFound, precondition, validation } from '@/server/errors'
+import { assignDocumentNumber, numberTaken } from '@/server/sequences'
+import * as approvalService from '@/server/services/approval.service'
 import { outstandingBalances, refreshStatus } from '@/server/services/sales.service'
 
 const PAYMENT_SELECT = {
-  id: true, number: true, date: true, amount: true, method: true, reference: true,
+  id: true, number: true, date: true, createdAt: true, amount: true, method: true, reference: true,
   memo: true, status: true, journalId: true, voidedAt: true, voidReason: true,
-  customer: { select: { id: true, displayName: true } },
+  customer: { select: { id: true, displayName: true, email: true, phone: true } },
   depositAccount: { select: { id: true, code: true, name: true } },
 } satisfies Prisma.CustomerPaymentSelect
 
@@ -39,11 +42,25 @@ const PAYMENT_ORDER: Record<
 export async function list(
   ctx: OrgContext,
   query: ListQuery,
-  options: { customerId?: string; sort?: string; dir?: 'asc' | 'desc' } = {},
+  options: {
+    customerId?: string
+    sort?: string
+    dir?: 'asc' | 'desc'
+    from?: CalendarDate
+    to?: CalendarDate
+  } = {},
 ) {
   const where: Prisma.CustomerPaymentWhereInput = {
     orgId: ctx.orgId,
     ...(options.customerId ? { customerId: options.customerId } : {}),
+    ...(options.from || options.to
+      ? {
+          date: {
+            ...(options.from ? { gte: toDate(options.from) } : {}),
+            ...(options.to ? { lte: toDate(options.to) } : {}),
+          },
+        }
+      : {}),
     ...(query.q
       ? {
           OR: [
@@ -116,42 +133,461 @@ export async function get(ctx: OrgContext, id: string) {
   }
 }
 
-/** The invoices a payment could still be put against, oldest first. */
-export async function openInvoicesFor(ctx: OrgContext, customerId: string) {
-  const invoices = await db.salesDocument.findMany({
-    where: {
-      orgId: ctx.orgId,
-      customerId,
-      type: 'INVOICE',
-      status: { in: ['OPEN', 'PARTIAL'] },
-    },
-    select: { id: true, number: true, date: true, dueDate: true, total: true },
-    orderBy: { date: 'asc' },
-  })
+type AllocatableRow = {
+  id: string
+  number: string
+  date: Date
+  dueDate: Date | null
+  total: string
+  balance: string
+  overdue: boolean
+}
 
-  const balances = await outstandingBalances(db, invoices.map((invoice) => invoice.id))
+/** Open invoices for a customer, overdue first, then oldest remaining. */
+export async function openInvoicesFor(ctx: OrgContext, customerId: string, client: Tx | typeof db = db) {
+  return loadAllocatableInvoices(client, ctx, customerId)
+}
 
-  return invoices
-    .map((invoice) => ({
-      ...invoice,
-      total: invoice.total.toString(),
-      balance: toMoneyString(balances.get(invoice.id) ?? ZERO, 2),
-    }))
+async function loadAllocatableInvoices(
+  client: Tx | typeof db,
+  ctx: OrgContext,
+  customerId: string,
+): Promise<AllocatableRow[]> {
+  const [invoices, customer] = await Promise.all([
+    client.salesDocument.findMany({
+      where: {
+        orgId: ctx.orgId,
+        customerId,
+        type: 'INVOICE',
+        status: { in: ['OPEN', 'PARTIAL'] },
+      },
+      select: {
+        id: true,
+        number: true,
+        date: true,
+        dueDate: true,
+        promisedDate: true,
+        excludeFromOverdue: true,
+        total: true,
+        status: true,
+      },
+      orderBy: { date: 'asc' },
+    }),
+    client.customer.findFirst({
+      where: { id: customerId, orgId: ctx.orgId },
+      select: { balanceDate: true, agreementDate: true, balanceTime: true },
+    }),
+  ])
+
+  const balances = await outstandingBalances(client, invoices.map((invoice) => invoice.id))
+  const clock = overdueClock(ctx.organization.timeZone)
+  const party = partyFromContact(customer)
+
+  const rows = invoices
+    .map((invoice) => {
+      const balance = toMoneyString(balances.get(invoice.id) ?? ZERO, 2)
+      return {
+        id: invoice.id,
+        number: invoice.number,
+        date: invoice.date,
+        dueDate: invoice.dueDate,
+        total: invoice.total.toString(),
+        balance,
+        overdue: isCollectionOverdue(
+          {
+            status: invoice.status,
+            dueDate: invoice.dueDate,
+            promisedDate: invoice.promisedDate,
+            excludeFromOverdue: invoice.excludeFromOverdue,
+            date: invoice.date,
+            ...party,
+          },
+          clock.asOf,
+          clock,
+        ),
+      }
+    })
     .filter((invoice) => Number(invoice.balance) > 0)
+
+  return sortInvoicesForAllocation(rows)
+}
+
+function applicationsFromOpen(amount: Decimal, invoices: AllocatableRow[]) {
+  return allocatePaymentToInvoices(amount, invoices).map((row) => ({
+    invoiceId: row.invoiceId,
+    amount: new Decimal(row.amount),
+  }))
+}
+
+/**
+ * Outstanding invoices for editing a payment: current open balances, plus what
+ * this payment already applied (so those invoices stay on the form to re-apply).
+ */
+export async function invoicesForEdit(ctx: OrgContext, paymentId: string) {
+  const payment = await get(ctx, paymentId)
+  const open = await openInvoicesFor(ctx, payment.customer.id)
+  const byId = new Map(
+    open.map((invoice) => [
+      invoice.id,
+      {
+        id: invoice.id,
+        number: invoice.number,
+        date: invoice.date,
+        dueDate: invoice.dueDate,
+        total: invoice.total,
+        balance: invoice.balance,
+      },
+    ]),
+  )
+
+  for (const application of payment.applications) {
+    const applied = new Decimal(application.amount)
+    const existing = byId.get(application.invoice.id)
+    if (existing) {
+      byId.set(application.invoice.id, {
+        ...existing,
+        balance: toMoneyString(new Decimal(existing.balance).plus(applied), 2),
+      })
+      continue
+    }
+    byId.set(application.invoice.id, {
+      id: application.invoice.id,
+      number: application.invoice.number,
+      date: application.invoice.date,
+      dueDate: application.invoice.dueDate,
+      total: application.invoice.total,
+      balance: toMoneyString(applied, 2),
+    })
+  }
+
+  const extraIds = [...byId.keys()].filter((id) => !open.some((row) => row.id === id))
+  const extraOverdue = new Map<string, boolean>()
+  if (extraIds.length > 0) {
+    const [docs, customer] = await Promise.all([
+      db.salesDocument.findMany({
+        where: { id: { in: extraIds }, orgId: ctx.orgId },
+        select: {
+          id: true,
+          dueDate: true,
+          promisedDate: true,
+          excludeFromOverdue: true,
+          date: true,
+        },
+      }),
+      db.customer.findFirst({
+        where: { id: payment.customer.id, orgId: ctx.orgId },
+        select: { balanceDate: true, agreementDate: true, balanceTime: true },
+      }),
+    ])
+    const clock = overdueClock(ctx.organization.timeZone)
+    const party = partyFromContact(customer)
+    for (const doc of docs) {
+      extraOverdue.set(
+        doc.id,
+        isCollectionOverdue(
+          {
+            status: 'OPEN',
+            dueDate: doc.dueDate,
+            promisedDate: doc.promisedDate,
+            excludeFromOverdue: doc.excludeFromOverdue,
+            date: doc.date,
+            ...party,
+          },
+          clock.asOf,
+          clock,
+        ),
+      )
+    }
+  }
+
+  const rows = [...byId.values()].map((invoice) => {
+    const match = open.find((row) => row.id === invoice.id)
+    return {
+      ...invoice,
+      overdue: match?.overdue ?? extraOverdue.get(invoice.id) ?? false,
+    }
+  })
+  return sortInvoicesForAllocation(rows)
 }
 
 /**
  * Record money received.
  *
- * A payment is its own document, not a flag on an invoice. It may settle several
- * invoices, part of one, or none at all — unapplied cash stays on the balance
- * sheet as a customer credit, which is where it belongs until someone decides
- * what it was for.
+ * A payment is its own document, not a flag on an invoice. Entered applications
+ * are kept. When none are given, the amount settles overdue invoices first, then
+ * the oldest remaining ones. Leftover after every open invoice stays as a
+ * customer credit.
  */
+/**
+ * Same customer, same day, same amount is usually the receipt entered twice.
+ * A deleted or voided payment is ignored. Saving again after the warning records it.
+ */
+async function assertDuplicateCustomerPayment(
+  tx: Tx,
+  ctx: OrgContext,
+  input: PaymentInput,
+  amount: Decimal,
+  excludeId?: string,
+) {
+  if (input.acknowledgeDuplicate) return
+  const existing = await tx.customerPayment.findFirst({
+    where: {
+      orgId: ctx.orgId,
+      customerId: input.customerId,
+      date: toDate(input.date),
+      amount: amount.toFixed(4),
+      deletedAt: null,
+      voidedAt: null,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true, number: true },
+  })
+  if (!existing) return
+  throw conflict(
+    `${existing.number} is already ${toMoneyString(amount, 2)} from this customer on this date. Save again to record another.`,
+    { duplicate: ['true'], existingId: [existing.id], existingNumber: [existing.number] },
+  )
+}
+
 export async function create(ctx: OrgContext, input: PaymentInput) {
   const meta = await requestMeta()
 
   return db.$transaction(async (tx) => {
+    const customer = await tx.customer.findFirst({
+      where: { id: input.customerId, orgId: ctx.orgId },
+      select: { id: true, displayName: true, isActive: true, currencyCode: true },
+    })
+    if (!customer) throw notFound('Customer')
+
+    const deposit = await tx.ledgerAccount.findFirst({
+      where: { id: input.depositAccountId, orgId: ctx.orgId, isActive: true },
+      select: { id: true, name: true, subtype: true },
+    })
+    if (!deposit) throw notFound('Deposit account')
+    if (deposit.subtype !== 'BANK' && deposit.subtype !== 'UNDEPOSITED_FUNDS') {
+      throw validation(
+        `"${deposit.name}" is not a bank or undeposited funds account, so money cannot be received into it.`,
+        { depositAccountId: ['Choose a bank or undeposited funds account'] },
+      )
+    }
+
+    const amount = new Decimal(input.amount)
+    await assertDuplicateCustomerPayment(tx, ctx, input, amount)
+    let applications = input.applications
+      .map((application) => ({ ...application, amount: new Decimal(application.amount) }))
+      .filter((application) => application.amount.greaterThan(0))
+
+    if (applications.length === 0) {
+      applications = applicationsFromOpen(amount, await loadAllocatableInvoices(tx, ctx, customer.id))
+    }
+
+    const appliedTotal = applications.reduce((sum, a) => sum.plus(a.amount), ZERO)
+    if (appliedTotal.greaterThan(amount)) {
+      throw validation(
+        `You are applying ${toMoneyString(appliedTotal, 2)} of a ${toMoneyString(amount, 2)} payment. ` +
+          `Reduce the applied amounts, or increase the payment.`,
+      )
+    }
+
+    const number = await assignDocumentNumber(tx, ctx.orgId, 'CUSTOMER_PAYMENT', input.number)
+    const clash = await tx.customerPayment.findFirst({
+      where: { orgId: ctx.orgId, number },
+      select: { id: true },
+    })
+    if (clash) throw numberTaken()
+
+    const gate = await approvalService.needsApproval(ctx, 'CUSTOMER_PAYMENT', amount, tx)
+    const holdForApproval = gate.required
+
+    const payment = await tx.customerPayment.create({
+      data: {
+        orgId: ctx.orgId,
+        number,
+        customerId: customer.id,
+        date: toDate(input.date),
+        amount: amount.toFixed(4),
+        method: input.method,
+        reference: input.reference ?? null,
+        memo: input.memo ?? null,
+        depositAccountId: deposit.id,
+        currencyCode: (
+          input.currencyCode ??
+          customer.currencyCode ??
+          ctx.organization.baseCurrency
+        ).toUpperCase(),
+        exchangeRate: new Decimal(input.exchangeRate ?? 1).toFixed(9),
+        status: holdForApproval ? 'PENDING_APPROVAL' : 'OPEN',
+        createdById: ctx.userId,
+      },
+      select: { id: true, number: true },
+    })
+
+    for (const application of applications) {
+      await assertInvoiceBelongsToCustomer(tx, ctx, application.invoiceId, customer.id)
+      await tx.salesApplication.create({
+        data: {
+          orgId: ctx.orgId,
+          paymentId: payment.id,
+          invoiceId: application.invoiceId,
+          amount: application.amount.toFixed(4),
+        },
+      })
+    }
+
+    const payCurrency = (
+      input.currencyCode ??
+      customer.currencyCode ??
+      ctx.organization.baseCurrency
+    ).toUpperCase()
+
+    if (holdForApproval) {
+      await approvalService.submitRequest(tx, ctx, {
+        entityType: 'CUSTOMER_PAYMENT',
+        entityId: payment.id,
+        title: `Payment ${payment.number}`,
+        href: `/payments/${payment.id}`,
+        amount,
+        currencyCode: payCurrency,
+        levels: gate.levels,
+      })
+    } else {
+      await postPayment(tx, ctx, payment.id)
+    }
+
+    await writeAudit(
+      tx,
+      ctx,
+      {
+        entity: 'CustomerPayment',
+        entityId: payment.id,
+        action: 'CREATE',
+        after: {
+          number: payment.number,
+          amount: amount.toString(),
+          applied: appliedTotal.toString(),
+          invoices: applications.length,
+          pendingApproval: holdForApproval,
+        },
+      },
+      meta,
+    )
+
+    return { id: payment.id, number: payment.number }
+  })
+}
+
+/** Post a customer payment that is still waiting for approval (or finish create). */
+export async function postPayment(tx: Tx, ctx: OrgContext, id: string) {
+  const payment = await tx.customerPayment.findFirst({
+    where: { id, orgId: ctx.orgId },
+    select: {
+      id: true,
+      number: true,
+      date: true,
+      amount: true,
+      memo: true,
+      customerId: true,
+      depositAccountId: true,
+      journalId: true,
+      status: true,
+      currencyCode: true,
+      exchangeRate: true,
+      applications: {
+        select: {
+          invoiceId: true,
+          amount: true,
+          invoice: { select: { currencyCode: true, exchangeRate: true } },
+        },
+      },
+    },
+  })
+  if (!payment) throw notFound('Payment')
+  if (payment.journalId) throw precondition(`Payment ${payment.number} is already posted.`)
+
+  const payRate = new Decimal(payment.exchangeRate?.toString() ?? 1)
+  const foreignAmount = new Decimal(payment.amount.toString())
+  const bankBase = foreignAmount.times(payRate)
+
+  let arBase = ZERO
+  let appliedForeign = ZERO
+  for (const application of payment.applications) {
+    const f = new Decimal(application.amount.toString())
+    appliedForeign = appliedForeign.plus(f)
+    const invRate = new Decimal(application.invoice.exchangeRate?.toString() ?? 1)
+    arBase = arBase.plus(f.times(invRate))
+  }
+  const unapplied = foreignAmount.minus(appliedForeign)
+  if (unapplied.greaterThan(0)) {
+    arBase = arBase.plus(unapplied.times(payRate))
+  }
+
+  const needsFx = !bankBase.equals(arBase)
+  const fxAccountId = needsFx
+    ? await systemAccountId(tx, ctx.orgId, 'EXCHANGE_GAIN_LOSS')
+    : null
+
+  const journal = await postJournal(
+    tx,
+    ctx,
+    buildCustomerPaymentJournal({
+      date: toCalendarDate(payment.date),
+      number: payment.number,
+      paymentId: payment.id,
+      customerId: payment.customerId,
+      amount: bankBase,
+      arAmount: arBase,
+      fxAccountId,
+      depositAccountId: payment.depositAccountId,
+      receivableAccountId: await systemAccountId(tx, ctx.orgId, 'ACCOUNTS_RECEIVABLE'),
+      memo: payment.memo,
+      currencyCode: payment.currencyCode,
+      exchangeRate: payRate,
+    }),
+  )
+
+  await tx.customerPayment.update({
+    where: { id: payment.id },
+    data: { journalId: journal.id, status: 'OPEN' },
+  })
+
+  for (const application of payment.applications) {
+    await refreshStatus(tx, application.invoiceId)
+  }
+
+  return { id: payment.id, number: payment.number, journalId: journal.id }
+}
+
+/**
+ * Edit a recorded payment.
+ *
+ * Applications are replaced wholesale. If the amount or deposit account changes,
+ * the journal is reversed and a new one posted (ADR-0002). A payment already on a
+ * bank deposit cannot change those ledger fields until it is taken off the deposit.
+ */
+export async function update(ctx: OrgContext, id: string, input: PaymentInput) {
+  const meta = await requestMeta()
+
+  return db.$transaction(async (tx) => {
+    const existing = await tx.customerPayment.findFirst({
+      where: { id, orgId: ctx.orgId },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        journalId: true,
+        amount: true,
+        date: true,
+        depositAccountId: true,
+        customerId: true,
+        deletedAt: true,
+        applications: { select: { id: true, invoiceId: true } },
+      },
+    })
+    if (!existing || existing.deletedAt) throw notFound('Payment')
+    if (existing.status === 'VOID') {
+      throw precondition('A voided payment cannot be edited. Record a new one.')
+    }
+
     const customer = await tx.customer.findFirst({
       where: { id: input.customerId, orgId: ctx.orgId },
       select: { id: true, displayName: true, isActive: true },
@@ -171,11 +607,12 @@ export async function create(ctx: OrgContext, input: PaymentInput) {
     }
 
     const amount = new Decimal(input.amount)
-    const applications = input.applications
+    await assertDuplicateCustomerPayment(tx, ctx, input, amount, id)
+    let applications = input.applications
       .map((application) => ({ ...application, amount: new Decimal(application.amount) }))
       .filter((application) => application.amount.greaterThan(0))
 
-    const appliedTotal = applications.reduce((sum, a) => sum.plus(a.amount), ZERO)
+    let appliedTotal = applications.reduce((sum, a) => sum.plus(a.amount), ZERO)
     if (appliedTotal.greaterThan(amount)) {
       throw validation(
         `You are applying ${toMoneyString(appliedTotal, 2)} of a ${toMoneyString(amount, 2)} payment. ` +
@@ -183,11 +620,70 @@ export async function create(ctx: OrgContext, input: PaymentInput) {
       )
     }
 
-    const number = await nextDocumentNumber(tx, ctx.orgId, 'CUSTOMER_PAYMENT')
+    const amountChanged = !amount.equals(existing.amount.toString())
+    const depositChanged = deposit.id !== existing.depositAccountId
+    const customerChanged = customer.id !== existing.customerId
+    const dateChanged = toCalendarDate(existing.date) !== input.date
+    const ledgerChanged = amountChanged || depositChanged || customerChanged || dateChanged
 
-    const payment = await tx.customerPayment.create({
+    if (ledgerChanged) {
+      const bankedOn = await tx.depositLine.findFirst({
+        where: { customerPaymentId: id },
+        select: { depositId: true },
+      })
+      if (bankedOn) {
+        throw precondition(
+          `${existing.number} is already on a bank deposit. Remove it from the deposit before changing the amount, customer, date, or deposit account.`,
+        )
+      }
+    }
+
+    const previousInvoiceIds = existing.applications.map((application) => application.invoiceId)
+    await tx.salesApplication.deleteMany({ where: { paymentId: id } })
+    for (const invoiceId of previousInvoiceIds) {
+      await refreshStatus(tx, invoiceId)
+    }
+
+    if (applications.length === 0) {
+      applications = applicationsFromOpen(amount, await loadAllocatableInvoices(tx, ctx, customer.id))
+      appliedTotal = applications.reduce((sum, a) => sum.plus(a.amount), ZERO)
+    }
+
+    if (ledgerChanged && existing.journalId) {
+      await reverseJournal(tx, ctx, existing.journalId, {
+        reason: `${existing.number} edited`,
+      })
+    }
+
+    const number = await assignDocumentNumber(tx, ctx.orgId, 'CUSTOMER_PAYMENT', input.number)
+    const clash = await tx.customerPayment.findFirst({
+      where: { orgId: ctx.orgId, number, id: { not: id } },
+      select: { id: true },
+    })
+    if (clash) throw numberTaken()
+
+    let journalId = existing.journalId
+    if (ledgerChanged) {
+      const journal = await postJournal(
+        tx,
+        ctx,
+        buildCustomerPaymentJournal({
+          date: input.date,
+          number,
+          paymentId: id,
+          customerId: customer.id,
+          amount,
+          depositAccountId: deposit.id,
+          receivableAccountId: await systemAccountId(tx, ctx.orgId, 'ACCOUNTS_RECEIVABLE'),
+          memo: input.memo,
+        }),
+      )
+      journalId = journal.id
+    }
+
+    await tx.customerPayment.update({
+      where: { id },
       data: {
-        orgId: ctx.orgId,
         number,
         customerId: customer.id,
         date: toDate(input.date),
@@ -196,35 +692,17 @@ export async function create(ctx: OrgContext, input: PaymentInput) {
         reference: input.reference ?? null,
         memo: input.memo ?? null,
         depositAccountId: deposit.id,
-        currencyCode: ctx.organization.baseCurrency,
-        createdById: ctx.userId,
+        journalId,
+        status: 'OPEN',
       },
-      select: { id: true, number: true },
     })
-
-    const journal = await postJournal(
-      tx,
-      ctx,
-      buildCustomerPaymentJournal({
-        date: input.date,
-        number: payment.number,
-        paymentId: payment.id,
-        customerId: customer.id,
-        amount,
-        depositAccountId: deposit.id,
-        receivableAccountId: await systemAccountId(tx, ctx.orgId, 'ACCOUNTS_RECEIVABLE'),
-        memo: input.memo,
-      }),
-    )
-
-    await tx.customerPayment.update({ where: { id: payment.id }, data: { journalId: journal.id } })
 
     for (const application of applications) {
       await assertInvoiceBelongsToCustomer(tx, ctx, application.invoiceId, customer.id)
       await tx.salesApplication.create({
         data: {
           orgId: ctx.orgId,
-          paymentId: payment.id,
+          paymentId: id,
           invoiceId: application.invoiceId,
           amount: application.amount.toFixed(4),
         },
@@ -232,15 +710,19 @@ export async function create(ctx: OrgContext, input: PaymentInput) {
       await refreshStatus(tx, application.invoiceId)
     }
 
+    for (const invoiceId of new Set([...previousInvoiceIds, ...applications.map((a) => a.invoiceId)])) {
+      await refreshStatus(tx, invoiceId)
+    }
+
     await writeAudit(
       tx,
       ctx,
       {
         entity: 'CustomerPayment',
-        entityId: payment.id,
-        action: 'CREATE',
+        entityId: id,
+        action: 'UPDATE',
         after: {
-          number: payment.number,
+          number,
           amount: amount.toString(),
           applied: appliedTotal.toString(),
           invoices: applications.length,
@@ -249,7 +731,7 @@ export async function create(ctx: OrgContext, input: PaymentInput) {
       meta,
     )
 
-    return { id: payment.id, number: payment.number }
+    return { id, number }
   })
 }
 
@@ -415,6 +897,33 @@ export async function remove(ctx: OrgContext, id: string, reason?: string | null
     for (const invoiceId of invoiceIds) await refreshStatus(tx, invoiceId)
 
     return { id, number: payment.number }
+  })
+}
+
+/**
+ * Put a deleted customer payment back. Applications are not rebuilt — the
+ * payment returns unapplied for the user to allocate again.
+ */
+export async function restore(ctx: OrgContext, id: string) {
+  return db.$transaction(async (tx) => {
+    const payment = await tx.customerPayment.findFirst({
+      where: { id, orgId: ctx.orgId, deletedAt: undefined },
+      select: { id: true, number: true, journalId: true, deletedAt: true },
+    })
+    if (!payment) throw notFound('Payment')
+    if (!payment.deletedAt) {
+      return { id, number: payment.number, href: `/payments/${id}` }
+    }
+
+    await restoreSoftDeletedDocument(tx, ctx, {
+      clear: () => tx.customerPayment.update({ where: { id }, data: CLEAR_DELETION }),
+      entity: 'CustomerPayment',
+      id,
+      number: payment.number,
+      journalIds: [payment.journalId],
+    })
+
+    return { id, number: payment.number, href: `/payments/${id}` }
   })
 }
 

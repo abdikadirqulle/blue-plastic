@@ -1,39 +1,31 @@
 import type { Metadata } from 'next'
-import Link from 'next/link'
-import { ArrowLeftIcon, ScrollTextIcon } from 'lucide-react'
+import { ScrollTextIcon } from 'lucide-react'
 import type { JournalSourceType } from '@prisma/client'
 
+import { AccountTypeIcon } from '@/components/accounts/account-type-icon'
 import { EmptyState } from '@/components/data/empty-state'
+import { InteractiveGrid, type InteractiveColumn, type InteractiveRow } from '@/components/data/interactive-grid'
 import { PageHeader } from '@/components/data/page-header'
-import { Badge } from '@/components/ui/badge'
-import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableFooter,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import {
   ACCOUNT_SUBTYPE_LABELS,
   ACCOUNT_TYPE_LABELS,
   isDebitNormalType,
   JOURNAL_SOURCE_LABELS,
 } from '@/lib/accounting-labels'
-import { formatDate, toCalendarDate } from '@/lib/date'
+import { formatDate } from '@/lib/date'
+import { postedLineParts } from '@/lib/ledger-text'
 import { formatMoney } from '@/lib/money'
 import { generalLedger } from '@/server/accounting/balances'
 import { requireOrgContext } from '@/server/auth/context'
+import { db } from '@/server/db'
 import * as accountService from '@/server/services/account.service'
 import { resolveSources, sourceFor } from '@/server/services/journal-sources'
 import { ReportControls } from '../report-controls'
 import { readSettings, type SearchParams } from '../params'
 import { AccountSwitcher } from './account-switcher'
 
-export const metadata: Metadata = { title: 'Transaction detail by account' }
+export const metadata: Metadata = { title: 'Transaction Detail by Account' }
 
 /**
  * Transaction detail by account.
@@ -43,10 +35,11 @@ export const metadata: Metadata = { title: 'Transaction detail by account' }
  * useful next question is *what is it made of*. This answers it in the terms the
  * question was asked in — every transaction that touched the account in the
  * period, dated, typed, numbered, named, with both sides and a running balance —
- * and every row is a link to the document that caused it.
+ * and every row opens the journal entry (with the source document linked
+ * beside the journal number when one exists).
  *
  * So the whole chain is three clicks and never leaves the subject: profit and
- * loss → the sales account → the transactions in it → the invoice. It used to
+ * loss → the sales account → the transactions in it → the journal. It used to
  * land on the chart-of-accounts register, which is a maintenance screen that
  * happens to list postings; the difference is what the page is *for*, and
  * therefore what it puts in front of you and what it lets you change.
@@ -68,7 +61,8 @@ export default async function TransactionDetailPage({
     return (
       <>
         <PageHeader
-          title="Transaction detail by account"
+          organization={ctx.organization}
+          title="Transaction Detail by Account"
           description="Every transaction that touched one account, with the document behind each."
         />
         <ReportControls
@@ -111,8 +105,8 @@ export default async function TransactionDetailPage({
 
   const ledger = await generalLedger(ctx.orgId, accountId, settings.range)
 
-  // What produced each line, in one batch per document family — so a row can
-  // link straight to the invoice rather than to the journal in between.
+  // What produced each line, in one batch per document family — so the number
+  // cell can still offer the invoice beside the journal link.
   const sources = await resolveSources(
     ctx.orgId,
     ledger.entries.map((entry) => ({
@@ -121,21 +115,72 @@ export default async function TransactionDetailPage({
     })),
   )
 
+  const salesDocIds = [
+    ...new Set(
+      ledger.entries
+        .filter(
+          (entry) =>
+            (entry.sourceType === 'SALES_RECEIPT' || entry.sourceType === 'REFUND_RECEIPT') &&
+            entry.sourceId,
+        )
+        .map((entry) => entry.sourceId as string),
+    ),
+  ]
+  const posOrders =
+    salesDocIds.length > 0
+      ? await db.posOrder.findMany({
+          where: { orgId: ctx.orgId, salesDocumentId: { in: salesDocIds } },
+          select: {
+            salesDocumentId: true,
+            register: { select: { name: true } },
+          },
+        })
+      : []
+  const posByDoc = new Map(posOrders.map((order) => [order.salesDocumentId, order.register.name]))
+
   const debitNormal = isDebitNormalType(account.type)
   const movement = ledger.closing.minus(ledger.opening)
-
-  const backTo = typeof query.back === 'string' ? query.back : null
+  const splitAccounts = new Map<string, { code: string; name: string }>()
+  for (const entry of ledger.entries) {
+    for (const split of entry.splits) {
+      if (!splitAccounts.has(split.code)) splitAccounts.set(split.code, { code: split.code, name: split.name })
+    }
+  }
+  const splitList = [...splitAccounts.values()].sort((a, b) => a.code.localeCompare(b.code))
+  // One Account column on the main line (like the register). Per-account split
+  // amount columns stay available under Customize — showing them all at once
+  // was what scrambled Date / Type / Debit into an unreadable mash.
+  const columns: InteractiveColumn[] = [
+    { id: 'date', label: 'Date', kind: 'datetime', defaultWidth: 188 },
+    { id: 'type', label: 'Type', defaultWidth: 148 },
+    { id: 'number', label: 'Number', defaultWidth: 132 },
+    { id: 'name', label: 'Name', defaultWidth: 168 },
+    { id: 'memo', label: 'Memo', defaultWidth: 220 },
+    { id: 'account', label: 'Account', defaultWidth: 200 },
+    ...splitList.map((split) => ({
+      id: `split:${split.code}`,
+      label: split.name,
+      kind: 'money' as const,
+      total: true,
+      defaultWidth: 150,
+    })),
+    { id: 'debit', label: 'Debit', kind: 'money', total: true, defaultWidth: 120 },
+    { id: 'credit', label: 'Credit', kind: 'money', total: true, defaultWidth: 120 },
+    { id: 'balance', label: 'Balance', kind: 'money', total: false, defaultWidth: 136 },
+  ]
+  const defaultHidden = splitList.map((split) => `split:${split.code}`)
 
   return (
     <>
-      {backTo ? (
-        <Link href={backTo} className={`${buttonVariants({ variant: 'ghost', size: 'sm' })} mb-3 -ml-2`}>
-          <ArrowLeftIcon /> Back to the report
-        </Link>
-      ) : null}
 
       <PageHeader
-        title="Transaction detail by account"
+        organization={ctx.organization}
+        title={
+          <span className="inline-flex items-center gap-2">
+            <AccountTypeIcon type={account.type} />
+            <span>Transaction Detail by Account</span>
+          </span>
+        }
         description={`${account.code} · ${account.name} — ${ACCOUNT_TYPE_LABELS[account.type]} · ${
           ACCOUNT_SUBTYPE_LABELS[account.subtype]
         } · ${debitNormal ? 'debit' : 'credit'} balance`}
@@ -180,118 +225,73 @@ export default async function TransactionDetailPage({
           description={`Showing ${formatDate(settings.range.from)} to ${formatDate(settings.range.to)}. Widen the dates, or pick another account.`}
         />
       ) : (
-        <Card className="overflow-hidden p-0">
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-28">Date</TableHead>
-                  <TableHead className="w-36">Type</TableHead>
-                  <TableHead className="w-32">Number</TableHead>
-                  <TableHead className="w-44">Name</TableHead>
-                  <TableHead>Memo</TableHead>
-                  <TableHead className="w-40">Split</TableHead>
-                  <TableHead className="numeric w-32">Debit</TableHead>
-                  <TableHead className="numeric w-32">Credit</TableHead>
-                  <TableHead className="numeric w-36">Balance</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {ledger.entries.map((entry) => {
-                  const source = sourceFor(sources, {
-                    sourceType: entry.sourceType as JournalSourceType,
-                    sourceId: entry.sourceId,
-                  })
-
-                  // The document if there is one, the journal if there is not.
-                  // Either way the row leads somewhere that explains the figure.
-                  const href = source.href ?? `/journals/${entry.journalId}`
-                  const number = source.number ?? entry.journalNumber
-
-                  const name = entry.partyName ?? source.partyName
-                  const nameHref = entry.customerId
-                    ? `/customers/${entry.customerId}`
-                    : entry.vendorId
-                      ? `/vendors/${entry.vendorId}`
-                      : source.partyHref
-
-                  return (
-                    <TableRow key={entry.lineId}>
-                      <TableCell className="tabular whitespace-nowrap text-muted-foreground">
-                        {formatDate(toCalendarDate(entry.date))}
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap">
-                        {JOURNAL_SOURCE_LABELS[entry.sourceType as JournalSourceType] ??
-                          entry.sourceType}
-                      </TableCell>
-                      <TableCell>
-                        <Link
-                          href={href}
-                          className="tabular font-medium underline-offset-4 hover:underline"
-                        >
-                          {number}
-                        </Link>
-                        {entry.status === 'REVERSED' ? (
-                          <Badge variant="outline" className="ml-1.5">
-                            reversed
-                          </Badge>
-                        ) : null}
-                      </TableCell>
-                      <TableCell className="truncate">
-                        {name ? (
-                          nameHref ? (
-                            <Link href={nameHref} className="underline-offset-4 hover:underline">
-                              {name}
-                            </Link>
-                          ) : (
-                            name
-                          )
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell>{entry.description ?? entry.memo ?? '—'}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {entry.contraAccounts}
-                      </TableCell>
-                      <TableCell className="numeric tabular">
-                        {entry.debit.isZero() ? '' : formatMoney(entry.debit, currency)}
-                      </TableCell>
-                      <TableCell className="numeric tabular">
-                        {entry.credit.isZero() ? '' : formatMoney(entry.credit, currency)}
-                      </TableCell>
-                      <TableCell className="numeric tabular font-medium">
-                        {formatMoney(entry.balance, currency)}
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-              <TableFooter>
-                <TableRow>
-                  <TableCell colSpan={6}>
-                    Total for {account.code} {account.name}
-                  </TableCell>
-                  <TableCell className="numeric tabular font-semibold">
-                    {formatMoney(
-                      ledger.entries.reduce((sum, entry) => sum.plus(entry.debit), ledger.opening.minus(ledger.opening)),
-                      currency,
-                    )}
-                  </TableCell>
-                  <TableCell className="numeric tabular font-semibold">
-                    {formatMoney(
-                      ledger.entries.reduce((sum, entry) => sum.plus(entry.credit), ledger.opening.minus(ledger.opening)),
-                      currency,
-                    )}
-                  </TableCell>
-                  <TableCell className="numeric tabular font-semibold">
-                    {formatMoney(ledger.closing, currency)}
-                  </TableCell>
-                </TableRow>
-              </TableFooter>
-            </Table>
-          </div>
-        </Card>
+        <InteractiveGrid
+          storageKey={`bp-txn-detail-v3-${accountId}`}
+          columns={columns}
+          rows={ledger.entries.map((entry): InteractiveRow => {
+            const source = sourceFor(sources, {
+              sourceType: entry.sourceType as JournalSourceType,
+              sourceId: entry.sourceId,
+            })
+            // Prefer the source document (expense, bill, invoice…) so a click
+            // opens the transaction the books know — not only the journal behind it.
+            const journalHref = `/journals/${entry.journalId}`
+            const docHref = source.href ?? null
+            const openHref = docHref ?? journalHref
+            const docNumber = source.number ?? null
+            const baseLabel =
+              JOURNAL_SOURCE_LABELS[entry.sourceType as JournalSourceType] ?? entry.sourceType
+            const posRegister =
+              (entry.sourceType === 'SALES_RECEIPT' || entry.sourceType === 'REFUND_RECEIPT') &&
+              entry.sourceId
+                ? (posByDoc.get(entry.sourceId) ?? null)
+                : null
+            const typeLabel = posRegister ? `${baseLabel} (POS)` : baseLabel
+            const parts = postedLineParts({
+              sourceLabel: baseLabel,
+              memo: entry.memo,
+              description: entry.description,
+              partyName: entry.partyName ?? source.partyName,
+            })
+            const nameHref = entry.customerId
+              ? `/customers?id=${entry.customerId}`
+              : entry.vendorId
+                ? `/vendors?id=${entry.vendorId}`
+                : source.partyHref
+            const cells: InteractiveRow['cells'] = {
+              date: { value: entry.recordedAt.toISOString() },
+              type: { value: typeLabel, href: openHref },
+              number: {
+                value: docNumber ?? entry.journalNumber,
+                href: openHref,
+                badge: entry.status === 'REVERSED' ? 'reversed' : null,
+              },
+              name: parts.name ? { value: parts.name, href: nameHref } : { value: null },
+              memo: { value: parts.note },
+              account: { value: entry.contraAccounts || null },
+              debit: { value: entry.debit.isZero() ? null : entry.debit.toString() },
+              credit: { value: entry.credit.isZero() ? null : entry.credit.toString() },
+              balance: { value: entry.balance.toString() },
+            }
+            for (const split of splitList) {
+              const amount = entry.splits.find((item) => item.code === split.code)?.amount
+              cells[`split:${split.code}`] = amount && Number(amount) !== 0 ? { value: amount } : { value: null }
+            }
+            return { id: entry.lineId, cells }
+          })}
+          currency={currency}
+          timeZone={ctx.organization.timeZone}
+          defaultHidden={defaultHidden}
+          customizable
+          totalLabel="Total"
+          footers={[
+            {
+              id: 'closing',
+              label: 'Closing balance',
+              cells: { balance: { value: ledger.closing.toString() } },
+            },
+          ]}
+        />
       )}
     </>
   )

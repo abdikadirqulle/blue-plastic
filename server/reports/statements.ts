@@ -1,26 +1,40 @@
 import 'server-only'
-import type { AccountSubtype } from '@prisma/client'
+import type { AccountSubtype, AccountType } from '@prisma/client'
 
+import { ACCOUNT_SUBTYPE_LABELS } from '@/lib/accounting-labels'
+import { keepChartFamily, linkColonParents, nestChartRows } from '@/lib/chart-tree'
 import type { CalendarDate } from '@/lib/date'
 import { Decimal, ZERO } from '@/lib/money'
 import type { Tx } from '@/server/db'
+import type { ReportEntityFilters } from '@/server/reports/catalogue'
 import {
   accountFigures,
   CASH_SUBTYPES,
+  isProfitAndLoss,
   present,
   sumBy,
   type AccountFigures,
   type ReportRange,
 } from './framework'
+import { journalsForEntityFilters } from './statement-scope'
 
 export type StatementRow = {
   accountId: string
   code: string
   name: string
+  /** Statement class — Assets, Liabilities, Income, … */
+  type: AccountType
+  /** Detail kind within that class — Bank, Operating expense, … */
+  subtype: AccountSubtype
   amount: Decimal
   /** Share of total income, for a profit and loss. */
   percentOfIncome?: Decimal
   comparison?: Decimal
+  /** A heading such as a parent account or a further detail, so the section can fold. */
+  group?: string | null
+  parentId?: string | null
+  /** Nesting depth under the main account (0 = top of the section tree). */
+  depth?: number
 }
 
 export type StatementSection = {
@@ -64,21 +78,41 @@ export type ProfitAndLoss = {
 export async function profitAndLoss(
   orgId: string,
   range: ReportRange,
-  options: { client?: Tx; comparison?: ReportRange } = {},
+  options: {
+    client?: Tx
+    comparison?: ReportRange
+    filters?: ReportEntityFilters
+  } = {},
 ): Promise<ProfitAndLoss> {
+  const journalIds = await journalsForEntityFilters(orgId, options.filters, {
+    client: options.client,
+  })
   // The year-end closing entry is left out: it zeroes the nominal accounts at the
   // year end, and counting it would report a closed year as having earned nothing.
-  const figures = await accountFigures(orgId, range, {
-    client: options.client,
-    excludeClosing: true,
-  })
+  const figures = narrowByAccount(
+    await accountFigures(orgId, range, {
+      client: options.client,
+      excludeClosing: true,
+      movementOnly: true,
+      journalIds,
+    }),
+    options.filters?.accountId,
+  )
   // The comparison inherits the basis unless it names its own, so a cash-basis
   // report cannot quietly compare itself against an accrual-basis period.
   const comparisonFigures = options.comparison
-    ? await accountFigures(
-        orgId,
-        { ...options.comparison, basis: options.comparison.basis ?? range.basis },
-        { client: options.client, excludeClosing: true },
+    ? narrowByAccount(
+        await accountFigures(
+          orgId,
+          { ...options.comparison, basis: options.comparison.basis ?? range.basis },
+          {
+            client: options.client,
+            excludeClosing: true,
+            movementOnly: true,
+            journalIds,
+          },
+        ),
+        options.filters?.accountId,
       )
     : null
 
@@ -87,21 +121,18 @@ export async function profitAndLoss(
   )
 
   const sections = INCOME_GROUPS.map((group) => {
-    const rows: StatementRow[] = figures
-      .filter((row) => group.subtypes.includes(row.subtype))
-      .map((row) => ({
-        accountId: row.accountId,
-        code: row.code,
-        name: row.name,
-        amount: present(row.type, row.movement),
-        comparison: comparisonById.get(row.accountId),
-      }))
-      .filter((row) => !row.amount.isZero() || !(row.comparison ?? ZERO).isZero())
+    const rows = nestStatementRows(
+      figures.filter((row) => group.subtypes.includes(row.subtype)),
+      (row) => present(row.type, row.movement),
+      (row) => comparisonById.get(row.accountId),
+    )
 
     return {
       key: group.key,
       label: group.label,
       rows,
+      // Own posted amounts only (parents are often zero) — never roll up, or the
+      // section total would count each child twice.
       total: sumBy(rows, (row) => row.amount),
       comparisonTotal: comparisonFigures ? sumBy(rows, (row) => row.comparison ?? ZERO) : undefined,
     }
@@ -116,13 +147,13 @@ export async function profitAndLoss(
   const operatingProfit = grossProfit.minus(totalOperatingExpenses)
   const netIncome = operatingProfit.plus(totalOf('otherIncome')).minus(totalOf('otherExpense'))
 
-  // Every line as a share of income, which is how a profit and loss is read once
-  // the absolute numbers stop being surprising.
   for (const section of sections) {
     for (const row of section.rows) {
       row.percentOfIncome = totalIncome.isZero()
         ? ZERO
         : row.amount.dividedBy(totalIncome).times(100).toDecimalPlaces(1)
+      // Detail-type bands — Bank with Bank, Operating expense with Operating expense.
+      row.group = ACCOUNT_SUBTYPE_LABELS[row.subtype]
     }
   }
 
@@ -149,9 +180,91 @@ export async function profitAndLoss(
 
 function netIncomeOf(figures: AccountFigures[]): Decimal {
   return sumBy(
-    figures.filter((row) => row.type === 'REVENUE' || row.type === 'EXPENSE'),
+    figures.filter((row) => isProfitAndLoss(row.type)),
     (row) => (row.type === 'REVENUE' ? present(row.type, row.movement) : present(row.type, row.movement).negated()),
   )
+}
+
+/**
+ * Nest sub-accounts under their main account (parentId, or QBO `Parent:Child`
+ * names), keep zero-balance parents that still have children on the sheet, and
+ * order each section as a tree.
+ */
+/** Keep one account and its parents so the statement tree still nests. */
+function narrowByAccount(
+  figures: AccountFigures[],
+  accountId: string | undefined,
+): AccountFigures[] {
+  if (!accountId) return figures
+  const byId = new Map(figures.map((row) => [row.accountId, row]))
+  if (!byId.has(accountId)) {
+    return figures.map((row) => ({
+      ...row,
+      movement: ZERO,
+      closing: ZERO,
+      opening: ZERO,
+    }))
+  }
+  const keep = new Set<string>()
+  let cursor: string | null | undefined = accountId
+  while (cursor) {
+    keep.add(cursor)
+    cursor = byId.get(cursor)?.parentId
+  }
+  // Children of the picked account (and their children) stay so a parent filter
+  // still shows the detail underneath.
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const row of figures) {
+      if (row.parentId && keep.has(row.parentId) && !keep.has(row.accountId)) {
+        keep.add(row.accountId)
+        grew = true
+      }
+    }
+  }
+  return figures.map((row) =>
+    keep.has(row.accountId)
+      ? row
+      : { ...row, movement: ZERO, closing: ZERO, opening: ZERO },
+  )
+}
+
+function nestStatementRows(
+  figures: AccountFigures[],
+  amountOf: (row: AccountFigures) => Decimal,
+  comparisonOf?: (row: AccountFigures) => Decimal | undefined,
+): StatementRow[] {
+  const linked = linkColonParents(
+    figures.map((row) => ({
+      id: row.accountId,
+      parentId: row.parentId,
+      code: row.code,
+      name: row.name,
+      type: row.type,
+      subtype: row.subtype,
+      amount: amountOf(row),
+      comparison: comparisonOf?.(row),
+    })),
+  )
+
+  const active = linked.filter(
+    (row) => !row.amount.isZero() || !(row.comparison ?? ZERO).isZero(),
+  )
+  const family = keepChartFamily(linked, active)
+  const nested = nestChartRows(family)
+
+  return nested.map(({ id, treeDepth, parentId, code, name, type, subtype, amount, comparison }) => ({
+    accountId: id,
+    parentId,
+    depth: treeDepth,
+    code,
+    name,
+    type,
+    subtype,
+    amount,
+    comparison,
+  }))
 }
 
 /* --- Balance sheet -------------------------------------------------------- */
@@ -193,6 +306,13 @@ export type BalanceSheet = {
   /** assets − liabilities − equity. Must be zero. */
   difference: Decimal
   balanced: boolean
+  comparison?: {
+    asOf: CalendarDate
+    totalAssets: Decimal
+    totalLiabilities: Decimal
+    accumulatedProfit: Decimal
+    totalEquity: Decimal
+  }
 }
 
 /**
@@ -215,41 +335,87 @@ export type BalanceSheet = {
 export async function balanceSheet(
   orgId: string,
   asOf: CalendarDate,
-  options: { client?: Tx; basis?: 'accrual' | 'cash' } = {},
+  options: {
+    client?: Tx
+    basis?: 'accrual' | 'cash'
+    filters?: ReportEntityFilters
+    /** Prior statement date for a QBD-style column comparison. */
+    comparisonAsOf?: CalendarDate
+  } = {},
 ): Promise<BalanceSheet> {
-  const figures = await accountFigures(
-    orgId,
-    { from: '1900-01-01', to: asOf, basis: options.basis },
-    { client: options.client },
+  const journalIds = await journalsForEntityFilters(orgId, options.filters, {
+    client: options.client,
+  })
+  const [figures, comparisonFigures] = await Promise.all([
+    accountFigures(
+      orgId,
+      { from: '1900-01-01', to: asOf, basis: options.basis },
+      { client: options.client, journalIds },
+    ).then((rows) => narrowByAccount(rows, options.filters?.accountId)),
+    options.comparisonAsOf
+      ? accountFigures(
+          orgId,
+          { from: '1900-01-01', to: options.comparisonAsOf, basis: options.basis },
+          { client: options.client, journalIds },
+        ).then((rows) => narrowByAccount(rows, options.filters?.accountId))
+      : Promise.resolve(null),
+  ])
+
+  const comparisonById = new Map(
+    (comparisonFigures ?? []).map((row) => [row.accountId, present(row.type, row.closing)]),
   )
 
   const sections = BALANCE_GROUPS.map((group) => {
-    const rows = figures
-      .filter((row) => group.subtypes.includes(row.subtype))
-      .map((row) => ({
-        accountId: row.accountId,
-        code: row.code,
-        name: row.name,
-        amount: present(row.type, row.closing),
-      }))
-      .filter((row) => !row.amount.isZero())
+    const rows = nestStatementRows(
+      figures.filter((row) => group.subtypes.includes(row.subtype)),
+      (row) => present(row.type, row.closing),
+      comparisonFigures ? (row) => comparisonById.get(row.accountId) ?? ZERO : undefined,
+    )
+    for (const row of rows) {
+      row.group = ACCOUNT_SUBTYPE_LABELS[row.subtype]
+    }
 
-    return { key: group.key, label: group.label, rows, total: sumBy(rows, (row) => row.amount) }
+    return {
+      key: group.key,
+      label: group.label,
+      rows,
+      total: sumBy(rows, (row) => row.amount),
+      comparisonTotal: comparisonFigures
+        ? sumBy(rows, (row) => row.comparison ?? ZERO)
+        : undefined,
+    }
   })
 
   const totalOf = (key: string) => sections.find((section) => section.key === key)?.total ?? ZERO
+  const comparisonTotalOf = (key: string) =>
+    sections.find((section) => section.key === key)?.comparisonTotal ?? ZERO
 
   const totalAssets = totalOf('currentAssets').plus(totalOf('fixedAssets'))
   const totalLiabilities = totalOf('currentLiabilities').plus(totalOf('longTermLiabilities'))
   const postedEquity = totalOf('equity')
 
-  const accumulatedProfit = sumBy(
-    figures.filter((row) => row.type === 'REVENUE' || row.type === 'EXPENSE'),
-    (row) => (row.type === 'REVENUE' ? present(row.type, row.closing) : present(row.type, row.closing).negated()),
-  )
+  const profitOf = (rows: AccountFigures[]) =>
+    sumBy(rows.filter((row) => isProfitAndLoss(row.type)), (row) =>
+      row.type === 'REVENUE'
+        ? present(row.type, row.closing)
+        : present(row.type, row.closing).negated(),
+    )
 
+  const accumulatedProfit = profitOf(figures)
   const totalEquity = postedEquity.plus(accumulatedProfit)
   const difference = totalAssets.minus(totalLiabilities).minus(totalEquity)
+
+  const comparison = comparisonFigures && options.comparisonAsOf
+    ? {
+        asOf: options.comparisonAsOf,
+        totalAssets: comparisonTotalOf('currentAssets').plus(comparisonTotalOf('fixedAssets')),
+        totalLiabilities: comparisonTotalOf('currentLiabilities').plus(
+          comparisonTotalOf('longTermLiabilities'),
+        ),
+        accumulatedProfit: profitOf(comparisonFigures),
+        totalEquity: comparisonTotalOf('equity').plus(profitOf(comparisonFigures)),
+      }
+    : undefined
 
   return {
     asOf,
@@ -261,6 +427,7 @@ export async function balanceSheet(
     totalEquity,
     difference,
     balanced: difference.isZero(),
+    comparison,
   }
 }
 
@@ -308,7 +475,7 @@ const SECTION_FOR: Record<AccountSubtype, CashFlowSection> = {
   UNDEPOSITED_FUNDS: 'operating',
 }
 
-export type CashFlowLine = { label: string; amount: Decimal }
+export type CashFlowLine = { accountId: string; label: string; amount: Decimal }
 
 export type CashFlow = {
   range: ReportRange
@@ -346,12 +513,19 @@ export type CashFlow = {
 export async function cashFlow(
   orgId: string,
   range: ReportRange,
-  options: { client?: Tx } = {},
+  options: { client?: Tx; filters?: ReportEntityFilters } = {},
 ): Promise<CashFlow> {
-  const figures = await accountFigures(orgId, range, {
+  const journalIds = await journalsForEntityFilters(orgId, options.filters, {
     client: options.client,
-    excludeClosing: true,
   })
+  const figures = narrowByAccount(
+    await accountFigures(orgId, range, {
+      client: options.client,
+      excludeClosing: true,
+      journalIds,
+    }),
+    options.filters?.accountId,
+  )
 
   const isCash = (row: AccountFigures) => CASH_SUBTYPES.includes(row.subtype)
   const cashAccounts = figures.filter(isCash)
@@ -362,7 +536,7 @@ export async function cashFlow(
   const actualChange = closingCash.minus(openingCash)
 
   const netIncome = sumBy(
-    nonCash.filter((row) => row.type === 'REVENUE' || row.type === 'EXPENSE'),
+    nonCash.filter((row) => isProfitAndLoss(row.type)),
     (row) => row.movement.negated(),
   )
 
@@ -373,10 +547,14 @@ export async function cashFlow(
   }
 
   for (const row of nonCash) {
-    if (row.type === 'REVENUE' || row.type === 'EXPENSE') continue
+    if (isProfitAndLoss(row.type)) continue
     const contribution = row.movement.negated()
     if (contribution.isZero()) continue
-    buckets[SECTION_FOR[row.subtype]].push({ label: `${row.code} ${row.name}`, amount: contribution })
+    buckets[SECTION_FOR[row.subtype]].push({
+      accountId: row.accountId,
+      label: `${row.code} ${row.name}`,
+      amount: contribution,
+    })
   }
 
   const operatingTotal = netIncome.plus(sumBy(buckets.operating, (line) => line.amount))

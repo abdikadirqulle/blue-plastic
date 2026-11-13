@@ -1,6 +1,8 @@
 'use client'
 
 import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from 'react'
+
+import { usePropState } from '@/lib/use-prop-state'
 import { useRouter } from 'next/navigation'
 import { AlertTriangleIcon, TicketPercentIcon } from 'lucide-react'
 import { toast } from 'sonner'
@@ -9,6 +11,8 @@ import { idleState } from '@/components/forms/action-state'
 import { AccountPicker } from '@/components/forms/account-picker'
 import { EntityPicker } from '@/components/forms/entity-picker'
 import { Field, fieldProps } from '@/components/forms/field'
+import { LockedNumber } from '@/components/forms/locked-number'
+import { useDuplicatePrompt } from '@/components/forms/duplicate-prompt'
 import { FormStatus } from '@/components/forms/form-status'
 import { SubmitButton } from '@/components/forms/submit-button'
 import { Button } from '@/components/ui/button'
@@ -74,17 +78,24 @@ export function BillPaymentForm({
   today,
   currency,
   loadPayables,
+  documentNumber,
+  initialVendorId,
 }: {
   vendors: Option[]
   paymentAccounts: AccountPickerOption[]
   today: string
   currency: string
   loadPayables: (vendorId: string) => Promise<Payables>
+  documentNumber: string
+  /** Set when a vendor page opened this form, so the vendor and their open bills load at once. */
+  initialVendorId?: string
 }) {
   const router = useRouter()
   const [state, formAction] = useActionState(saveBillPaymentForm, idleState)
+  const { acknowledge, formRef, beforeSubmit } = useDuplicatePrompt(state)
 
-  const [vendorId, setVendorId] = useState('')
+  const [number, setNumber] = usePropState(documentNumber)
+  const [vendorId, setVendorId] = useState(initialVendorId ?? '')
   const [date, setDate] = useState(today)
   const [method, setMethod] = useState('BANK_TRANSFER')
   const [paymentAccountId, setPaymentAccountId] = useState(paymentAccounts[0]?.id ?? '')
@@ -114,6 +125,13 @@ export function BillPaymentForm({
       setBills(payables.bills)
       setCredits(payables.credits)
     })
+
+  useEffect(() => {
+    if (!initialVendorId) return
+    refresh(initialVendorId)
+    // The vendor page already chose who is being paid. Load their open bills once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const chooseVendor = (id: string) => {
     setVendorId(id)
@@ -160,32 +178,51 @@ export function BillPaymentForm({
 
   const overApplied = bills.some((bill) => amountFor(bill.id).greaterThan(new Decimal(bill.balance)))
 
-  const payload = JSON.stringify({
-    vendorId,
-    date,
-    // The payment is exactly what is being settled: batch payment is the point.
-    amount: appliedTotal.toFixed(2),
-    method,
-    paymentAccountId,
-    reference,
-    memo,
-    applications: bills
-      .filter((bill) => amountFor(bill.id).greaterThan(0))
-      .map((bill) => ({ billId: bill.id, amount: amountFor(bill.id).toFixed(2) })),
-  })
+  const payloadInput = useRef<HTMLInputElement>(null)
+  const payloadFor = () =>
+    JSON.stringify({
+      number,
+      vendorId,
+      date,
+      // The payment is exactly what is being settled: batch payment is the point.
+      amount: appliedTotal.toFixed(2),
+      method,
+      paymentAccountId,
+      reference,
+      memo,
+      acknowledgeDuplicate: acknowledge.current,
+      applications: bills
+        .filter((bill) => amountFor(bill.id).greaterThan(0))
+        .map((bill) => ({ billId: bill.id, amount: amountFor(bill.id).toFixed(2) })),
+    })
 
   const canSave =
     vendorId !== '' && paymentAccountId !== '' && appliedTotal.greaterThan(0) && !overApplied
 
   return (
-    <form action={formAction} className="space-y-4">
-      <input type="hidden" name="payload" value={payload} />
+    <form
+      ref={formRef}
+      action={formAction}
+      className="space-y-2"
+      onSubmit={() => {
+        beforeSubmit()
+        if (payloadInput.current) payloadInput.current.value = payloadFor()
+      }}
+    >
+      <input ref={payloadInput} type="hidden" name="payload" defaultValue={payloadFor()} />
 
       <Card>
-        <CardContent className="space-y-4 p-4">
+        <CardContent className="space-y-3 p-3 sm:p-4">
           <FormStatus state={state} />
 
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <LockedNumber
+              label="Payment number"
+              value={number}
+              onChange={setNumber}
+              error={state.fieldErrors?.number}
+            />
+
             <Field name="vendorId" label="Vendor" required error={state.fieldErrors?.vendorId}>
               <EntityPicker
                 id="vendorId"

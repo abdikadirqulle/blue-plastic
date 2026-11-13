@@ -12,7 +12,7 @@ import { readSettings, settingsToQueryObject, type SearchParams } from '../param
 
 const SORTABLE = ['name', 'count', 'quantity', 'amount'] as const
 
-export const metadata: Metadata = { title: 'Expenses by category' }
+export const metadata: Metadata = { title: 'Expenses by Account' }
 
 export default async function ExpensesByCategoryPage({
   searchParams,
@@ -30,7 +30,8 @@ export default async function ExpensesByCategoryPage({
   return (
     <>
       <PageHeader
-        title="Expenses by category"
+        organization={ctx.organization}
+        title="Expenses by Account"
         description={`${formatDate(settings.range.from)} to ${formatDate(settings.range.to)} · from the ledger, however it was entered`}
       />
 
@@ -45,8 +46,7 @@ export default async function ExpensesByCategoryPage({
       />
 
       <Card className="overflow-hidden p-0">
-        <div className="overflow-x-auto">
-          <RankedTable
+        <RankedTable
             sort={sort}
             basePath="/reports/expenses-by-category"
             linkParams={linkParams}
@@ -60,7 +60,6 @@ export default async function ExpensesByCategoryPage({
             }
             empty="No expenses were recorded in this period."
           />
-        </div>
       </Card>
     </>
   )

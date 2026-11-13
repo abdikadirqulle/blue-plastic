@@ -61,8 +61,8 @@ export const SYSTEM_ACCOUNT_ROLES: SystemAccountRole[] = [
   {
     key: 'COGS',
     label: 'Cost of goods sold',
-    used: 'The default cost account for a tracked item sold, when the item does not name its own.',
-    types: ['EXPENSE'],
+    used: 'Every product and inventory sale posts its cost here, at the system cost, under the name Cost of Goods Sold.',
+    types: ['COGS'],
     subtypes: ['COST_OF_GOODS_SOLD'],
   },
   {
@@ -104,7 +104,7 @@ export const SYSTEM_ACCOUNT_ROLES: SystemAccountRole[] = [
     key: 'INVENTORY_SHRINKAGE',
     label: 'Inventory shrinkage',
     used: 'The difference when a stock count disagrees with the books.',
-    types: ['EXPENSE'],
+    types: ['COGS', 'EXPENSE'],
     subtypes: ['COST_OF_GOODS_SOLD', 'OPERATING_EXPENSE', 'OTHER_EXPENSE'],
   },
   {
@@ -121,14 +121,62 @@ export const SYSTEM_ACCOUNT_ROLES: SystemAccountRole[] = [
     types: ['EXPENSE', 'REVENUE'],
     subtypes: ['OTHER_EXPENSE', 'OTHER_INCOME'],
   },
+  {
+    key: 'POS_CASH_SHORT',
+    label: 'POS cash short',
+    used: 'When a till is closed with less cash than expected, the shortfall posts here.',
+    types: ['EXPENSE'],
+    subtypes: ['OPERATING_EXPENSE', 'OTHER_EXPENSE'],
+  },
+  {
+    key: 'POS_CASH_OVER',
+    label: 'POS cash over',
+    used: 'When a till is closed with more cash than expected, the surplus posts here.',
+    types: ['REVENUE'],
+    subtypes: ['OTHER_INCOME', 'INCOME'],
+  },
+  {
+    key: 'TIP_LIABILITY',
+    label: 'Tips payable',
+    used: 'Tips collected at POS and held for staff payout. Not revenue.',
+    types: ['LIABILITY'],
+    subtypes: ['OTHER_CURRENT_LIABILITY'],
+  },
+  {
+    key: 'RETENTION_RECEIVABLE',
+    label: 'Contract retention receivable',
+    used: 'Progress bill retention held by the customer until released to AR.',
+    types: ['ASSET'],
+    subtypes: ['OTHER_CURRENT_ASSET', 'OTHER_ASSET'],
+  },
+  {
+    key: 'UNEARNED_REVENUE',
+    label: 'Unearned revenue',
+    used: 'Subscription and rental invoices deferred until the service period is earned.',
+    types: ['LIABILITY'],
+    subtypes: ['OTHER_CURRENT_LIABILITY'],
+  },
 ]
 
 export type SystemAccountBinding = {
   role: SystemAccountRole
-  account: { id: string; code: string; name: string; isActive: boolean } | null
+  account: {
+    id: string
+    code: string
+    name: string
+    type: AccountType
+    isActive: boolean
+    /** True when sub-accounts were nested under this binding — nothing can post here. */
+    isHeading: boolean
+  } | null
   /** Postings already sitting in the bound account. */
   entries: number
-  candidates: { id: string; code: string; name: string }[]
+  candidates: {
+    id: string
+    code: string
+    name: string
+    type: AccountType
+  }[]
 }
 
 export async function list(ctx: OrgContext): Promise<SystemAccountBinding[]> {
@@ -155,7 +203,14 @@ export async function list(ctx: OrgContext): Promise<SystemAccountBinding[]> {
     return {
       role,
       account: account
-        ? { id: account.id, code: account.code, name: account.name, isActive: account.isActive }
+        ? {
+            id: account.id,
+            code: account.code,
+            name: account.name,
+            type: account.type,
+            isActive: account.isActive,
+            isHeading: account._count.children > 0,
+          }
         : null,
       entries: account?._count.journalLines ?? 0,
       candidates: accounts
@@ -167,7 +222,12 @@ export async function list(ctx: OrgContext): Promise<SystemAccountBinding[]> {
             role.types.includes(candidate.type) &&
             role.subtypes.includes(candidate.subtype),
         )
-        .map((candidate) => ({ id: candidate.id, code: candidate.code, name: candidate.name })),
+        .map((candidate) => ({
+          id: candidate.id,
+          code: candidate.code,
+          name: candidate.name,
+          type: candidate.type,
+        })),
     }
   })
 }

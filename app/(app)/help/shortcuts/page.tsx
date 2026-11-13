@@ -19,7 +19,7 @@ export default async function ShortcutsPage() {
     <>
       <PageHeader
         title="Keyboard shortcuts"
-        description="Two keys, pressed one after the other: g to go somewhere, c to create something. Shortcuts are ignored while you are typing in a field."
+        description="Press g, then a letter, to go somewhere. Press c, then a letter, to create something. On an invoice or bill, Tab walks the form from the name field; Ctrl+S saves without the mouse."
       />
 
       <div className="grid gap-4 md:grid-cols-3">
